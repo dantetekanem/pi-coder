@@ -2200,8 +2200,8 @@ export class ReviewApp {
   private ensureLineSelection(): void {
     const file = this.activeFile();
     if (file == null) return;
-    const visibleTargets = this.getVisibleLineTargets(file.id, this.state.activeScope);
-    this.state = clampSelectedLineTarget(this.state, file.id, this.state.activeScope, visibleTargets);
+    const movementTargets = this.getDiffMovementTargets(file.id, this.state.activeScope);
+    this.state = clampSelectedLineTarget(this.state, file.id, this.state.activeScope, movementTargets);
   }
 
   private revalidateDraftAnchors(fileId: string, scope: ReviewScope, contents: ReviewFileContents): void {

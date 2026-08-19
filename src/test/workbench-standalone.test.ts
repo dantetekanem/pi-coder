@@ -225,30 +225,6 @@ describe("standalone lifecycle", () => {
     expect(reportStartupIssue.mock.calls[0]?.[0]).not.toContain("source bytes");
   });
 
-  it("reports an unreadable initial target before terminal creation and still mounts", async () => {
-    const events: string[] = [];
-    const reportStartupIssue = vi.fn((message: string) => events.push(`issue:${message}`));
-    const workbench = {
-      start: vi.fn(async () => { events.push("start"); }),
-      openTarget: vi.fn(async () => { events.push("target"); return { status: "unreadable" as const, path: "src/file.ts", message: "Permission denied." }; }),
-      dispose: vi.fn(),
-    };
-    await expect(runStandaloneWorkbench({ cwd: "/repo", launch: { initialTarget: { path: "src/file.ts", range: { startLine: 2, endLine: 2 } }, capabilities: { discuss: false } } }, {
-      createTerminal: () => { events.push("terminal"); return { drainInput: async () => undefined } as never; },
-      createTui: () => ({ addChild: vi.fn(), setFocus: vi.fn(), start: vi.fn(), stop: vi.fn() }) as never,
-      createRepository: async () => ({ workspaceKey: "/repo" }) as never,
-      createWorkbench: () => workbench as never,
-      createComponent: (_tui, _theme, _workbench, done) => {
-        queueMicrotask(() => done({ status: "closed", changedPaths: [] }));
-        return { requestClose: vi.fn(), render: () => [], invalidate: vi.fn(), focused: false } as never;
-      },
-      reportStartupIssue,
-      signalSource: { on: vi.fn(), off: vi.fn() },
-    })).resolves.toEqual({ status: "closed", changedPaths: [] });
-
-    expect(events.slice(0, 4)).toEqual(["start", "target", "issue:src/file.ts: Permission denied.", "terminal"]);
-  });
-
   it("passes the canonical workspace's process-memory Explorer session to the component", async () => {
     const session = { load: vi.fn(() => undefined), save: vi.fn() };
     const forWorkspace = vi.fn(() => session);

@@ -108,20 +108,13 @@ describe("review state", () => {
     expect(getLineComment(state, "src/a.ts", "git-diff", "deleted", 12)?.body).toBe("Removed note");
   });
 
-  it("persists a modify intent on a line comment", () => {
-    const files = [makeFile("src/a.ts")];
-    let state = createInitialReviewState(files);
-    state = upsertLineComment(state, "src/a.ts", "git-diff", "added", 12, "user = fetchUser(id)", "modify");
-
-    expect(getLineComment(state, "src/a.ts", "git-diff", "added", 12)?.intent).toBe("modify");
-  });
-
-  it("captures the original line text on a modify edit", () => {
+  it("captures the modify intent and original line text", () => {
     const files = [makeFile("src/a.ts")];
     let state = createInitialReviewState(files);
     state = upsertLineComment(state, "src/a.ts", "git-diff", "added", 12, "const x = compute(1, true)", "modify", 12, "const x = compute(1)");
 
     const comment = getLineComment(state, "src/a.ts", "git-diff", "added", 12);
+    expect(comment?.intent).toBe("modify");
     expect(comment?.originalText).toBe("const x = compute(1)");
     expect(comment?.body).toBe("const x = compute(1, true)");
   });

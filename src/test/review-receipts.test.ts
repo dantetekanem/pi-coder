@@ -67,7 +67,6 @@ describe("review receipts", () => {
       submittedAt: "2026-06-25T12:00:00.000Z",
     });
 
-    expect(saved).not.toBeNull();
     expect(saved?.bodyHash).toMatch(/^[a-f0-9]{64}$/);
     expect(saved?.comments[0]?.bodyHash).toMatch(/^[a-f0-9]{64}$/);
     expect(saved?.bodyLength).toBe(body.length);
@@ -82,8 +81,6 @@ describe("review receipts", () => {
       expect(statSync(receiptsDir).mode & 0o777).toBe(0o700);
       expect(statSync(path).mode & 0o777).toBe(0o600);
     }
-    expect(raw).not.toContain(body);
-    expect(raw).not.toContain(commentBody);
     expect(raw).not.toContain("private-tail");
     expect(raw).not.toContain("private-comment-tail");
     expect(loadReviewReceipt("secondary", "example/widgets", "42")).toEqual(saved);

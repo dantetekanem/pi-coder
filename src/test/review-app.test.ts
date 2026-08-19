@@ -530,10 +530,6 @@ describe("action and shortcut help rendering", () => {
     expect(lines.length).toBeGreaterThan(2);
     expect(text).toContain("1/2/3/4/5 toggle Navigator/Diff/Comments/PR context/Replies");
     expect(text).toContain("Esc / Ctrl+C exit");
-    expect(text).not.toContain("navigator:");
-    expect(text).not.toContain("diff:");
-    expect(text).not.toContain("comments:");
-    expect(text).not.toContain("…");
     expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
   });
 

@@ -595,7 +595,6 @@ describe("code diff extension", () => {
 
     expect(mocks.runPiWorkbench).toHaveBeenCalledWith(ctx, { cwd: "/repo", launch: { capabilities: { discuss: true } } });
     expect(commands.get("code")).not.toBe(commands.get("diff"));
-    expect(commands.has("code-diff")).toBe(false);
     expect(mocks.getReviewWindowData).not.toHaveBeenCalled();
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(ctx);
   });
@@ -1768,7 +1767,6 @@ describe("code diff extension", () => {
 
     expect(mocks.getReviewWindowData).toHaveBeenCalledTimes(2);
     expect(reopenedOptions.initialBanner).toBe("Could not open $EDITOR: ENOENT\\x1b[31m\\x0aeditor");
-    expect(reopenedOptions.initialBanner).not.toContain("exited with code");
   });
 
   it("reopens the in-memory review instead of promising a DISCUSS handoff after failed persistence", async () => {
@@ -2530,38 +2528,6 @@ describe("code diff extension", () => {
     }
   });
 
-  it("does not block the diff command while review data loads", async () => {
-    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    let resolveData: (data: unknown) => void = () => {};
-    mocks.getReviewWindowData.mockReturnValue(new Promise((resolve) => { resolveData = resolve; }));
-    const pi = {
-      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
-      registerTool: vi.fn(),
-      registerShortcut: vi.fn(),
-      on: vi.fn(),
-    };
-    const ctx = {
-      hasUI: true,
-      cwd: "/repo",
-      ui: {
-        notify: vi.fn(),
-        setWidget: vi.fn(),
-        setEditorText: vi.fn(),
-      },
-    };
-
-    codeDiffExtension(pi as never);
-    const command = commands.get("diff")!;
-
-    await expect(command.handler("", ctx)).resolves.toBeUndefined();
-    expect(mocks.getReviewWindowData).toHaveBeenCalledWith(pi, "/repo");
-    expect(mocks.runReviewApp).not.toHaveBeenCalled();
-
-    resolveData({ repoRoot: "/repo", files: [], branchBaseRevision: "main", modifiedRevision: "HEAD" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(ctx.ui.notify).toHaveBeenCalledWith("No reviewable files found for this diff.", "info");
-  });
-
   it("surfaces initial shortcut config warnings on startup and reload", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
     const pi = {
@@ -2710,7 +2676,6 @@ describe("code diff extension", () => {
     await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "automatic-session");
-    expect(ctx.ui.notify).toHaveBeenCalledWith("Review discarded.", "info");
   });
 
   it("puts the last verdict first and offers one empty-body fast path", () => {

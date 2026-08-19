@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 - 2026-08-19
+
+### Changed
+
+- Document `/review` alongside `/diff` and explain how `/code` keeps developers in a lightweight human-agent coding loop.
+
+### Fixed
+
+- Select the first changed row when opening a file whose diff begins with unchanged context.
+- Keep the repository footer focused on `/diff` and avoid reporting a discard when no useful feedback was produced.
+
 ## 0.4.3 - 2026-08-19
 
 ### Fixed

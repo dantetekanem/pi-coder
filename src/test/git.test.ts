@@ -202,7 +202,6 @@ describe("git helpers", () => {
     const data = await getReviewWindowData({ exec } as never, "/repo");
 
     expect(data.files).toHaveLength(MAX_REVIEW_FILE_COUNT);
-    expect(data.files.some((file) => file.path === currentPath && file.inGitDiff)).toBe(true);
     expect(data.files.filter((file) => file.inGitDiff).map((file) => file.path)).toEqual([currentPath]);
   });
 

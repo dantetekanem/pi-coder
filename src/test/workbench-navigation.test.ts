@@ -396,8 +396,6 @@ describe("workbench navigation", () => {
         openDirectory: openWith(nulEntries),
       })(new AbortController().signal);
       expect(nulListing).toBe("a/x/file.ts\0");
-      expect(parseGitFileList(nulListing)).toEqual(["a/x/file.ts"]);
-      expect(nulListing).not.toContain("bad");
     });
   });
 

@@ -220,7 +220,7 @@ export function formatRepositoryChangeSummary(summary: RepositoryChangeSummary |
   if (summary.additions != null && summary.deletions != null && (summary.additions > 0 || summary.deletions > 0)) {
     parts.push(`${ANSI_GREEN}+${summary.additions}${ANSI_RESET} ${ANSI_RED}−${summary.deletions}${ANSI_RESET}`);
   }
-  return `${parts.join(" · ")} · ${ANSI_PINK}/diff or /review${ANSI_RESET} for details`;
+  return `${parts.join(" · ")} · ${ANSI_PINK}/diff${ANSI_RESET} for details`;
 }
 
 export interface RepositoryChangeStatusContext {

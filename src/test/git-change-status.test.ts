@@ -137,14 +137,11 @@ describe("repository change footer status", () => {
 
   it("formats dirty repositories with exact ANSI colors and resets each segment", () => {
     const formatted = formatRepositoryChangeSummary({ files: 29, filesCapped: false, additions: 344, deletions: 723, untrackedFiles: 4 });
-    expect(formatted).toBe("29 files · \x1b[32m+344\x1b[0m \x1b[31m−723\x1b[0m · \x1b[95m/diff or /review\x1b[0m for details");
-    expect(formatted?.replace(/\x1b\[[0-9;]*m/g, "")).toBe("29 files · +344 −723 · /diff or /review for details");
-    expect(formatted?.match(/\x1b\[[0-9;]*m/g)).toEqual(["\x1b[32m", "\x1b[0m", "\x1b[31m", "\x1b[0m", "\x1b[95m", "\x1b[0m"]);
-
+    expect(formatted).toBe("29 files · \x1b[32m+344\x1b[0m \x1b[31m−723\x1b[0m · \x1b[95m/diff\x1b[0m for details");
     expect(formatRepositoryChangeSummary({ files: 2, filesCapped: false, additions: 0, deletions: 0, untrackedFiles: 2 }))
-      .toBe("2 files · \x1b[95m/diff or /review\x1b[0m for details");
+      .toBe("2 files · \x1b[95m/diff\x1b[0m for details");
     expect(formatRepositoryChangeSummary({ files: 200, filesCapped: true, additions: 5, deletions: 1, untrackedFiles: 3 }))
-      .toBe("200+ files · \x1b[32m+5\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff or /review\x1b[0m for details");
+      .toBe("200+ files · \x1b[32m+5\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff\x1b[0m for details");
     expect(formatRepositoryChangeSummary({ files: 0, filesCapped: false, additions: 0, deletions: 0, untrackedFiles: 0 }))
       .toBeUndefined();
     expect(formatRepositoryChangeSummary(null)).toBeUndefined();
@@ -194,8 +191,8 @@ describe("repository change footer status", () => {
     second.resolve({ files: 2, filesCapped: false, additions: 1, deletions: 1, untrackedFiles: 0 });
     await Promise.all([firstRefresh, secondRefresh]);
 
-    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", "2 files · \x1b[32m+1\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff or /review\x1b[0m for details");
-    expect(setStatus).not.toHaveBeenCalledWith("pi-code-diff-local-changes", "9 files · \x1b[32m+9\x1b[0m \x1b[31m−0\x1b[0m · \x1b[95m/diff or /review\x1b[0m for details");
+    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", "2 files · \x1b[32m+1\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff\x1b[0m for details");
+    expect(setStatus).not.toHaveBeenCalledWith("pi-code-diff-local-changes", "9 files · \x1b[32m+9\x1b[0m \x1b[31m−0\x1b[0m · \x1b[95m/diff\x1b[0m for details");
 
     load.mockResolvedValueOnce({ files: 0, filesCapped: false, additions: 0, deletions: 0, untrackedFiles: 0 });
     await controller.refresh(ctx);

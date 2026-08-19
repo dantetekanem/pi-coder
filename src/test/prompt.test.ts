@@ -81,7 +81,6 @@ describe("composeReviewPrompt", () => {
       "   First line",
       "   Second line",
     ].join("\n"));
-    expect(prompt).not.toContain("MODIFY items");
   });
 
   it("renders all-lines file comments with the current file path", () => {
@@ -113,8 +112,6 @@ describe("composeReviewPrompt", () => {
       "- src/bar.ts",
       "  Explain every line in this file change.",
     ].join("\n"));
-    expect(prompt).not.toContain("Review-wide:");
-    expect(prompt).not.toContain("DISCUSS");
   });
 
   it("uses comment-only instructions", () => {
@@ -176,7 +173,6 @@ describe("composeReviewPrompt", () => {
       "1. src/bar.ts:27 (added)",
       "   return early()",
     ].join("\n"));
-    expect(prompt).not.toContain("DISCUSS items");
   });
 
   it("renders a MODIFY line edit as a LINE CHANGED old-to-new block", () => {

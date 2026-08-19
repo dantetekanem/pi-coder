@@ -1107,9 +1107,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         }
         if (result.disposition === "discard") {
           deleteReviewSession(sessionIdentity, sessionId);
-          const message = "Review discarded.";
-          ctx.ui.notify(message, "info");
-          return { started: true, message };
+          return { started: true };
         }
         if (latestSession != null && !latestSessionDurable) {
           latestSessionDurable = saveReviewSessionWithStatus(sessionIdentity, latestSession, { ...sessionContext, id: sessionId }).saved;

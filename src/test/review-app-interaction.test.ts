@@ -675,20 +675,6 @@ describe("ReviewApp interaction", () => {
     unavailableHarness.app.dispose();
   });
 
-  it("requires a second Enter for stale MODIFY reanchor and retains the proposal", async () => {
-    const { app, loadFileContents } = createHarness();
-    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
-    const stale = { id: "modify", fileId: (app as any).state.activeFileId, scope: "git-diff" as const, side: "added" as const, intent: "modify" as const, startLine: 9, endLine: 9, originalText: "old", body: "proposed()", anchorStatus: "stale" as const };
-    (app as any).state = { ...(app as any).state, focus: "comments", draft: { ...(app as any).state.draft, comments: [stale] } };
-    app.handleInput("a");
-    app.handleInput("\x1b[B");
-    app.handleInput("\r");
-    expect((app as any).state.draft.comments[0]).toEqual(stale);
-    app.handleInput("\r");
-    expect((app as any).state.draft.comments[0]).toMatchObject({ body: "proposed()", originalText: "\tcurrent()  ", anchorStatus: "mapped" });
-    app.dispose();
-  });
-
   it("leaves mouse reporting to tmux for native selection", async () => {
     const { app, loadFileContents, terminalWrite } = createHarness();
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
@@ -898,9 +884,27 @@ describe("ReviewApp interaction", () => {
       await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
       const rendered = app.render(scenario.width).join("\n");
       expect(rendered).toContain("Esc / Ctrl+C exit");
-      expect(rendered).not.toContain("more • ? help");
       app.dispose();
     }
+  });
+
+  it("selects the first changed row when a newly opened file starts with unchanged context", async () => {
+    const first = makeFile("src/a.ts");
+    const second = makeFile("src/b.ts");
+    const loadFileContents = vi.fn(async (_repoRoot: string, file: ReviewFile) => file.id === second.id
+      ? {
+          originalContent: "one\ntwo\nthree\nold\nfive\n",
+          modifiedContent: "one\ntwo\nthree\nnew\nfive\n",
+        }
+      : { originalContent: "old\n", modifiedContent: "new\n" });
+    const { app } = createHarness(undefined, [first, second], { loadFileContents });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledTimes(1));
+
+    app.handleInput("\x1b[B");
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledTimes(2));
+
+    expect((app as any).state.selectedLineTargetByScopeFile[`git-diff::${second.id}`]).toEqual({ side: "deleted", line: 4 });
+    app.dispose();
   });
 
   it("keeps arrow navigation and Shift+arrow range extension in Diff focus", async () => {

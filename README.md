@@ -2,7 +2,7 @@
 
 `pi-coder` adds two full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono):
 
-- `/diff` reviews local changes, commits, branches, ranges, and configured remote pull requests.
+- `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
 - `/code` browses and edits a workspace without leaving Pi.
 
 It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews.
@@ -17,11 +17,14 @@ Restart Pi or run `/reload`.
 
 ## Review changes
 
-Run `/diff` inside a repository:
+Run `/diff` or `/review` inside a repository:
 
 ```text
 /diff
+/review
 ```
+
+`/review` is an alias for `/diff`; both commands accept the same targets.
 
 ![Review changes with pi-coder](docs/assets/code.gif)
 
@@ -63,7 +66,9 @@ Run:
 
 ![Browse and edit code with pi-coder](docs/assets/diff.gif)
 
-The Workbench provides a Git-aware file explorer, exact whole-file editing, syntax highlighting, buffer search, revision-conflict detection, and Save / Discard / Cancel protection for dirty files. It never stages, commits, pushes, or changes Git refs.
+`/code` fills the small gap between the coding agent and you. It is for the last 1% of the work, when you want to open the file yourself, read the code around it, make a small change, or point to exact lines and ask a question. Instead of leaving Pi or asking the agent to paste fragments into the conversation, you can work with the code directly and continue where you left off.
+
+`/code` is not a replacement for Vim, Neovim, VS Code, or the editor you already use. If one of those is already part of your workflow, keep using it. But learning Vim or Neovim just to inspect one function makes no sense, and opening something as heavy as VS Code can be more than the moment needs. `/code` is the minimum viable coding tool: a small project explorer, readable source, search, and enough editing for focused changes. The agent can take you to the exact file and lines, guide you through related parts of the code, and bring a selected piece back into the conversation when you want to discuss it. It protects unsaved work, will not overwrite a file changed somewhere else, and stays away from staging, commits, and pushes. The goal is not less human involvement. It is keeping the human loop powerful without slowing the work down.
 
 Common Workbench controls:
 

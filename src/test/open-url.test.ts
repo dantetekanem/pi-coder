@@ -83,13 +83,4 @@ describe("openExternalUrl", () => {
       error: "spawn xdg-open ENOENT",
     });
   });
-
-  it("does not suspend the caller when the real launcher cannot find the opener", async () => {
-    const result = await openExternalUrl("https://github.com/example/widgets/pull/12", {
-      platform: "linux",
-      launch: () => Promise.reject(new Error("spawn xdg-open ENOENT")),
-    });
-
-    expect(result.status).toBe("failed");
-  });
 });

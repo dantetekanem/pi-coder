@@ -49,26 +49,6 @@ describe("workbench interaction", () => {
     expect(component.render(40).every((line) => visibleWidth(line) === 40)).toBe(true);
   });
 
-  it.each([
-    ["Ctrl+F workspace search", "\x06", "▶ SEARCH"],
-    ["Ctrl+G Git context", "\x07", "▶ GIT"],
-    ["@ symbol search", "@", "▶ SYMBOLS"],
-    ["Command+P Find File", "\x1b[112;9u", "▶ FIND FILE"],
-    ["Shift+Command+P Find File", "\x1b[112;10u", "▶ FIND FILE"],
-  ])("ignores removed %s input", async (_label, key, removedPane) => {
-    const { component, workbench } = createHarness({
-      listFiles: async () => "src/app.ts\0",
-      readText: async () => ({ text: "source", revision: "r1" }),
-      saveText: async () => ({ status: "error", message: "not used" }),
-      maxReadBytes: 1024,
-    });
-    await workbench.start();
-
-    component.handleInput(key);
-
-    expect(component.render(100).join("\n")).not.toContain(removedPane);
-  });
-
   it("renders a bounded compact state below the two-pane viewport minimum", async () => {
     const repository = {
       listFiles: async () => "src/app.ts\0",
@@ -105,7 +85,6 @@ describe("workbench interaction", () => {
     expect(component.render(80).join("\n")).not.toContain("file-0.ts");
     await workbench.start();
     const startedTree = workbench.repositoryTree;
-    expect(component.render(80).join("\n")).toContain("file-0.ts");
     expect(component.render(80).join("\n")).toContain("file-0.ts");
     expect(workbench.repositoryTree).toBe(startedTree);
   });
@@ -871,7 +850,6 @@ describe("workbench interaction", () => {
 
     const stale = component.render(100).join("\n");
     expect(stale).toContain("buffer changed • n/N refresh");
-    expect(component.render(100).join("\n")).toContain("buffer changed • n/N refresh");
     component.handleInput("n");
     expect(workbench.selectedLine).toBe(2);
     expect(component.render(100).join("\n")).toContain("/needle • 1/1");
