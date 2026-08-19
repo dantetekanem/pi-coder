@@ -1460,7 +1460,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   }
 
   const reviewCommand = {
-    description: "Review and annotate code changes. /diff (local), /diff remote <url | branch>, or /diff base..head",
+    description: "Review and annotate code changes. /diff or /review (local), remote <url | branch>, or base..head",
     handler: async (args: string, ctx: ExtensionContext) => {
       startDiff(args, ctx);
     },
@@ -1499,6 +1499,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
 
   pi.registerCommand("code", codeCommand);
   pi.registerCommand("diff", reviewCommand);
+  pi.registerCommand("review", reviewCommand);
 
   pi.registerTool({
     name: "open_code",

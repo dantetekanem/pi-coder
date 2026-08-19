@@ -499,7 +499,7 @@ describe("code diff extension", () => {
     expect(mergeReviewBodies("  ", undefined)).toBeUndefined();
   });
 
-  it("registers code and diff commands plus agent tools", () => {
+  it("registers code, diff, and review commands plus agent tools", () => {
     const pi = {
       registerCommand: vi.fn(),
       registerTool: vi.fn(),
@@ -511,6 +511,10 @@ describe("code diff extension", () => {
 
     expect(pi.registerCommand).toHaveBeenCalledWith("code", expect.any(Object));
     expect(pi.registerCommand).toHaveBeenCalledWith("diff", expect.any(Object));
+    expect(pi.registerCommand).toHaveBeenCalledWith("review", expect.any(Object));
+    const diffCommand = pi.registerCommand.mock.calls.find(([name]) => name === "diff")?.[1];
+    const reviewCommand = pi.registerCommand.mock.calls.find(([name]) => name === "review")?.[1];
+    expect(reviewCommand).toBe(diffCommand);
     expect(pi.registerCommand).not.toHaveBeenCalledWith("code-diff", expect.any(Object));
     expect(pi.registerCommand).not.toHaveBeenCalledWith("interactive-review", expect.any(Object));
     expect(pi.registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "interactive_review" }));

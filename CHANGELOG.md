@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-08-19
+
+### Added
+
+- Use `/review` as an alias for `/diff`, surface both commands in the repository footer, and show `/diff` and `/code` demos in the README.
+
 ## 0.4.1 - 2026-08-18
 
 ### Added
