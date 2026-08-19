@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3 - 2026-08-19
+
+### Fixed
+
+- Show the `/diff` and `/code` demos in their correct README sections.
+
 ## 0.4.2 - 2026-08-19
 
 ### Added

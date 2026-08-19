@@ -23,7 +23,7 @@ Run `/diff` inside a repository:
 /diff
 ```
 
-![Review changes with pi-coder](docs/assets/diff.gif)
+![Review changes with pi-coder](docs/assets/code.gif)
 
 Useful targets:
 
@@ -61,7 +61,7 @@ Run:
 /code
 ```
 
-![Browse and edit code with pi-coder](docs/assets/code.gif)
+![Browse and edit code with pi-coder](docs/assets/diff.gif)
 
 The Workbench provides a Git-aware file explorer, exact whole-file editing, syntax highlighting, buffer search, revision-conflict detection, and Save / Discard / Cancel protection for dirty files. It never stages, commits, pushes, or changes Git refs.
 
