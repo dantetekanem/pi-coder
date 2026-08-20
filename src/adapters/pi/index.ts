@@ -22,12 +22,13 @@ function mapPiTheme(theme: Theme): WorkbenchTheme {
 export interface PiWorkbenchRunOptions {
   cwd: string;
   launch: WorkbenchLaunch;
+  syntaxTheme?: string;
 }
 
 type StartupIssueLevel = "warning" | "error";
 
 export interface PiWorkbenchRunnerDependencies {
-  createRepository(cwd: string): Promise<WorkbenchRepository>;
+  createRepository(cwd: string, syntaxTheme?: string): Promise<WorkbenchRepository>;
   createWorkbench(repository: WorkbenchRepository): Workbench;
   explorerStateForWorkspace(workspaceKey: string | undefined): ExplorerStateSession | undefined;
   createComponent: typeof createWorkbenchComponent;
@@ -178,7 +179,7 @@ export async function runPiWorkbench(
   let failure: WorkbenchCompletionResult | undefined;
   try {
     const launch = normalizeWorkbenchLaunch(options.launch);
-    const repository = await dependencies.createRepository(options.cwd);
+    const repository = await dependencies.createRepository(options.cwd, options.syntaxTheme);
     const explorerState = dependencies.explorerStateForWorkspace(repository.workspaceKey);
     workbench = dependencies.createWorkbench(repository);
     await workbench.start();

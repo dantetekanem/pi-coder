@@ -91,8 +91,27 @@ describe("provider settings", () => {
     expect(settings.repositories["example/simple"]).toEqual({ cwd: "/work/simple" });
   });
 
-  it("keeps local-only reviews available when the settings file does not exist", () => {
-    expect(loadPiCodeDiffSettings()).toEqual({ version: 1, providers: {}, repositories: {} });
+  it("loads GitHub as the built-in provider when no settings file exists", () => {
+    const settings = loadPiCodeDiffSettings();
+
+    expect(settings.repositories).toEqual({});
+    expect(settings.providers.github).toMatchObject({
+      id: "github",
+      label: "GitHub",
+      executable: "gh",
+      urls: {
+        patterns: [{ host: "github.com", path: "/{repo}/pull/{number}" }],
+        canonical: "https://github.com/{repo}/pull/{number}",
+        clone: "https://github.com/{repo}.git",
+      },
+      capabilities: {
+        baseRevisionRequired: false,
+        validateTargetBeforeSubmit: true,
+        graphqlReviewThreads: true,
+      },
+    });
+    expect(renderProviderOperation(settings.providers.github!, "pullRequest", { repo: "example/widgets", number: 18 }).args)
+      .toEqual(expect.arrayContaining(["pr", "view", "18", "--repo", "example/widgets", "--json"]));
   });
 
   it("renders configured operations without invoking a shell", () => {

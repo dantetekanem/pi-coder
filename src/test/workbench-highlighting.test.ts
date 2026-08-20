@@ -209,12 +209,16 @@ describe("workbench source highlighting", () => {
     expect(workbench.highlightedLines).toEqual(["two�[31m"]);
   });
 
-  it("highlights TypeScript with real Shiki output", async () => {
-    const lines = await createNodeShikiHighlighter().highlight("smoke.ts", "const value = 1;");
-    const output = lines.join("\n");
+  it("renders TypeScript with the selected bundled Shiki theme", async () => {
+    const source = "const value = 1;";
+    const dark = (await createNodeShikiHighlighter("github-dark").highlight("smoke.ts", source)).join("\n");
+    const light = (await createNodeShikiHighlighter("github-light").highlight("smoke.ts", source)).join("\n");
 
-    expect(output.replace(/\u001b\[[0-9;]*m/g, "")).toContain("const value = 1;");
-    expect(output).toMatch(/\u001b\[[0-9;]+m/);
+    expect(dark.replace(/\u001b\[[0-9;]*m/g, "")).toBe(source);
+    expect(light.replace(/\u001b\[[0-9;]*m/g, "")).toBe(source);
+    expect(dark).toMatch(/\u001b\[[0-9;]+m/);
+    expect(light).toMatch(/\u001b\[[0-9;]+m/);
+    expect(light).not.toBe(dark);
   });
 
   it("validates canonical Shiki styles against every exact source line", () => {

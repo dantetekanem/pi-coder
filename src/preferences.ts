@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getShortcutConfigPath } from "./shortcuts.js";
+import { DEFAULT_SHIKI_THEME } from "./workbench/node/shiki.js";
 
 export type PersistedDiffViewMode = "unified" | "side-by-side";
 
@@ -20,6 +21,7 @@ export interface ReviewPaneVisibility {
 
 export interface ReviewPreferences {
   diffViewMode: PersistedDiffViewMode;
+  codeSyntaxTheme: string;
   navigatorTreeMode: boolean;
   navigatorFileOrder: PersistedNavigatorFileOrder;
   contextLineNavigation: boolean;
@@ -38,6 +40,7 @@ export const DEFAULT_REVIEW_PANE_VISIBILITY: ReviewPaneVisibility = {
 
 export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
   diffViewMode: "unified",
+  codeSyntaxTheme: DEFAULT_SHIKI_THEME,
   navigatorTreeMode: true,
   navigatorFileOrder: "risk",
   contextLineNavigation: false,
@@ -56,6 +59,10 @@ function isPersistedDiffViewMode(value: unknown): value is PersistedDiffViewMode
 
 function isPersistedNavigatorFileOrder(value: unknown): value is PersistedNavigatorFileOrder {
   return value === "risk" || value === "alphabetical";
+}
+
+function isPersistedCodeSyntaxTheme(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,99}$/.test(value);
 }
 
 function isPersistedReviewVerdict(value: unknown): value is PersistedReviewVerdict {
@@ -90,6 +97,7 @@ export function loadReviewPreferences(): ReviewPreferences {
     const record = parsed as Record<string, unknown>;
     return {
       diffViewMode: isPersistedDiffViewMode(record.diffViewMode) ? record.diffViewMode : DEFAULT_REVIEW_PREFERENCES.diffViewMode,
+      codeSyntaxTheme: isPersistedCodeSyntaxTheme(record.codeSyntaxTheme) ? record.codeSyntaxTheme : DEFAULT_REVIEW_PREFERENCES.codeSyntaxTheme,
       navigatorTreeMode: typeof record.navigatorTreeMode === "boolean" ? record.navigatorTreeMode : DEFAULT_REVIEW_PREFERENCES.navigatorTreeMode,
       navigatorFileOrder: isPersistedNavigatorFileOrder(record.navigatorFileOrder) ? record.navigatorFileOrder : DEFAULT_REVIEW_PREFERENCES.navigatorFileOrder,
       lastReviewVerdict: isPersistedReviewVerdict(record.lastReviewVerdict) ? record.lastReviewVerdict : DEFAULT_REVIEW_PREFERENCES.lastReviewVerdict,

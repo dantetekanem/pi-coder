@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.5 - 2026-08-19
+
+### Added
+
+- Choose, autocomplete, and persist any bundled Shiki theme through `/code syntax`.
+- Review GitHub pull requests through the authenticated `gh` CLI without provider configuration, while retaining local configuration for other code hosts.
+
+### Fixed
+
+- Expand Explorer ancestor folders when opening nested search results without disrupting normal file opens or Enter handling.
+
+### Changed
+
+- Remove the stale GitHub Actions workflow.
+
 ## 0.4.4 - 2026-08-19
 
 ### Changed

@@ -44,11 +44,79 @@ export interface PiCodeDiffSettings {
   repositories: Record<string, RepositoryProfileSettings>;
 }
 
-const EMPTY_SETTINGS: PiCodeDiffSettings = {
-  version: PI_CODE_DIFF_SETTINGS_VERSION,
-  providers: {},
-  repositories: {},
+const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
+  id: "github",
+  label: "GitHub",
+  executable: "gh",
+  urls: {
+    patterns: [{ host: "github.com", path: "/{repo}/pull/{number}" }],
+    canonical: "https://github.com/{repo}/pull/{number}",
+    clone: "https://github.com/{repo}.git",
+  },
+  operations: {
+    pullRequest: {
+      args: ["pr", "view", "{number}", "--repo", "{repo}", "--json", "number,title,body,additions,deletions,changedFiles,author,state,headRefName,headRefOid,baseRefName"],
+    },
+    reviews: { args: ["api", "repos/{repo}/pulls/{number}/reviews?per_page=100"] },
+    branchLookup: { args: ["pr", "list", "--repo", "{repo}", "--state", "all", "--head", "{branch}", "--json", "number,title,headRefName,state,url", "--limit", "1"] },
+    identity: { args: ["api", "user"] },
+    submitReview: { args: ["api", "repos/{repo}/pulls/{number}/reviews", "--method", "POST", "--input", "{payloadPath}"] },
+    reviewThreads: { args: ["api", "graphql", "-f", "query={query}", "-F", "owner={owner}", "-F", "name={name}", "-F", "number={number}"] },
+    reviewComments: { args: ["api", "repos/{repo}/pulls/{number}/comments?per_page=100"] },
+  },
+  refs: { head: "refs/pull/{number}/head" },
+  fields: {
+    number: ["number"],
+    title: ["title"],
+    body: ["body"],
+    additions: ["additions"],
+    deletions: ["deletions"],
+    changedFiles: ["changedFiles"],
+    author: ["author.login", "user.login"],
+    state: ["state"],
+    reviewState: ["state"],
+    headRefName: ["headRefName"],
+    headRefOid: ["headRefOid"],
+    baseRefName: ["baseRefName"],
+    baseRefOid: ["baseRefOid"],
+    identityLogin: ["login"],
+    submissionId: ["id"],
+    submissionState: ["state"],
+    commentId: ["id"],
+    commentReplyToId: ["in_reply_to_id"],
+    commentAuthor: ["user.login"],
+    commentBody: ["body"],
+    commentCreatedAt: ["created_at"],
+    commentUrl: ["html_url"],
+    commentPath: ["path"],
+    commentLine: ["line"],
+  },
+  capabilities: {
+    atomicReview: false,
+    baseRevisionRequired: false,
+    fileComments: false,
+    graphqlReviewThreads: true,
+    requestChangesBodyRequired: true,
+    threadedReplies: true,
+    validateSubmitResponse: true,
+    validateTargetBeforeSubmit: true,
+  },
 };
+
+function withBuiltInProviders(settings: PiCodeDiffSettings): PiCodeDiffSettings {
+  return {
+    ...settings,
+    providers: { github: BUILT_IN_GITHUB_PROVIDER, ...settings.providers },
+  };
+}
+
+function defaultSettings(): PiCodeDiffSettings {
+  return withBuiltInProviders({
+    version: PI_CODE_DIFF_SETTINGS_VERSION,
+    providers: {},
+    repositories: {},
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
@@ -173,7 +241,7 @@ export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
-  return { version: PI_CODE_DIFF_SETTINGS_VERSION, providers, repositories };
+  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, providers, repositories });
 }
 
 export function getPiCodeDiffSettingsPath(): string {
@@ -182,7 +250,7 @@ export function getPiCodeDiffSettingsPath(): string {
 
 export function loadPiCodeDiffSettings(): PiCodeDiffSettings {
   const path = getPiCodeDiffSettingsPath();
-  if (!existsSync(path)) return EMPTY_SETTINGS;
+  if (!existsSync(path)) return defaultSettings();
   return parsePiCodeDiffSettings(JSON.parse(readFileSync(path, "utf8")) as unknown);
 }
 

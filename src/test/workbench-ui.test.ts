@@ -717,24 +717,30 @@ describe("workbench interaction", () => {
     expect(workbench.selectedLine).toBe(2);
   });
 
-  it("finds explorer paths without repository grep and cancels without closing", async () => {
+  it("finds explorer paths without repository grep, restores on cancel, and reveals an opened result", async () => {
     const readText = vi.fn(async (path: string) => ({ text: path, revision: path }));
     const { component, done, workbench } = createHarness({
-      listFiles: async () => "src/needle-file.ts\0src/other.ts\0",
+      listFiles: async () => "src/test/needle-file.ts\0src/other.ts\0",
       readText, saveText: async () => ({ status: "error", message: "not used" }), maxReadBytes: 1024,
     });
     await workbench.start();
     component.handleInput("\x1b[B");
     component.handleInput("/");
     for (const character of "needle") component.handleInput(character);
-    expect(component.render(100).join("\n")).toContain("src/needle-file.ts");
+    expect(component.render(100).join("\n")).toContain("src/test/needle-file.ts");
     component.handleInput("\x1b");
     expect(component.render(100).join("\n")).toMatch(/›\s+▸ src/);
     expect(done).not.toHaveBeenCalled();
     component.handleInput("/");
     for (const character of "needle") component.handleInput(character);
     component.handleInput("\r");
-    await vi.waitFor(() => expect(readText).toHaveBeenCalledWith("src/needle-file.ts", 1024));
+    await vi.waitFor(() => expect(readText).toHaveBeenCalledWith("src/test/needle-file.ts", 1024));
+    await vi.waitFor(() => expect(component.render(100).join("\n")).toContain("▶ SOURCE"));
+    component.handleInput("\x1b");
+    const explorer = component.render(100).join("\n");
+    expect(explorer).toMatch(/▾ src/);
+    expect(explorer).toMatch(/▾ test/);
+    expect(explorer).toMatch(/›\s+· needle-file\.ts/);
   });
 
   it("keeps printable j/k in Find File queries", async () => {

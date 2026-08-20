@@ -581,14 +581,25 @@ export class WorkbenchComponent implements Component, Focusable {
     this.treeIndex = index === -1 ? Math.min(this.treeIndex, this.tree.rows().length - 1) : index;
   }
 
+  private revealTreePath(path: string): void {
+    this.ensureTree();
+    const selectedKey = this.tree.restore(this.tree.snapshot(), `file:${path}`);
+    this.treeIndex = this.tree.indexOfKey(selectedKey) ?? this.treeIndex;
+    this.fileSearchRestore = null;
+  }
+
   private async openPath(path: string): Promise<void> {
+    const revealInTree = this.pane === "file-search";
     const operation = this.beginLoading("file");
     this.tui.requestRender();
     try {
       const result = await this.workbench.selectFile(path);
       if (!this.isCurrentOperation(operation)) return;
       this.awaitingDirtyChoice = result.status === "confirmation-required";
-      if (result.status === "opened") this.enterSourcePane();
+      if (result.status === "opened") {
+        if (revealInTree) this.revealTreePath(result.path);
+        this.enterSourcePane();
+      }
       this.error = null;
       this.status = result.status === "opened" ? `Opened ${result.path}` : "Choose what to do with the current buffer.";
     } catch (error) {
@@ -1076,6 +1087,7 @@ export class WorkbenchComponent implements Component, Focusable {
         else this.complete(result);
       } else if (result.status === "opened") {
         this.awaitingDirtyChoice = false;
+        if (this.fileSearchRestore != null) this.revealTreePath(result.path);
         this.enterSourcePane();
         this.error = null;
         this.warning = result.warning ?? null;

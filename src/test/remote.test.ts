@@ -133,7 +133,13 @@ afterEach(() => {
 });
 
 describe("remote review helpers", () => {
-  it("parses configured URL patterns and plain branches while rejecting attacker-shaped URLs", () => {
+  it("parses built-in GitHub and configured URL patterns while rejecting attacker-shaped URLs", () => {
+    expect(extractBranchFromRemote("https://github.com/dantetekanem/pi-extended-teams/pull/18")).toEqual({
+      branch: "__pr__18",
+      repo: "dantetekanem/pi-extended-teams",
+      prNumber: "18",
+      provider: "github",
+    });
     expect(extractBranchFromRemote("https://code.example/example/widgets/change/123")).toEqual({
       branch: "__pr__123",
       repo: "example/widgets",

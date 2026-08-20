@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { CHILD_CLOSURE_UNCONFIRMED, type WorkbenchRepository } from "../contracts.js";
 import { filterDeletedGitFiles, isRepositoryRelativePath } from "../navigator.js";
 import { createFilesystemFileLister, type FilesystemFileLister } from "./filesystem-list.js";
-import { createNodeShikiHighlighter } from "./shiki.js";
+import { createNodeShikiHighlighter, DEFAULT_SHIKI_THEME } from "./shiki.js";
 import { buildHermeticGitInvocation, type HermeticGitInvocation } from "./git-process.js";
 import { createChildTermination, DEFAULT_TERMINATION_GRACE_MS, isChildClosureError, utf8Prefix } from "./process-termination.js";
 import { createNodeFileAccess } from "./repository.js";
@@ -170,7 +170,7 @@ export function createGitOptionalFileLister(
 }
 
 /** Assembles the shared Node repository services used by every terminal host. */
-export async function createNodeWorkspace(cwd: string): Promise<WorkbenchRepository> {
+export async function createNodeWorkspace(cwd: string, syntaxTheme = DEFAULT_SHIKI_THEME): Promise<WorkbenchRepository> {
   const root = await realpath(cwd);
   const fileAccess = await createNodeFileAccess(root, DEFAULT_MAX_READ_BYTES);
   const spawnGit: GitListingSpawn = (args) => {
@@ -182,7 +182,7 @@ export async function createNodeWorkspace(cwd: string): Promise<WorkbenchReposit
   return {
     ...fileAccess,
     workspaceKey: root,
-    sourceHighlighter: createNodeShikiHighlighter(),
+    sourceHighlighter: createNodeShikiHighlighter(syntaxTheme),
     listFiles(signal = new AbortController().signal) { return listFiles(signal); },
   };
 }

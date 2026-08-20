@@ -23,10 +23,12 @@ import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComm
 import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
+import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
 import { composeCodeDiscussionPrompt, parseDirectCodeArgs, runGuardedPiWorkbench } from "./adapters/pi/coordinator.js";
 import { createReviewScopeFingerprint, resolveReviewResume, revalidateReviewDraftAnchors } from "./adapters/pi/review-bridge.js";
 import { ReviewInvocationCoordinator } from "./adapters/pi/review-invocation.js";
+import { listBundledShikiThemes } from "./workbench/node/shiki.js";
 import { normalizeWorkbenchLaunch } from "./workbench/target.js";
 import type { CodeStory, CodeTarget, WorkbenchCompletionResult, WorkbenchLaunch } from "./workbench/contracts.js";
 import { hasExactSubmoduleRange, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
@@ -1463,6 +1465,8 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       startDiff(args, ctx);
     },
   };
+  let codeSyntaxTheme = loadReviewPreferences().codeSyntaxTheme;
+
   async function runCodeWorkbench(
     origin: "direct-code" | "open-code" | "review-bridge",
     ctx: ExtensionContext,
@@ -1470,15 +1474,41 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     launch: WorkbenchLaunch,
   ): Promise<WorkbenchCompletionResult> {
     try {
-      return await runGuardedPiWorkbench(origin, () => runPiWorkbench(ctx, { cwd, launch }));
+      return await runGuardedPiWorkbench(origin, () => runPiWorkbench(ctx, { cwd, launch, syntaxTheme: codeSyntaxTheme }));
     } finally {
       void repositoryChangeStatus.refresh(ctx);
     }
   }
 
+  async function selectCodeSyntaxTheme(ctx: ExtensionContext): Promise<void> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("/code syntax requires a TUI session.", "error");
+      return;
+    }
+    try {
+      const themes = await listBundledShikiThemes();
+      const selected = await pickSyntaxTheme(ctx.ui, themes, codeSyntaxTheme);
+      if (selected == null) return;
+      const choice = themes.find((theme) => theme.id === selected);
+      if (choice == null) return;
+      codeSyntaxTheme = choice.id;
+      saveReviewPreference({ codeSyntaxTheme });
+      ctx.ui.notify(`/code syntax theme: ${choice.displayName}`, "info");
+    } catch (error) {
+      ctx.ui.notify(`Could not load Shiki themes: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  }
+
   const codeCommand = {
-    description: "Browse repository files in the code workbench. Optional: --path, --line, --end-line, --anchor-sha256, --story-json.",
+    description: "Browse repository files in the code workbench. Use /code syntax to choose a Shiki theme. Optional: --path, --line, --end-line, --anchor-sha256, --story-json.",
+    getArgumentCompletions: (prefix: string) => "syntax".startsWith(prefix)
+      ? [{ value: "syntax", label: "syntax" }]
+      : null,
     handler: async (args: string, ctx: ExtensionContext) => {
+      if (args.trim().toLowerCase() === "syntax") {
+        await selectCodeSyntaxTheme(ctx);
+        return;
+      }
       let launch: WorkbenchLaunch;
       try { launch = parseDirectCodeArgs(args); }
       catch (error) {

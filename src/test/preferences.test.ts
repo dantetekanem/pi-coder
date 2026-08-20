@@ -40,6 +40,7 @@ describe("review preferences", () => {
 
     expect(loadReviewPreferences()).toEqual({
       diffViewMode: "side-by-side",
+      codeSyntaxTheme: "github-dark",
       navigatorTreeMode: false,
       navigatorFileOrder: "risk",
       contextLineNavigation: true,

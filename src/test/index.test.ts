@@ -512,6 +512,11 @@ describe("code diff extension", () => {
     expect(pi.registerCommand).toHaveBeenCalledWith("code", expect.any(Object));
     expect(pi.registerCommand).toHaveBeenCalledWith("diff", expect.any(Object));
     expect(pi.registerCommand).toHaveBeenCalledWith("review", expect.any(Object));
+    const codeCommand = pi.registerCommand.mock.calls.find(([name]) => name === "code")?.[1];
+    expect(codeCommand.getArgumentCompletions("sy")).toEqual([
+      expect.objectContaining({ value: "syntax", label: "syntax" }),
+    ]);
+    expect(codeCommand.getArgumentCompletions("workbench")).toBeNull();
     const diffCommand = pi.registerCommand.mock.calls.find(([name]) => name === "diff")?.[1];
     const reviewCommand = pi.registerCommand.mock.calls.find(([name]) => name === "review")?.[1];
     expect(reviewCommand).toBe(diffCommand);
@@ -580,7 +585,7 @@ describe("code diff extension", () => {
     }
   });
 
-  it("routes /code to the workbench while /diff retains the review command", async () => {
+  it("selects a persistent Shiki theme before routing /code to the workbench", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const pi = {
       registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
@@ -588,12 +593,34 @@ describe("code diff extension", () => {
       registerShortcut: vi.fn(),
       on: vi.fn(),
     };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn() } };
+    const custom = vi.fn(async (factory: (...args: any[]) => any) => {
+      let selected: string | null = null;
+      const component = factory(
+        { requestRender: vi.fn() },
+        { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+        {},
+        (value: string | null) => { selected = value; },
+      );
+      for (let index = 0; index < 100 && !component.render(100).join("\n").includes("→ GitHub Light"); index += 1) {
+        component.handleInput("\x1b[B");
+      }
+      component.handleInput("\r");
+      return selected;
+    });
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), custom } };
 
     codeDiffExtension(pi as never);
+    await commands.get("code")!.handler("syntax", ctx);
+    expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
+
     await commands.get("code")!.handler("", ctx);
 
-    expect(mocks.runPiWorkbench).toHaveBeenCalledWith(ctx, { cwd: "/repo", launch: { capabilities: { discuss: true } } });
+    expect(custom).toHaveBeenCalledOnce();
+    expect(mocks.runPiWorkbench).toHaveBeenCalledWith(ctx, {
+      cwd: "/repo",
+      launch: { capabilities: { discuss: true } },
+      syntaxTheme: "github-light",
+    });
     expect(commands.get("code")).not.toBe(commands.get("diff"));
     expect(mocks.getReviewWindowData).not.toHaveBeenCalled();
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(ctx);

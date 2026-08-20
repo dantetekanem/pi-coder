@@ -17,6 +17,19 @@ interface ShikiModule {
   createHighlighter(options: { themes: readonly string[]; langs: readonly BundledLanguage[] }): Promise<ShikiHighlighter>;
 }
 
+interface ShikiThemesModule {
+  bundledThemes: Record<string, unknown>;
+  bundledThemesInfo: readonly { id: string; displayName: string; type: string }[];
+}
+
+export interface BundledShikiThemeChoice {
+  id: string;
+  displayName: string;
+  type: string;
+}
+
+export const DEFAULT_SHIKI_THEME = "github-dark";
+
 // Keep Shiki out of the module graph until a supported source buffer is selected.
 const importModule = (specifier: string): Promise<unknown> => import(specifier);
 
@@ -63,8 +76,15 @@ async function loadShiki(): Promise<ShikiModule> {
   return await importModule(moduleSpecifier(directSpecifier)) as ShikiModule;
 }
 
-/** The single documented dark terminal palette used for all Shiki tokenization. */
-const THEME = "github-dark";
+async function loadShikiThemes(): Promise<ShikiThemesModule> {
+  return await import("shiki/themes") as ShikiThemesModule;
+}
+
+export async function listBundledShikiThemes(): Promise<readonly BundledShikiThemeChoice[]> {
+  const { bundledThemesInfo } = await loadShikiThemes();
+  return bundledThemesInfo.map(({ id, displayName, type }) => ({ id, displayName, type }));
+}
+
 const LANGUAGE_BY_EXTENSION: Readonly<Record<string, BundledLanguage>> = {
   ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
   rb: "ruby", py: "python", json: "json", md: "markdown",
@@ -103,13 +123,20 @@ export function tokensToAnsi(lines: readonly (readonly ThemedToken[])[]): readon
 }
 
 /** Node-only, lazy Shiki highlighter. Grammars and the singleton are cached, never file output. */
-export function createNodeShikiHighlighter(): SourceHighlighter {
+export function createNodeShikiHighlighter(theme = DEFAULT_SHIKI_THEME): SourceHighlighter {
+  let selectedTheme: Promise<string> | null = null;
   let highlighter: Promise<ShikiHighlighter> | null = null;
   const languageLoads = new Map<BundledLanguage, Promise<void>>();
 
+  function getTheme(): Promise<string> {
+    selectedTheme ??= loadShikiThemes().then(({ bundledThemes }) => Object.hasOwn(bundledThemes, theme) ? theme : DEFAULT_SHIKI_THEME);
+    return selectedTheme;
+  }
+
   async function getHighlighter() {
     if (highlighter == null) {
-      highlighter = loadShiki().then(({ createHighlighter }) => createHighlighter({ themes: [THEME], langs: [] }));
+      highlighter = Promise.all([loadShiki(), getTheme()])
+        .then(([{ createHighlighter }, resolvedTheme]) => createHighlighter({ themes: [resolvedTheme], langs: [] }));
     }
     return highlighter;
   }
@@ -118,14 +145,14 @@ export function createNodeShikiHighlighter(): SourceHighlighter {
     async highlight(path, text) {
       const language = languageForPath(path);
       if (language == null) return plainSourceLines(text);
-      const instance = await getHighlighter();
+      const [instance, resolvedTheme] = await Promise.all([getHighlighter(), getTheme()]);
       let load = languageLoads.get(language);
       if (load == null) {
         load = instance.loadLanguage(language);
         languageLoads.set(language, load);
       }
       await load;
-      return tokensToAnsi(instance.codeToTokensBase(text, { lang: language, theme: THEME }));
+      return tokensToAnsi(instance.codeToTokensBase(text, { lang: language, theme: resolvedTheme }));
     },
   };
 }

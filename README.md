@@ -43,7 +43,81 @@ The review UI supports line, file, and review-wide feedback. Feedback can be mar
 - `COMMENT` — keep review feedback for a local or remote review.
 - `MODIFY` — propose or apply an exact code change.
 
-Remote pull-request reviews use locally configured providers. Confirmed reviews receive a grammar-safety pass before submission, and saved drafts are revalidated when the reviewed revision changes.
+GitHub pull requests work by default through the authenticated [`gh`](https://cli.github.com/) CLI. Confirmed reviews receive a grammar-safety pass before submission, and saved drafts are revalidated when the reviewed revision changes.
+
+### Remote providers
+
+After `gh auth login`, a GitHub URL works without configuration:
+
+```text
+/diff remote https://github.com/owner/repository/pull/123
+```
+
+Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings extend the built-in GitHub provider; a local `providers.github` entry explicitly overrides it. Provider operations are executable-plus-argument arrays, never shell commands. Template values such as `{repo}`, `{number}`, `{branch}`, and `{payloadPath}` are passed as individual arguments.
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "secondary": {
+      "label": "Secondary code host",
+      "executable": "forge",
+      "urls": {
+        "patterns": [
+          { "host": "code.example", "path": "/{repo}/change/{number}" }
+        ],
+        "canonical": "https://code.example/{repo}/change/{number}",
+        "clone": "https://code.example/{repo}.git"
+      },
+      "operations": {
+        "pullRequest": { "args": ["change", "show", "{repo}", "{number}"] },
+        "reviews": { "args": ["change", "reviews", "{repo}", "{number}"] },
+        "branchLookup": { "args": ["change", "list", "{repo}", "--head", "{branch}"] },
+        "identity": { "args": ["identity", "--json"] },
+        "submitReview": { "args": ["change", "review", "{repo}", "{number}", "--input", "{payloadPath}"] }
+      },
+      "refs": {
+        "head": "refs/changes/{number}/head"
+      },
+      "fields": {
+        "number": "id",
+        "title": "subject",
+        "body": "description",
+        "additions": "metrics.added",
+        "deletions": "metrics.removed",
+        "changedFiles": "metrics.files",
+        "author": ["actor.handle", "user.handle"],
+        "state": "phase",
+        "reviewState": "decision",
+        "headRefName": "source.name",
+        "headRefOid": "source.oid",
+        "baseRefName": "target.name",
+        "identityLogin": "login",
+        "submissionId": "id",
+        "submissionState": "state"
+      },
+      "capabilities": {
+        "atomicReview": true,
+        "baseRevisionRequired": false,
+        "fileComments": false,
+        "requestChangesBodyRequired": false,
+        "validateSubmitResponse": true,
+        "validateTargetBeforeSubmit": true
+      }
+    }
+  },
+  "repositories": {
+    "owner/repository": {
+      "cwd": "/absolute/path/to/checkout",
+      "subdir": "packages/app",
+      "pathspecs": ["packages/app", "shared/ui"],
+      "importAliases": { "@shared": "shared/ui" }
+    }
+  }
+}
+```
+
+`pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`.
 
 Common review controls:
 
@@ -69,6 +143,8 @@ Run:
 `/code` fills the small gap between the coding agent and you. It is for the last 1% of the work, when you want to open the file yourself, read the code around it, make a small change, or point to exact lines and ask a question. Instead of leaving Pi or asking the agent to paste fragments into the conversation, you can work with the code directly and continue where you left off.
 
 `/code` is not a replacement for Vim, Neovim, VS Code, or the editor you already use. If one of those is already part of your workflow, keep using it. But learning Vim or Neovim just to inspect one function makes no sense, and opening something as heavy as VS Code can be more than the moment needs. `/code` is the minimum viable coding tool: a small project explorer, readable source, search, and enough editing for focused changes. The agent can take you to the exact file and lines, guide you through related parts of the code, and bring a selected piece back into the conversation when you want to discuss it. It protects unsaved work, will not overwrite a file changed somewhere else, and stays away from staging, commits, and pushes. The goal is not less human involvement. It is keeping the human loop powerful without slowing the work down.
+
+Run `/code syntax` to choose and remember any syntax theme bundled with Shiki. The selection applies the next time `/code` opens.
 
 Common Workbench controls:
 
