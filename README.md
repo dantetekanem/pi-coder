@@ -10,6 +10,12 @@ It also keeps a compact repository summary in Pi's footer so you can see the cur
 ## Install
 
 ```bash
+pi install npm:pi-coder
+```
+
+To install the latest source directly from GitHub instead:
+
+```bash
 pi install https://github.com/dantetekanem/pi-coder
 ```
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6 - 2026-08-19
+
+### Changed
+
+- Publish `pi-coder` as a public npm Pi package with gallery, repository, and install metadata for pi.dev.
+- Declare Pi-provided runtime modules as peer dependencies while keeping third-party runtime packages self-contained.
+
 ## 0.4.5 - 2026-08-19
 
 ### Added

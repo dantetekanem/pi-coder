@@ -1,12 +1,22 @@
 {
   "name": "pi-coder",
-  "version": "0.4.5",
-  "private": true,
+  "version": "0.4.6",
   "packageManager": "pnpm@10.28.0",
   "type": "module",
-  "description": "Interactive code diff editor for Pi with comments, AI-assisted review handoff, configured pull-request integration, and local or remote diff support.",
-  "author": "Leonardo Pereira",
+  "description": "Interactive code workbench and diff review UI for Pi, with annotations, GitHub pull-request reviews, and agent handoffs.",
+  "author": "Leonardo Pereira <contato@leonardopereira.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dantetekanem/pi-coder.git"
+  },
+  "homepage": "https://github.com/dantetekanem/pi-coder#readme",
+  "bugs": {
+    "url": "https://github.com/dantetekanem/pi-coder/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "src/diff.ts",
     "src/git.ts",
@@ -61,7 +71,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/dantetekanem/pi-coder/main/docs/assets/code.gif"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -72,18 +83,18 @@
     "workbench:start": "node scripts/start-workbench.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.78.0",
-    "@earendil-works/pi-tui": "0.78.0",
     "@pierre/diffs": "1.2.7",
-    "@types/node": "24.12.4",
-    "shiki": "3.23.0",
-    "typebox": "1.1.38",
-    "typescript": "5.9.3"
+    "shiki": "3.23.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.78.0"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
     "vitest": "3.2.6"
   }
 }

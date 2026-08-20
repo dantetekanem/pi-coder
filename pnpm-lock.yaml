@@ -9,30 +9,30 @@ importers:
   .:
     dependencies:
       '@earendil-works/pi-ai':
-        specifier: 0.78.0
+        specifier: '*'
         version: 0.78.0(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
-        specifier: 0.78.0
+        specifier: '*'
         version: 0.78.0(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-tui':
-        specifier: 0.78.0
+        specifier: '*'
         version: 0.78.0
       '@pierre/diffs':
         specifier: 1.2.7
         version: 1.2.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@types/node':
-        specifier: 24.12.4
-        version: 24.12.4
       shiki:
         specifier: 3.23.0
         version: 3.23.0
       typebox:
-        specifier: 1.1.38
+        specifier: '*'
         version: 1.1.38
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.4
+        version: 24.12.4
       typescript:
         specifier: 5.9.3
         version: 5.9.3
-    devDependencies:
       vitest:
         specifier: 3.2.6
         version: 3.2.6(@types/node@24.12.4)(jiti@2.7.0)(yaml@2.9.0)
