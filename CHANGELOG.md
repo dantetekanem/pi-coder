@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 - 2026-08-21
+
+### Added
+
+- Open `/code <repository-relative-path>` directly in whole-buffer INSERT mode, with equivalent `open_code.path` support for explicitly requested agent launches.
+
 ## 0.4.6 - 2026-08-19
 
 ### Changed

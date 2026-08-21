@@ -47,6 +47,8 @@ export interface CodeStory {
 
 export interface WorkbenchLaunch {
   initialTarget?: CodeTarget;
+  /** Enter whole-buffer INSERT as soon as the initial target opens. */
+  startInInsertMode?: boolean;
   stories?: readonly CodeStory[];
   capabilities?: { discuss: boolean };
 }

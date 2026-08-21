@@ -309,6 +309,29 @@ describe("workbench interaction", () => {
     expect(session.save).not.toHaveBeenCalled();
   });
 
+  it("starts an already opened launch target in INSERT mode", async () => {
+    const workbench = createWorkbench({
+      listFiles: async () => "app/models/user.rb\0",
+      readText: async () => ({ text: "class User\nend", revision: "r1" }),
+      saveText: async () => ({ status: "error", message: "not used" }),
+      maxReadBytes: 1024,
+    });
+    await workbench.start();
+    await workbench.openTarget({ path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } });
+    const tui = { requestRender: vi.fn(), terminal: { rows: 24 } };
+    const component = new WorkbenchComponent(tui as never, {
+      fg: (_color: string, text: string) => text,
+      bg: (_color: string, text: string) => text,
+    }, workbench, vi.fn(), undefined, {
+      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+    });
+
+    expect(component.render(100).join("\n")).toContain("INSERT SOURCE  app/models/user.rb");
+    component.handleInput("!");
+    expect(workbench.bufferText).toBe("class User!\nend");
+  });
+
   it("leaves INSERT without closing and offers reliable Explorer/source pane shortcuts", async () => {
     const { component, done, workbench } = createHarness({
       listFiles: async () => "file.ts\0",

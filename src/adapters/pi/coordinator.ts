@@ -72,6 +72,13 @@ function parseStory(value: string): CodeStory {
 
 export function parseDirectCodeArgs(args: string): WorkbenchLaunch {
   const tokens = tokenizeCodeArgs(args);
+  if (tokens.length === 1 && !tokens[0]!.startsWith("--")) {
+    return normalizeWorkbenchLaunch({
+      initialTarget: { path: tokens[0]!, range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+      capabilities: { discuss: true },
+    });
+  }
   const values = new Map<string, string>();
   const stories: CodeStory[] = [];
   const repeatable = "--story-json";

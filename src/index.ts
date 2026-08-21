@@ -1500,7 +1500,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   }
 
   const codeCommand = {
-    description: "Browse repository files in the code workbench. Use /code syntax to choose a Shiki theme. Optional: --path, --line, --end-line, --anchor-sha256, --story-json.",
+    description: "Browse repository files, or open /code <path> directly in INSERT mode. Use /code syntax to choose a Shiki theme. Structured options: --path, --line, --end-line, --anchor-sha256, --story-json.",
     getArgumentCompletions: (prefix: string) => "syntax".startsWith(prefix)
       ? [{ value: "syntax", label: "syntax" }]
       : null,
@@ -1532,8 +1532,8 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerTool({
     name: "open_code",
     label: "open-code",
-    description: "Open the Pi code workbench at an optional structured target with optional ordered code stories, then wait for cleanup and return its typed outcome.",
-    promptSnippet: "Open the interactive code workbench at a structured file/range target and wait for close or DISCUSS.",
+    description: "Open the Pi code workbench at an optional file path already in INSERT mode, or at a structured target with optional ordered code stories, then wait for cleanup and return its typed outcome.",
+    promptSnippet: "Open the interactive code workbench at a file path in INSERT mode or a structured file/range target, then wait for close or DISCUSS.",
     promptGuidelines: [
       "Call open_code only when the user directly asks to open or browse code in the interactive workbench.",
       "Use open_code for code browsing/editing; open_code_diff remains review-only.",
@@ -1541,6 +1541,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     ],
     parameters: Type.Object({
       cwd: Type.Optional(Type.String({ description: "Repository directory. Defaults to Pi's current cwd." })),
+      path: Type.Optional(Type.String({ description: "Repository-relative file path to open immediately in INSERT mode. Cannot be combined with target." })),
       target: Type.Optional(Type.Object({
         path: Type.String({ description: "Normalized repository-relative file path." }),
         range: Type.Object({
@@ -1563,12 +1564,18 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       }))),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const input = params as { cwd?: string; target?: CodeTarget; stories?: CodeStory[] };
+      const input = params as { cwd?: string; path?: string; target?: CodeTarget; stories?: CodeStory[] };
       const cwd = normalizeReviewCwd(input.cwd ?? ctx.cwd, ctx.cwd);
       let launch: WorkbenchLaunch;
       try {
+        if (input.path != null && input.target != null) throw new Error("open_code path and target cannot be combined.");
+        const path = input.path?.startsWith("@") ? input.path.slice(1) : input.path;
+        const initialTarget = path == null
+          ? input.target
+          : { path, range: { startLine: 1, endLine: 1 } };
         launch = normalizeWorkbenchLaunch({
-          ...(input.target == null ? {} : { initialTarget: input.target }),
+          ...(initialTarget == null ? {} : { initialTarget }),
+          ...(path == null ? {} : { startInInsertMode: true }),
           ...(input.stories == null ? {} : { stories: input.stories }),
           capabilities: { discuss: true },
         });

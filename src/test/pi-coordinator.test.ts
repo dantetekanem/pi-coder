@@ -26,6 +26,18 @@ describe("Pi code coordinator", () => {
     expect(parseDirectCodeArgs("")).toEqual({ capabilities: { discuss: true } });
   });
 
+  it("opens one bare repository-relative path at line one in INSERT mode", () => {
+    expect(parseDirectCodeArgs("app/models/user.rb")).toEqual({
+      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+      capabilities: { discuss: true },
+    });
+    expect(parseDirectCodeArgs("'app/models/a user.rb'")).toMatchObject({
+      initialTarget: { path: "app/models/a user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+    });
+  });
+
   it.each([
     ["unknown", "--wat value"],
     ["duplicate", "--path a.ts --path b.ts --line 1"],
@@ -33,6 +45,9 @@ describe("Pi code coordinator", () => {
     ["missing pair", "--path a.ts"],
     ["bad line", "--path a.ts --line 0"],
     ["bad normalized path", "--path ../a.ts --line 1"],
+    ["mixed bare path and options", "app/models/user.rb --line 2"],
+    ["multiple bare paths", "app/models/user.rb app/models/admin.rb"],
+    ["bad bare path", "../app/models/user.rb"],
     ["bad story JSON", "--story-json nope"],
   ])("rejects %s before launch", (_label, args) => {
     expect(() => parseDirectCodeArgs(args)).toThrow();

@@ -56,6 +56,12 @@ function normalizeTarget(value: CodeTarget): CodeTarget {
 export function normalizeWorkbenchLaunch(value: WorkbenchLaunch = {}): WorkbenchLaunch {
   if (typeof value !== "object" || value == null) fail("launch must be an object.");
   const initialTarget = value.initialTarget == null ? undefined : normalizeTarget(value.initialTarget);
+  let startInInsertMode: boolean | undefined;
+  if (value.startInInsertMode != null) {
+    if (typeof value.startInInsertMode !== "boolean") fail("startInInsertMode must be boolean.");
+    if (value.startInInsertMode && initialTarget == null) fail("startInInsertMode requires an initial target.");
+    startInInsertMode = value.startInInsertMode;
+  }
   let stories: readonly CodeStory[] | undefined;
   if (value.stories != null) {
     if (!Array.isArray(value.stories) || value.stories.length > MAX_STORIES) fail(`stories must contain at most ${MAX_STORIES} entries.`);
@@ -78,6 +84,7 @@ export function normalizeWorkbenchLaunch(value: WorkbenchLaunch = {}): Workbench
   }
   const normalized: WorkbenchLaunch = {};
   if (initialTarget != null) normalized.initialTarget = initialTarget;
+  if (startInInsertMode != null) normalized.startInInsertMode = startInInsertMode;
   if (stories != null) normalized.stories = stories;
   if (capabilities != null) normalized.capabilities = capabilities;
   if (byteLength(JSON.stringify(normalized)) > MAX_NORMALIZED_LAUNCH_BYTES) fail(`normalized launch exceeds ${MAX_NORMALIZED_LAUNCH_BYTES} bytes.`);

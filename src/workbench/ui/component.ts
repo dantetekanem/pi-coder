@@ -254,6 +254,7 @@ export class WorkbenchComponent implements Component, Focusable {
     this.tree = workbench.repositoryTree;
     this.restoredExplorerState = explorerState?.load();
     this.restoreExplorerState();
+    if (launch.startInInsertMode === true && workbench.bufferText != null) this.beginBufferEdit();
   }
 
   get focused(): boolean { return this._focused; }

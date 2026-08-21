@@ -32,6 +32,21 @@ describe("workbench target launch contracts", () => {
     expect(() => normalizeWorkbenchLaunch({ initialTarget: target })).toThrow();
   });
 
+  it("normalizes targeted INSERT startup without changing the default mode", () => {
+    expect(normalizeWorkbenchLaunch({
+      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+    })).toEqual({
+      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: true,
+    });
+    expect(() => normalizeWorkbenchLaunch({ startInInsertMode: true })).toThrow(/initial target/i);
+    expect(() => normalizeWorkbenchLaunch({
+      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+      startInInsertMode: "yes",
+    } as never)).toThrow(/boolean/i);
+  });
+
   it("preserves contract key and caller story order while enforcing story limits", () => {
     const launch = normalizeWorkbenchLaunch({
       initialTarget: { path: "a.ts", range: { startLine: 1, endLine: 1 } },

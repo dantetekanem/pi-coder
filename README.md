@@ -140,10 +140,11 @@ Common review controls:
 
 ## Browse and edit code
 
-Run:
+Run the Explorer, or open a repository-relative file directly in INSERT mode:
 
 ```text
 /code
+/code app/models/user.rb
 ```
 
 ![Browse and edit code with pi-coder](docs/assets/diff.gif)
@@ -172,7 +173,7 @@ See [docs/workbench.md](docs/workbench.md) for the full Workbench behavior and s
 
 Agents can use the same interfaces through:
 
-- `open_code` — open the Workbench at an optional file, range, or guided code story.
+- `open_code` — open the Workbench at an optional `path` already in INSERT mode, or at a structured file range or guided code story.
 - `open_code_diff` — open `/diff` with an optional target and prepopulated comments.
 - `submit_pr_review` — submit a confirmed configured-provider review.
 

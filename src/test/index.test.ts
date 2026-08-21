@@ -524,6 +524,8 @@ describe("code diff extension", () => {
     expect(pi.registerCommand).not.toHaveBeenCalledWith("interactive-review", expect.any(Object));
     expect(pi.registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "interactive_review" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code" }));
+    const openCode = pi.registerTool.mock.calls.find(([tool]) => tool.name === "open_code")?.[0];
+    expect(openCode.parameters.properties.path).toBeDefined();
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
   });
@@ -626,6 +628,30 @@ describe("code diff extension", () => {
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(ctx);
   });
 
+  it("opens a bare /code path at line one already in INSERT mode", async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const pi = {
+      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
+      registerTool: vi.fn(),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+    };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
+    codeDiffExtension(pi as never);
+
+    await commands.get("code")!.handler("app/models/user.rb", ctx);
+
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+      cwd: "/repo",
+      launch: {
+        initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+        startInInsertMode: true,
+        capabilities: { discuss: true },
+      },
+      syntaxTheme: "github-dark",
+    });
+  });
+
   it("validates /code before mount and stages direct DISCUSS exactly once", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const pi = {
@@ -652,6 +678,38 @@ describe("code diff extension", () => {
     expect(mocks.runPiWorkbench).toHaveBeenCalledTimes(1);
     expect(ctx.ui.setEditorText).toHaveBeenCalledTimes(1);
     expect(ctx.ui.setEditorText.mock.calls[0]![0]).toContain("Target: src/app.ts:2-3");
+  });
+
+  it("lets open_code request the same path-targeted INSERT startup without changing structured targets", async () => {
+    const tools = new Map<string, any>();
+    const pi = {
+      registerCommand: vi.fn(),
+      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+    };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
+    codeDiffExtension(pi as never);
+
+    await tools.get("open_code").execute("tool-call", { path: "app/models/user.rb" }, new AbortController().signal, vi.fn(), ctx);
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+      cwd: "/repo",
+      launch: {
+        initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
+        startInInsertMode: true,
+        capabilities: { discuss: true },
+      },
+      syntaxTheme: "github-dark",
+    });
+
+    mocks.runPiWorkbench.mockClear();
+    const target = { path: "app/models/user.rb", range: { startLine: 4, endLine: 6 } };
+    await tools.get("open_code").execute("tool-call", { target }, new AbortController().signal, vi.fn(), ctx);
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+      cwd: "/repo",
+      launch: { initialTarget: target, capabilities: { discuss: true } },
+      syntaxTheme: "github-dark",
+    });
   });
 
   it("open_code returns DISCUSS once through the tool result and never stages editor text", async () => {
