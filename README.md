@@ -147,6 +147,23 @@ Run the Explorer, or open a repository-relative file directly in INSERT mode:
 /code app/models/user.rb
 ```
 
+The Workbench remains the default. To use one command for every code-opening interface instead, add it to `~/.pi/agent/pi-code-diff-settings.json`. This example runs TTT through tmux:
+
+```json
+{
+  "code": {
+    "command": ["tmux", "split-window", "-h", "-c", "{cwd}", "ttt", "{cwd}"],
+    "targetArgs": ["{file}:{line}"]
+  },
+  "providers": {},
+  "repositories": {}
+}
+```
+
+`command` is direct argv, not a shell string, and supports only `{cwd}`. Optional `targetArgs` are appended for file targets and support `{cwd}`, `{file}`, and `{line}`. Pi waits for the command to finish. In this example, tmux returns after creating the pane, so Pi is ready while TTT stays open.
+
+The same command handles `/code`, `open_code`, `open_code_diff`, and the review UI's open-code action. Without a configured command, the existing Workbench and review UI behavior remains unchanged.
+
 ![Browse and edit code with pi-coder](docs/assets/diff.gif)
 
 `/code` fills the small gap between the coding agent and you. It is for the last 1% of the work, when you want to open the file yourself, read the code around it, make a small change, or point to exact lines and ask a question. Instead of leaving Pi or asking the agent to paste fragments into the conversation, you can work with the code directly and continue where you left off.
@@ -173,8 +190,8 @@ See [docs/workbench.md](docs/workbench.md) for the full Workbench behavior and s
 
 Agents can use the same interfaces through:
 
-- `open_code` — open the Workbench at an optional `path` already in INSERT mode, or at a structured file range or guided code story.
-- `open_code_diff` — open `/diff` with an optional target and prepopulated comments.
+- `open_code` — run the configured code command at an optional path or structured target; without one, open the Workbench.
+- `open_code_diff` — run the configured code command; without one, open `/diff` with an optional target and prepopulated comments.
 - `submit_pr_review` — submit a confirmed configured-provider review.
 
 ## Development

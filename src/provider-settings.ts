@@ -38,8 +38,14 @@ export interface RepositoryProfileSettings {
   importAliases?: Record<string, string>;
 }
 
+export interface CodeCommandSettings {
+  command: string[];
+  targetArgs?: string[];
+}
+
 export interface PiCodeDiffSettings {
   version: typeof PI_CODE_DIFF_SETTINGS_VERSION;
+  code?: CodeCommandSettings;
   providers: Record<string, ProviderSettings>;
   repositories: Record<string, RepositoryProfileSettings>;
 }
@@ -232,16 +238,39 @@ function readRepository(value: unknown, context: string): RepositoryProfileSetti
   };
 }
 
+function readCodeArgs(value: unknown, context: string, allowTarget: boolean): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`${context} must be an array.`);
+  return value.map((entry, index) => {
+    const template = readNonEmptyString(entry, `${context}[${index}]`);
+    const placeholders = [...template.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]!);
+    if (placeholders.some((name) => !["cwd", "file", "line"].includes(name))) throw new Error(`${context} contains an unsupported placeholder.`);
+    if (!allowTarget && placeholders.some((name) => name !== "cwd")) throw new Error(`${context} cannot use file or line placeholders.`);
+    if (template.replace(/\{(?:cwd|file|line)\}/g, "").match(/[{}]/)) throw new Error(`${context} contains a malformed placeholder.`);
+    return template;
+  });
+}
+
+function readCodeSettings(value: unknown): CodeCommandSettings | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) throw new Error("settings.code must be an object.");
+  rejectUnknownKeys(value, ["command", "targetArgs"], "settings.code");
+  const command = readCodeArgs(value.command, "settings.code.command", false);
+  if (command.length === 0) throw new Error("settings.code.command must not be empty.");
+  return { command, targetArgs: readCodeArgs(value.targetArgs, "settings.code.targetArgs", true) };
+}
+
 export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
-  rejectUnknownKeys(value, ["version", "providers", "repositories"], "settings");
-  if (value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
+  rejectUnknownKeys(value, ["version", "code", "providers", "repositories"], "settings");
+  if (value.version !== undefined && value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
+  const code = readCodeSettings(value.code);
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
   const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
-  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, providers, repositories });
+  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, ...(code == null ? {} : { code }), providers, repositories });
 }
 
 export function getPiCodeDiffSettingsPath(): string {

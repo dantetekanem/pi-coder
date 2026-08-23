@@ -94,6 +94,7 @@ describe("provider settings", () => {
   it("loads GitHub as the built-in provider when no settings file exists", () => {
     const settings = loadPiCodeDiffSettings();
 
+    expect(settings.code).toBeUndefined();
     expect(settings.repositories).toEqual({});
     expect(settings.providers.github).toMatchObject({
       id: "github",
@@ -139,9 +140,19 @@ describe("provider settings", () => {
     expect(getProviderCapability(provider, "unknown")).toBe(false);
   });
 
+  it("accepts one direct code command", () => {
+    const code = { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}"] };
+    const { version: _version, ...withoutVersion } = neutralSettings();
+    expect(parsePiCodeDiffSettings({ ...withoutVersion, code }).code).toEqual(code);
+    expect(parsePiCodeDiffSettings({ ...withoutVersion, code: { command: ["code-open"] } }).code).toEqual({ command: ["code-open"], targetArgs: [] });
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: "code-open" })).toThrow(/settings.code must be an object/i);
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: { ...code, command: ["code-open", "{file}"] } })).toThrow(/command.*file/i);
+  });
+
   it("rejects unknown fields and malformed provider values", () => {
     expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), extra: true })).toThrow("settings has unsupported fields: extra.");
     expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), version: 2 })).toThrow("Settings version must be 1.");
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), version: null })).toThrow("Settings version must be 1.");
 
     const invalid = neutralSettings();
     invalid.providers.primary.urls.patterns[0]!.host = "https://code.example";

@@ -11,7 +11,7 @@ import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
 import { createRemotePullRequestSummarySource } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
-import { getProviderCapability, renderProviderTemplate, requireProviderSettings, type ProviderSettings } from "./provider-settings.js";
+import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { saveReviewReceipt } from "./review-receipts.js";
 import { createRemoteReviewRepliesSource } from "./review-replies.js";
@@ -1052,27 +1052,32 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           continue;
         }
 
-        const outcome = await runCodeWorkbench("review-bridge", ctx, repoRoot, normalizeWorkbenchLaunch({
+        const code = await runCode("review-bridge", ctx, repoRoot, normalizeWorkbenchLaunch({
           initialTarget: result.target,
           capabilities: { discuss: true },
         }));
-        if ((outcome.status === "discuss" || outcome.status === "failed") && latestSession != null && !latestSessionDurable) {
-          initialSession = latestSession;
-          resumeBanner = "Could not durably save the full review draft. The review remains open with its in-memory snapshot; retry before leaving it.";
-          continue;
-        }
-        if (outcome.status === "discuss") {
-          const prompt = [
-            composeCodeDiscussionPrompt(repoRoot, outcome),
-            "",
-            "The suspended local review draft remains saved. When the discussion is complete, ask exactly: Good to continue the review? Reopen /diff only after the user explicitly confirms.",
-          ].join("\n");
-          return { started: true, prompt };
-        }
-        if (outcome.status === "failed") {
-          const message = `Code workbench failed: ${outcome.message} The review draft remains resumable as session ${sessionId}.`;
-          ctx.ui.notify(message, "error");
-          return { started: true, message };
+        if (code.kind === "command") {
+          if (!code.command.ok) ctx.ui.notify(code.command.message, "error");
+        } else {
+          const outcome = code.outcome;
+          if ((outcome.status === "discuss" || outcome.status === "failed") && latestSession != null && !latestSessionDurable) {
+            initialSession = latestSession;
+            resumeBanner = "Could not durably save the full review draft. The review remains open with its in-memory snapshot; retry before leaving it.";
+            continue;
+          }
+          if (outcome.status === "discuss") {
+            const prompt = [
+              composeCodeDiscussionPrompt(repoRoot, outcome),
+              "",
+              "The suspended local review draft remains saved. When the discussion is complete, ask exactly: Good to continue the review? Reopen /diff only after the user explicitly confirms.",
+            ].join("\n");
+            return { started: true, prompt };
+          }
+          if (outcome.status === "failed") {
+            const message = `Code workbench failed: ${outcome.message} The review draft remains resumable as session ${sessionId}.`;
+            ctx.ui.notify(message, "error");
+            return { started: true, message };
+          }
         }
 
         const refreshed = localReview == null ? await getReviewWindowData(pi, repoRoot) : await localReview.refresh();
@@ -1488,6 +1493,45 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     }
   }
 
+  async function runCodeCommand(
+    ctx: ExtensionContext,
+    cwd: string,
+    launch: WorkbenchLaunch,
+  ): Promise<{ ok: boolean; message: string } | undefined> {
+    let setting: CodeCommandSettings | undefined;
+    try { setting = loadPiCodeDiffSettings().code; }
+    catch (error) { return { ok: false, message: `Could not load code settings: ${error instanceof Error ? error.message : String(error)}` }; }
+    if (setting == null) return undefined;
+    if ((launch.stories?.length ?? 0) > 0) return { ok: false, message: "Code stories require the built-in Workbench." };
+
+    const target = launch.initialTarget;
+    const values: Record<string, string> = { cwd, file: target?.path ?? "", line: String(target?.range.startLine ?? 1) };
+    const templates = [...setting.command, ...(target == null ? [] : setting.targetArgs ?? [])];
+    const [command, ...args] = templates.map((template) => template.replace(/\{(cwd|file|line)\}/g, (_match, name: string) => values[name]!));
+    try {
+      const result = await launchExternalEditor(command!, args, cwd);
+      if (result.kind === "exit" && result.code === 0) return { ok: true, message: "Code command completed." };
+      const reason = result.kind === "exit" ? `exited with code ${result.code}` : `was terminated by ${result.signal}`;
+      return { ok: false, message: `Code command ${reason}.` };
+    } catch (error) {
+      return { ok: false, message: `Could not run code command: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      void repositoryChangeStatus.refresh(ctx);
+    }
+  }
+
+  async function runCode(
+    origin: "direct-code" | "open-code" | "review-bridge",
+    ctx: ExtensionContext,
+    cwd: string,
+    launch: WorkbenchLaunch,
+  ) {
+    const command = await runCodeCommand(ctx, cwd, launch);
+    return command == null
+      ? { kind: "workbench" as const, outcome: await runCodeWorkbench(origin, ctx, cwd, launch) }
+      : { kind: "command" as const, command };
+  }
+
   async function selectCodeSyntaxTheme(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) {
       ctx.ui.notify("/code syntax requires a TUI session.", "error");
@@ -1523,7 +1567,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
       }
-      const outcome = await runCodeWorkbench("direct-code", ctx, ctx.cwd, launch);
+      const code = await runCode("direct-code", ctx, ctx.cwd, launch);
+      if (code.kind === "command") {
+        ctx.ui.notify(code.command.message, code.command.ok ? "info" : "error");
+        return;
+      }
+      const outcome = code.outcome;
       if (outcome.status === "failed") {
         ctx.ui.notify(`Could not open code workbench: ${outcome.message}`, "error");
       } else if (outcome.status === "discuss") {
@@ -1540,12 +1589,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerTool({
     name: "open_code",
     label: "open-code",
-    description: "Open the Pi code workbench at an optional file path already in INSERT mode, or at a structured target with optional ordered code stories, then wait for cleanup and return its typed outcome.",
-    promptSnippet: "Open the interactive code workbench at a file path in INSERT mode or a structured file/range target, then wait for close or DISCUSS.",
+    description: "Run the configured code command at an optional path or structured target, or open the Workbench when no command is configured.",
+    promptSnippet: "Use the same configured code command as /code, with Workbench as the default.",
     promptGuidelines: [
-      "Call open_code only when the user directly asks to open or browse code in the interactive workbench.",
-      "Use open_code for code browsing/editing; open_code_diff remains review-only.",
-      "Wait for open_code to return. A DISCUSS result requests prose discussion, not file edits.",
+      "Call open_code only when the user directly asks to open or browse code.",
+      "Use open_code for code browsing/editing; open_code_diff remains review-only when no code command is configured.",
+      "Wait for open_code to return. A Workbench DISCUSS result requests prose discussion, not file edits.",
     ],
     parameters: Type.Object({
       cwd: Type.Optional(Type.String({ description: "Repository directory. Defaults to Pi's current cwd." })),
@@ -1591,7 +1640,11 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         const outcome: WorkbenchCompletionResult = { status: "failed", message: error instanceof Error ? error.message : String(error) };
         return { content: [{ type: "text" as const, text: `Code workbench did not start: ${outcome.message}` }], details: { outcome, cwd } };
       }
-      const outcome = await runCodeWorkbench("open-code", ctx, cwd, launch);
+      const code = await runCode("open-code", ctx, cwd, launch);
+      if (code.kind === "command") {
+        return { content: [{ type: "text" as const, text: code.command.message }], details: { command: code.command, cwd } };
+      }
+      const outcome = code.outcome;
       if (outcome.status === "discuss") {
         const prompt = composeCodeDiscussionPrompt(cwd, outcome);
         return {
@@ -1609,10 +1662,11 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerTool({
     name: "open_code_diff",
     label: "open-code-diff",
-    description: "Open the pi-coder interactive review UI with the same target syntax as /diff. Empty args review local working-tree/uncommitted changes.",
-    promptSnippet: "Open the interactive code diff review UI. Use empty args for local working-tree/uncommitted changes; do not ask the user to commit first.",
+    description: "Run the configured code command, or open the review UI with the same target syntax as /diff when no command is configured.",
+    promptSnippet: "Use the configured code command when present; otherwise open the interactive code diff review UI.",
     promptGuidelines: [
       "Call open_code_diff only when the user directly asks to open the diff, open /diff, or review current changes/a remote branch/PR. In a remote DISCUSS flow, an explicit yes to `Good to continue the review?` also counts as a direct request.",
+      "When a code command is configured, open_code_diff runs it at cwd; review-only args and comments apply only when the review UI is used.",
       "Do not call open_code_diff on your own, automatically, or merely because a prompt, tool result, or review handoff mentions reopening or restoring the diff. A remote discussion handoff never authorizes reopening before the user's continuation confirmation.",
       "Pass args exactly as you would after /diff: empty for local working-tree/uncommitted changes, remote <url | branch> for remote reviews, or base..head/base...head for custom ranges.",
       "Do not ask the user to commit before review; empty args reviews uncommitted working-tree changes, including untracked files.",
@@ -1700,6 +1754,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       };
       const args = input.args ?? "";
       const cwd = normalizeReviewCwd(input.cwd ?? ctx.cwd, ctx.cwd);
+      const command = await runCodeCommand(ctx, cwd, {});
+      if (command != null) {
+        return { content: [{ type: "text" as const, text: command.message }], details: { started: command.ok, message: command.message, args, cwd } };
+      }
       const continuation = input.continuation;
       if (continuation != null && (
         continuation.kind !== "remote-discuss"

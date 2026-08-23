@@ -691,6 +691,45 @@ describe("code diff extension", () => {
     });
   });
 
+  it("runs the configured code command", async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const tools = new Map<string, any>();
+    const pi = {
+      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
+      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+    };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
+    const launchExternalEditor = vi.fn(async () => ({ kind: "exit" as const, code: 0 }));
+    writeFileSync(settingsPath, JSON.stringify({
+      ...testSettings(),
+      code: { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}", "--line", "{line}"] },
+    }), "utf8");
+    codeDiffExtension(pi as never, { runExternalEditor: launchExternalEditor });
+
+    await commands.get("code")!.handler("app/models/user.rb", ctx);
+
+    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("code-open", [
+      "--cwd", "/repo", "--file", "app/models/user.rb", "--line", "1",
+    ], "/repo");
+    expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Code command completed.", "info");
+
+    launchExternalEditor.mockClear();
+    const opened = await tools.get("open_code").execute("tool-call", { path: "app/models/user.rb" }, new AbortController().signal, vi.fn(), ctx);
+    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("code-open", [
+      "--cwd", "/repo", "--file", "app/models/user.rb", "--line", "1",
+    ], "/repo");
+    expect(opened.content[0].text).toBe("Code command completed.");
+
+    launchExternalEditor.mockClear();
+    const diff = await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
+    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("code-open", ["--cwd", "/repo"], "/repo");
+    expect(diff.content[0].text).toBe("Code command completed.");
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
+  });
+
   it("validates /code before mount and stages direct DISCUSS exactly once", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const pi = {
@@ -1704,6 +1743,38 @@ describe("code diff extension", () => {
     expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
     expect(discussed.details.prompt).toContain("Good to continue the review?");
     expect(discussed.content[0].text.match(/Good to continue the review\?/g)).toHaveLength(1);
+  });
+
+  it("runs the configured code command from the review open-code action", async () => {
+    const tools = new Map<string, any>();
+    const file = localReviewFile();
+    const target = { path: "src/app.ts", range: { startLine: 1, endLine: 1 }, anchor: { algorithm: "sha256" as const, value: "a".repeat(64) } };
+    const openCode = {
+      type: "open-code" as const,
+      target,
+      resume: {
+        version: 1 as const, repository: "/repo", sessionId: "automatic-session", identity: "/repo|working|worktree|local",
+        scope: "git-diff" as const, path: target.path, side: "added" as const, range: target.range,
+        focus: { pane: "diff" as const, navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 }, contextHash: target.anchor,
+      },
+    };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.runReviewApp
+      .mockImplementationOnce(async () => {
+        writeFileSync(settingsPath, JSON.stringify({ ...testSettings(), code: { command: ["code-open"], targetArgs: ["{file}:{line}"] } }), "utf8");
+        return openCode;
+      })
+      .mockResolvedValueOnce({ type: "cancel" });
+    const runCommand = vi.fn(async () => ({ kind: "exit" as const, code: 0 }));
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    codeDiffExtension(pi as never, { runExternalEditor: runCommand });
+
+    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
+
+    expect(runCommand).toHaveBeenCalledExactlyOnceWith("code-open", ["src/app.ts:1"], "/repo");
+    expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
+    expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
   });
 
   it("uses in-memory latestSession across bridge refresh when disk persistence fails", async () => {
