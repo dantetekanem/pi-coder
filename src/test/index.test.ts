@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   createRemoteReviewRepliesSource: vi.fn(),
   repliesSource: { title: "Replies", loadingText: "Loading", load: vi.fn() },
   runPiWorkbench: vi.fn(),
+  withHerdrPaneZoom: vi.fn(async (action: () => Promise<unknown>) => action()),
   repositoryStatusRefresh: vi.fn(async () => undefined),
   repositoryStatusShutdown: vi.fn(async () => undefined),
 }));
@@ -82,6 +83,11 @@ vi.mock("../review-session.js", () => ({
 
 vi.mock("../ui/review-app.js", () => ({
   runReviewApp: mocks.runReviewApp,
+}));
+
+vi.mock("../ui/full-screen-overlay.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ui/full-screen-overlay.js")>()),
+  withHerdrPaneZoom: mocks.withHerdrPaneZoom,
 }));
 
 vi.mock("../review-grammar.js", async (importOriginal) => ({
@@ -528,6 +534,39 @@ describe("code diff extension", () => {
     expect(openCode.parameters.properties.path).toBeDefined();
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
+  });
+
+  it("mounts /diff through the Herdr-aware fullscreen boundary", async () => {
+    const tools = new Map<string, any>();
+    mocks.getReviewWindowData.mockResolvedValue({
+      repoRoot: "/repo",
+      files: [localReviewFile()],
+      branchBaseRevision: undefined,
+      modifiedRevision: undefined,
+      visibleScopes: ["git-diff"],
+    });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
+    const pi = {
+      registerCommand: vi.fn(),
+      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+      exec: vi.fn(),
+    };
+    const ctx = {
+      hasUI: true,
+      cwd: "/repo",
+      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() },
+    };
+
+    codeDiffExtension(pi as never);
+    await tools.get("open_code_diff").execute("tool-call", {}, new AbortController().signal, vi.fn(), ctx);
+
+    expect(mocks.withHerdrPaneZoom).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
+      run: expect.any(Function),
+      warn: expect.any(Function),
+    }));
+    expect(mocks.runReviewApp).toHaveBeenCalledOnce();
   });
 
   it("coalesces mutating-tool Git status refreshes asynchronously without replacing the footer", async () => {
