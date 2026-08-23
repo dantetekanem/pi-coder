@@ -39,6 +39,7 @@ function order(files: ReviewFile[], signals?: ReturnType<typeof buildReviewOrder
 
 const testSettings: PiCodeDiffSettings = {
   version: 1,
+  code: { version: 1, opener: { kind: "workbench" } },
   providers: {
     github: {
       id: "github",

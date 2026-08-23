@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Configure `/code`, `open_code`, and local-review code opening to use TTT, Fresh, Neovim, or another editor, with automatic tmux and Herdr panes.
+
 ## 0.5.0 - 2026-08-21
 
 ### Added

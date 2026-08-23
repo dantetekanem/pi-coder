@@ -147,4 +147,89 @@ describe("provider settings", () => {
     invalid.providers.primary.urls.patterns[0]!.host = "https://code.example";
     expect(() => parsePiCodeDiffSettings(invalid)).toThrow("providers.primary.urls.patterns[0].host is invalid.");
   });
+
+  it("defaults absent code settings to the built-in Workbench and accepts the explicit form", () => {
+    expect(parsePiCodeDiffSettings(neutralSettings()).code).toEqual({
+      version: 1,
+      opener: { kind: "workbench" },
+    });
+    expect(parsePiCodeDiffSettings({
+      ...neutralSettings(),
+      code: { version: 1, opener: { kind: "workbench" } },
+    }).code).toEqual({
+      version: 1,
+      opener: { kind: "workbench" },
+    });
+  });
+
+  it("defaults an external opener's omitted host and args", () => {
+    const settings = parsePiCodeDiffSettings({
+      ...neutralSettings(),
+      code: {
+        version: 1,
+        opener: {
+          kind: "external",
+          executable: "ttt",
+        },
+      },
+    });
+
+    expect(settings.code).toEqual({
+      version: 1,
+      opener: {
+        kind: "external",
+        executable: "ttt",
+        args: [],
+        host: "auto",
+      },
+    });
+  });
+
+  it.each(["auto", "current-terminal", "tmux-auto", "herdr-auto"])("accepts external settings with the %s host", (host) => {
+    const settings = parsePiCodeDiffSettings({
+      ...neutralSettings(),
+      code: {
+        version: 1,
+        opener: {
+          kind: "external",
+          executable: "ttt",
+          args: ["open", "--workspace", "{cwd}"],
+          targetArgs: ["--goto", "{file}:{line}:{endLine}"],
+          host,
+        },
+      },
+    });
+
+    expect(settings.code).toEqual({
+      version: 1,
+      opener: {
+        kind: "external",
+        executable: "ttt",
+        args: ["open", "--workspace", "{cwd}"],
+        targetArgs: ["--goto", "{file}:{line}:{endLine}"],
+        host,
+      },
+    });
+  });
+
+  it.each([
+    ["unknown code field", { version: 1, unexpected: true }, /code has unsupported fields: unexpected/],
+    ["unknown opener field", { version: 1, opener: { kind: "workbench", unexpected: true } }, /code\.opener has unsupported fields: unexpected/],
+    ["unsupported code version", { version: 2, opener: { kind: "workbench" } }, /code version must be 1/i],
+    ["missing external executable", { version: 1, opener: { kind: "external", args: ["open"] } }, /code\.opener\.executable/],
+    ["unknown placeholder", { version: 1, opener: { kind: "external", executable: "ttt", args: ["{unknown}"] } }, /placeholder/i],
+    ["target placeholder in always-rendered args", { version: 1, opener: { kind: "external", executable: "ttt", args: ["{file}"] } }, /args.*file/i],
+    ["too many combined arguments", {
+      version: 1,
+      opener: {
+        kind: "external",
+        executable: "ttt",
+        args: Array.from({ length: 32 }, () => "x"),
+        targetArgs: Array.from({ length: 33 }, () => "x"),
+      },
+    }, /(?:args.*targetArgs.*64|targetArgs.*args.*64|64.*(?:args|targetArgs))/i],
+    ["oversized argument", { version: 1, opener: { kind: "external", executable: "ttt", args: ["x".repeat(8_193)] } }, /args\[0\].*bytes/i],
+  ])("rejects $0", (_label, code, message) => {
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code })).toThrow(message);
+  });
 });

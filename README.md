@@ -1,9 +1,9 @@
 # pi-coder
 
-`pi-coder` adds two full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono):
+`pi-coder` adds two coding tools to [Pi](https://github.com/badlogic/pi-mono):
 
 - `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
-- `/code` browses and edits a workspace without leaving Pi.
+- `/code` opens the built-in Workbench or your configured terminal editor.
 
 It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews.
 
@@ -140,20 +140,57 @@ Common review controls:
 
 ## Browse and edit code
 
-Run the Explorer, or open a repository-relative file directly in INSERT mode:
+Open a workspace, or jump to a repository-relative file:
 
 ```text
 /code
 /code app/models/user.rb
 ```
 
+The built-in Workbench remains the default. Install [TTT](https://github.com/eugenioenko/ttt) on macOS with `brew tap eugenioenko/ttt && brew install ttt`, then add this to `~/.pi/agent/pi-code-diff-settings.json` (or `PI_CODE_DIFF_SETTINGS_PATH`):
+
+```json
+{
+  "version": 1,
+  "code": {
+    "version": 1,
+    "opener": {
+      "kind": "external",
+      "executable": "ttt",
+      "args": ["{cwd}"],
+      "targetArgs": ["{file}:{line}"],
+      "host": "auto"
+    }
+  },
+  "providers": {},
+  "repositories": {}
+}
+```
+
+To use another editor, replace `opener` above:
+
+- Fresh: `{"kind":"external","executable":"fresh","targetArgs":["{file}:{line}"],"host":"auto"}`
+- Neovim: `{"kind":"external","executable":"nvim","targetArgs":["+{line}","--","{file}"],"host":"auto"}`
+
+| Setting | Behavior |
+| --- | --- |
+| `code.version` | `1`; unknown versions or fields are rejected |
+| `kind` | `workbench` (the default) or `external` |
+| `executable` | External command resolved through absolute `PATH` entries |
+| `args` / `targetArgs` | Optional always-added / target-only argv; placeholders are `{cwd}`, `{file}`, `{line}`, and `{endLine}` |
+| `host` | `auto` (default), `current-terminal`, `tmux-auto`, or `herdr-auto` |
+
+`auto` prefers Herdr when `HERDR_ENV` and `HERDR_PANE_ID` are set, then tmux when `TMUX` is set, then the current terminal. Explicit `*-auto` hosts also fall back to the current terminal when unavailable. Arbitrary shell hosts are intentionally unsupported; another pane manager needs a bounded adapter. All hosts block until closure is confirmed. Herdr uses a completion sentinel and cannot report the editor's exit status.
+
+External editors require a TUI. Invalid settings, templates, executables, targets, symlink escapes, or anchor mismatches fail before the editor starts. A successful external return reports changes as unknown. The local `/diff` bridge saves its draft first, then resumes and revalidates after confirmed closure; it reopens immediately when nothing started and stays parked when closure is unconfirmed. Code stories, DISCUSS, and `/code syntax` remain Workbench-only.
+
 ![Browse and edit code with pi-coder](docs/assets/diff.gif)
 
 `/code` fills the small gap between the coding agent and you. It is for the last 1% of the work, when you want to open the file yourself, read the code around it, make a small change, or point to exact lines and ask a question. Instead of leaving Pi or asking the agent to paste fragments into the conversation, you can work with the code directly and continue where you left off.
 
-`/code` is not a replacement for Vim, Neovim, VS Code, or the editor you already use. If one of those is already part of your workflow, keep using it. But learning Vim or Neovim just to inspect one function makes no sense, and opening something as heavy as VS Code can be more than the moment needs. `/code` is the minimum viable coding tool: a small project explorer, readable source, search, and enough editing for focused changes. The agent can take you to the exact file and lines, guide you through related parts of the code, and bring a selected piece back into the conversation when you want to discuss it. It protects unsaved work, will not overwrite a file changed somewhere else, and stays away from staging, commits, and pushes. The goal is not less human involvement. It is keeping the human loop powerful without slowing the work down.
+The built-in Workbench is not a replacement for Vim, Neovim, VS Code, or the editor you already use; configure `/code` to open that editor instead. The Workbench remains a small project explorer with readable source, search, and enough editing for focused changes. It protects unsaved work, will not overwrite a file changed somewhere else, and stays away from staging, commits, and pushes.
 
-Run `/code syntax` to choose and remember any syntax theme bundled with Shiki. The selection applies the next time `/code` opens.
+When the Workbench is selected, run `/code syntax` to choose and remember any syntax theme bundled with Shiki.
 
 Common Workbench controls:
 
@@ -173,7 +210,7 @@ See [docs/workbench.md](docs/workbench.md) for the full Workbench behavior and s
 
 Agents can use the same interfaces through:
 
-- `open_code` — open the Workbench at an optional `path` already in INSERT mode, or at a structured file range or guided code story.
+- `open_code` — open the editor configured for `/code`; structured stories and DISCUSS use the built-in Workbench.
 - `open_code_diff` — open `/diff` with an optional target and prepopulated comments.
 - `submit_pr_review` — submit a confirmed configured-provider review.
 

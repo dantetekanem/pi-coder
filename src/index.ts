@@ -11,7 +11,7 @@ import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
 import { createRemotePullRequestSummarySource } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
-import { getProviderCapability, renderProviderTemplate, requireProviderSettings, type ProviderSettings } from "./provider-settings.js";
+import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type ProviderSettings } from "./provider-settings.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { saveReviewReceipt } from "./review-receipts.js";
 import { createRemoteReviewRepliesSource } from "./review-replies.js";
@@ -25,12 +25,13 @@ import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
-import { composeCodeDiscussionPrompt, parseDirectCodeArgs, runGuardedPiWorkbench } from "./adapters/pi/coordinator.js";
+import { composeCodeDiscussionPrompt, parseDirectCodeArgs, runGuardedCodeOpener, runGuardedPiWorkbench } from "./adapters/pi/coordinator.js";
 import { createReviewScopeFingerprint, resolveReviewResume, revalidateReviewDraftAnchors } from "./adapters/pi/review-bridge.js";
 import { ReviewInvocationCoordinator } from "./adapters/pi/review-invocation.js";
 import { listBundledShikiThemes } from "./workbench/node/shiki.js";
 import { normalizeWorkbenchLaunch } from "./workbench/target.js";
 import type { CodeStory, CodeTarget, WorkbenchCompletionResult, WorkbenchLaunch } from "./workbench/contracts.js";
+import { createCodeOpener, type CodeOpenResult, type CodeOpener } from "./code/opener.js";
 import { hasExactSubmoduleRange, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
 
 type InteractiveReviewMode = "working" | "staged" | "branch" | "custom";
@@ -736,7 +737,7 @@ function getRemoteBodyConsumption(result: ReviewSubmitPayload, includeFileCommen
   };
 }
 
-export default function codeDiffExtension(pi: ExtensionAPI, options: { runExternalEditor?: ExternalEditorLauncher } = {}) {
+export default function codeDiffExtension(pi: ExtensionAPI, options: { runExternalEditor?: ExternalEditorLauncher; openCode?: CodeOpener } = {}) {
   const initialShortcutConfig = loadCommentShortcuts();
   const launchExternalEditor = options.runExternalEditor ?? runExternalEditor;
   const repositoryChangeStatus = new RepositoryChangeStatusController();
@@ -1044,27 +1045,65 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           continue;
         }
 
-        const outcome = await runCodeWorkbench("review-bridge", ctx, repoRoot, normalizeWorkbenchLaunch({
+        let externalConfigured = false;
+        try { externalConfigured = configuredCodeKind() === "external"; }
+        catch (error) {
+          initialSession = latestSession ?? loadReviewSession(sessionIdentity, sessionId);
+          resumeBanner = `Could not load code settings: ${error instanceof Error ? error.message : String(error)}`;
+          continue;
+        }
+        if (externalConfigured && latestSession == null) {
+          latestSession = loadReviewSession(sessionIdentity, sessionId);
+          latestSessionDurable = latestSession != null;
+        }
+        if (externalConfigured && (latestSession == null || !latestSessionDurable)) {
+          initialSession = latestSession;
+          resumeBanner = "Could not durably save the full review draft. The review remains open; retry before launching an external editor.";
+          continue;
+        }
+
+        const codeResult = await runSelectedCode("review-bridge", ctx, repoRoot, normalizeWorkbenchLaunch({
           initialTarget: result.target,
           capabilities: { discuss: true },
         }));
-        if ((outcome.status === "discuss" || outcome.status === "failed") && latestSession != null && !latestSessionDurable) {
-          initialSession = latestSession;
-          resumeBanner = "Could not durably save the full review draft. The review remains open with its in-memory snapshot; retry before leaving it.";
-          continue;
-        }
-        if (outcome.status === "discuss") {
-          const prompt = [
-            composeCodeDiscussionPrompt(repoRoot, outcome),
-            "",
-            "The suspended local review draft remains saved. When the discussion is complete, ask exactly: Good to continue the review? Reopen /diff only after the user explicitly confirms.",
-          ].join("\n");
-          return { started: true, prompt };
-        }
-        if (outcome.status === "failed") {
-          const message = `Code workbench failed: ${outcome.message} The review draft remains resumable as session ${sessionId}.`;
-          ctx.ui.notify(message, "error");
-          return { started: true, message };
+        let codeBanner: string | undefined;
+        if (codeResult.backend === "workbench") {
+          const outcome = codeResult.outcome;
+          if ((outcome.status === "discuss" || outcome.status === "failed") && latestSession != null && !latestSessionDurable) {
+            initialSession = latestSession;
+            resumeBanner = "Could not durably save the full review draft. The review remains open with its in-memory snapshot; retry before leaving it.";
+            continue;
+          }
+          if (outcome.status === "discuss") {
+            const prompt = [
+              composeCodeDiscussionPrompt(repoRoot, outcome),
+              "",
+              "The suspended local review draft remains saved. When the discussion is complete, ask exactly: Good to continue the review? Reopen /diff only after the user explicitly confirms.",
+            ].join("\n");
+            return { started: true, prompt };
+          }
+          if (outcome.status === "failed") {
+            const message = `Code workbench failed: ${outcome.message} The review draft remains resumable as session ${sessionId}.`;
+            ctx.ui.notify(message, "error");
+            return { started: true, message };
+          }
+        } else {
+          const outcome = codeResult.outcome;
+          if (outcome.status === "failed" && outcome.lifecycle === "unconfirmed") {
+            const message = latestSessionDurable
+              ? `External editor closure was unconfirmed: ${sanitizeTerminalText(outcome.message)} Review parked and resumable as session ${sessionId}.`
+              : `External editor closure was unconfirmed: ${sanitizeTerminalText(outcome.message)} The review could not be safely parked.`;
+            ctx.ui.notify(message, "warning");
+            return { started: latestSessionDurable, message };
+          }
+          if (outcome.status === "failed" && outcome.lifecycle === "not-started") {
+            initialSession = latestSession ?? loadReviewSession(sessionIdentity, sessionId);
+            resumeBanner = `External editor did not start: ${sanitizeTerminalText(outcome.message)}`;
+            continue;
+          }
+          codeBanner = outcome.status === "closed"
+            ? "Returned from the external code editor."
+            : `External editor closed with an error: ${sanitizeTerminalText(outcome.message)}`;
         }
 
         const refreshed = localReview == null ? await getReviewWindowData(pi, repoRoot) : await localReview.refresh();
@@ -1093,10 +1132,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             localReview == null ? undefined : { repository: repoRoot, identity: sessionIdentity, sessionId, scopeFingerprint: localReview.scopeFingerprint },
           );
           initialSession = { ...persisted, state: resolution.state };
-          resumeBanner = resolution.banner;
+          resumeBanner = [codeBanner, resolution.banner].filter((part): part is string => part != null && part.length > 0).join(" ") || undefined;
         } else {
           initialSession = null;
-          resumeBanner = "Review location is stale because the saved review frame could not be restored.";
+          resumeBanner = [codeBanner, "Review location is stale because the saved review frame could not be restored."].filter((part): part is string => part != null && part.length > 0).join(" ");
         }
       }
 
@@ -1480,12 +1519,66 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     }
   }
 
+  const configuredCodeOpener = options.openCode ?? createCodeOpener({
+    runWorkbench: (ctx, cwd, launch) => runPiWorkbench(ctx, { cwd, launch, syntaxTheme: codeSyntaxTheme }),
+  });
+
+  function externalOpenFailure(message: string, code?: string): CodeOpenResult {
+    return {
+      backend: "external",
+      outcome: {
+        status: "failed",
+        lifecycle: "not-started",
+        message,
+        ...(code == null ? {} : { code }),
+      },
+    };
+  }
+
+  function configuredCodeKind(): "workbench" | "external" {
+    return loadPiCodeDiffSettings().code.opener.kind;
+  }
+
+  async function runConfiguredExternalCode(
+    origin: "direct-code" | "open-code" | "review-bridge",
+    ctx: ExtensionContext,
+    cwd: string,
+    launch: WorkbenchLaunch,
+  ): Promise<CodeOpenResult> {
+    try {
+      return await runGuardedCodeOpener(
+        origin,
+        () => configuredCodeOpener(origin, ctx, cwd, launch),
+        externalOpenFailure,
+      );
+    } finally {
+      void repositoryChangeStatus.refresh(ctx);
+    }
+  }
+
+  async function runSelectedCode(
+    origin: "direct-code" | "open-code" | "review-bridge",
+    ctx: ExtensionContext,
+    cwd: string,
+    launch: WorkbenchLaunch,
+  ): Promise<CodeOpenResult> {
+    let kind: "workbench" | "external";
+    try { kind = configuredCodeKind(); }
+    catch (error) { return externalOpenFailure(error instanceof Error ? error.message : String(error)); }
+    if (kind === "external") return runConfiguredExternalCode(origin, ctx, cwd, launch);
+    return { backend: "workbench", outcome: await runCodeWorkbench(origin, ctx, cwd, launch) };
+  }
+
   async function selectCodeSyntaxTheme(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) {
       ctx.ui.notify("/code syntax requires a TUI session.", "error");
       return;
     }
     try {
+      if (configuredCodeKind() === "external") {
+        ctx.ui.notify("/code syntax is Workbench-only; configure the built-in Workbench to choose a Shiki theme.", "info");
+        return;
+      }
       const themes = await listBundledShikiThemes();
       const selected = await pickSyntaxTheme(ctx.ui, themes, codeSyntaxTheme);
       if (selected == null) return;
@@ -1495,12 +1588,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       saveReviewPreference({ codeSyntaxTheme });
       ctx.ui.notify(`/code syntax theme: ${choice.displayName}`, "info");
     } catch (error) {
-      ctx.ui.notify(`Could not load Shiki themes: ${error instanceof Error ? error.message : String(error)}`, "error");
+      ctx.ui.notify(`Could not load code settings or Shiki themes: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
 
   const codeCommand = {
-    description: "Browse repository files, or open /code <path> directly in INSERT mode. Use /code syntax to choose a Shiki theme. Structured options: --path, --line, --end-line, --anchor-sha256, --story-json.",
+    description: "Open the configured code editor for a workspace or repository-relative file. Built-in Workbench options: syntax, --path, --line, --end-line, --anchor-sha256, --story-json.",
     getArgumentCompletions: (prefix: string) => "syntax".startsWith(prefix)
       ? [{ value: "syntax", label: "syntax" }]
       : null,
@@ -1515,7 +1608,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
       }
-      const outcome = await runCodeWorkbench("direct-code", ctx, ctx.cwd, launch);
+      const result = await runSelectedCode("direct-code", ctx, ctx.cwd, launch);
+      if (result.backend === "external") {
+        if (result.outcome.status === "failed") ctx.ui.notify(`Could not open external code editor: ${sanitizeTerminalText(result.outcome.message)}`, "error");
+        return;
+      }
+      const outcome = result.outcome;
       if (outcome.status === "failed") {
         ctx.ui.notify(`Could not open code workbench: ${outcome.message}`, "error");
       } else if (outcome.status === "discuss") {
@@ -1532,12 +1630,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerTool({
     name: "open_code",
     label: "open-code",
-    description: "Open the Pi code workbench at an optional file path already in INSERT mode, or at a structured target with optional ordered code stories, then wait for cleanup and return its typed outcome.",
-    promptSnippet: "Open the interactive code workbench at a file path in INSERT mode or a structured file/range target, then wait for close or DISCUSS.",
+    description: "Open the code editor configured for /code at an optional workspace-relative path or structured target, then wait for its owned lifecycle to close. Ordered stories and DISCUSS are available only in the built-in Workbench.",
+    promptSnippet: "Open the editor configured for /code at a workspace, file, or structured range, then wait for confirmed cleanup.",
     promptGuidelines: [
-      "Call open_code only when the user directly asks to open or browse code in the interactive workbench.",
+      "Call open_code only when the user directly asks to open or browse code.",
       "Use open_code for code browsing/editing; open_code_diff remains review-only.",
-      "Wait for open_code to return. A DISCUSS result requests prose discussion, not file edits.",
+      "Wait for open_code to return. External editors report file changes as unknown; a Workbench DISCUSS result requests prose discussion, not file edits.",
     ],
     parameters: Type.Object({
       cwd: Type.Optional(Type.String({ description: "Repository directory. Defaults to Pi's current cwd." })),
@@ -1581,9 +1679,25 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         });
       } catch (error) {
         const outcome: WorkbenchCompletionResult = { status: "failed", message: error instanceof Error ? error.message : String(error) };
-        return { content: [{ type: "text" as const, text: `Code workbench did not start: ${outcome.message}` }], details: { outcome, cwd } };
+        return { content: [{ type: "text" as const, text: `Code editor did not start: ${outcome.message}` }], details: { outcome, cwd } };
       }
-      const outcome = await runCodeWorkbench("open-code", ctx, cwd, launch);
+      try {
+        if (configuredCodeKind() === "external" && (launch.stories?.length ?? 0) > 0) {
+          const outcome = { status: "failed" as const, lifecycle: "not-started" as const, message: "Code stories are Workbench-only and cannot be opened by an external editor." };
+          return { content: [{ type: "text" as const, text: `External code editor did not start: ${outcome.message}` }], details: { outcome, cwd } };
+        }
+      } catch {
+        // runSelectedCode returns the actionable settings failure below.
+      }
+      const result = await runSelectedCode("open-code", ctx, cwd, launch);
+      if (result.backend === "external") {
+        const outcome = result.outcome;
+        const text = outcome.status === "closed"
+          ? "External code editor closed. Changes: unknown."
+          : `External code editor failed: ${outcome.message}`;
+        return { content: [{ type: "text" as const, text }], details: { outcome, cwd } };
+      }
+      const outcome = result.outcome;
       if (outcome.status === "discuss") {
         const prompt = composeCodeDiscussionPrompt(cwd, outcome);
         return {

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { defaultCodeSettings, parseCodeSettings, type CodeSettings } from "./code/settings.js";
 
 export const PI_CODE_DIFF_SETTINGS_VERSION = 1;
 
@@ -40,6 +41,7 @@ export interface RepositoryProfileSettings {
 
 export interface PiCodeDiffSettings {
   version: typeof PI_CODE_DIFF_SETTINGS_VERSION;
+  code: CodeSettings;
   providers: Record<string, ProviderSettings>;
   repositories: Record<string, RepositoryProfileSettings>;
 }
@@ -113,6 +115,7 @@ function withBuiltInProviders(settings: PiCodeDiffSettings): PiCodeDiffSettings 
 function defaultSettings(): PiCodeDiffSettings {
   return withBuiltInProviders({
     version: PI_CODE_DIFF_SETTINGS_VERSION,
+    code: defaultCodeSettings(),
     providers: {},
     repositories: {},
   });
@@ -234,14 +237,15 @@ function readRepository(value: unknown, context: string): RepositoryProfileSetti
 
 export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
-  rejectUnknownKeys(value, ["version", "providers", "repositories"], "settings");
+  rejectUnknownKeys(value, ["version", "code", "providers", "repositories"], "settings");
   if (value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
+  const code = parseCodeSettings(value.code);
   const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
-  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, providers, repositories });
+  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, code, providers, repositories });
 }
 
 export function getPiCodeDiffSettingsPath(): string {

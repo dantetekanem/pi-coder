@@ -118,25 +118,33 @@ export function parseDirectCodeArgs(args: string): WorkbenchLaunch {
   return normalizeWorkbenchLaunch(launch);
 }
 
-export async function runGuardedPiWorkbench(
+export async function runGuardedCodeOpener<T>(
   origin: PiWorkbenchOrigin,
-  runner: () => Promise<WorkbenchCompletionResult>,
-): Promise<WorkbenchCompletionResult> {
+  runner: () => Promise<T>,
+  failed: (message: string, code?: string) => T,
+): Promise<T> {
   if (activeOrigin != null) {
-    return {
-      status: "failed",
-      code: PI_WORKBENCH_ACTIVE,
-      message: `A Pi code workbench is already active (${activeOrigin}); ${origin} cannot start another one.`,
-    };
+    return failed(`A Pi code opener is already active (${activeOrigin}); ${origin} cannot start another one.`, PI_WORKBENCH_ACTIVE);
   }
   activeOrigin = origin;
   try {
     return await runner();
   } catch (error) {
-    return { status: "failed", message: error instanceof Error ? error.message : String(error) };
+    return failed(error instanceof Error ? error.message : String(error));
   } finally {
     activeOrigin = null;
   }
+}
+
+export async function runGuardedPiWorkbench(
+  origin: PiWorkbenchOrigin,
+  runner: () => Promise<WorkbenchCompletionResult>,
+): Promise<WorkbenchCompletionResult> {
+  return runGuardedCodeOpener(origin, runner, (message, code) => ({
+    status: "failed",
+    message,
+    ...(code == null ? {} : { code }),
+  }));
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {
