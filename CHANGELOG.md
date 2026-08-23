@@ -4,7 +4,7 @@
 
 ### Added
 
-- Run an optional configured command from `/code`.
+- Use one configured code command for `/code`, `open_code`, `open_code_diff`, and review open-code actions.
 
 ## 0.5.0 - 2026-08-21
 

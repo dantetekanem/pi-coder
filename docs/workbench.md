@@ -1,6 +1,10 @@
 # Experimental code workbench
 
-`/code` opens the full-screen, two-pane **EXPLORER** / **SOURCE** workbench by default. You can configure `/code` to run a command instead. The Workbench browses and edits a filesystem workspace whether or not that workspace is a Git repository. When Git is available, `/code` prefers Git-aware file discovery; Git absence or ordinary Git failure never blocks the workbench. Pass one normalized repository-relative path, such as `/code app/models/user.rb`, to open that file at line 1 already in INSERT mode. Quote a path that contains spaces. `/diff` is the only review slash command; `/code-diff` does not exist. The agent tool `open_code_diff` remains available for diff review and is unrelated to `/code`; the separate `open_code` tool opens this workbench.
+`/code` opens the full-screen, two-pane **EXPLORER** / **SOURCE** workbench by default. Without a configured code command, `open_code` also uses the Workbench and `open_code_diff` uses the review UI. With one configured, `/code`, both tools, and the review UI's open-code action run that command instead.
+
+The configured `command` is direct argv and supports only `{cwd}`. Optional `targetArgs` are added for file targets and support `{cwd}`, `{file}`, and `{line}`.
+
+The Workbench browses and edits a filesystem workspace whether or not that workspace is a Git repository. When Git is available, `/code` prefers Git-aware file discovery; Git absence or ordinary Git failure never blocks the workbench. Pass one normalized repository-relative path, such as `/code app/models/user.rb`, to open that file at line 1 already in INSERT mode. Quote a path that contains spaces. `/diff` is the only review slash command; `/code-diff` does not exist.
 
 The same core and component are used by Pi and the standalone application. It is not an IDE: there is no LSP, external editor, semantic symbol index, staging, commit, push, or eager workspace content/index loading. The agent-facing `open_code` tool accepts `cwd`, an optional repository-relative `path` that starts in INSERT mode, an optional structured target (`path`, line range, and anchor hash), and ordered code stories. The direct `path` and structured `target` are mutually exclusive; these are tool inputs, not a documentation skill.
 

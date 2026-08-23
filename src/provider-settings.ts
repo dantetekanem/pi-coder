@@ -40,7 +40,7 @@ export interface RepositoryProfileSettings {
 
 export interface CodeCommandSettings {
   command: string[];
-  targetArgs: string[];
+  targetArgs?: string[];
 }
 
 export interface PiCodeDiffSettings {
@@ -263,7 +263,7 @@ function readCodeSettings(value: unknown): CodeCommandSettings | undefined {
 export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
   rejectUnknownKeys(value, ["version", "code", "providers", "repositories"], "settings");
-  if (value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
+  if (value.version !== undefined && value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
   const code = readCodeSettings(value.code);
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
   const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
