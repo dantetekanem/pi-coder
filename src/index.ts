@@ -11,7 +11,7 @@ import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
 import { createRemotePullRequestSummarySource } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
-import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type ProviderSettings } from "./provider-settings.js";
+import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { saveReviewReceipt } from "./review-receipts.js";
 import { createRemoteReviewRepliesSource } from "./review-replies.js";
@@ -1515,29 +1515,35 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
       }
-      let codeSetting: "workbench" | "ttt-tmux";
+      let codeSetting: CodeCommandSettings | undefined;
       try { codeSetting = loadPiCodeDiffSettings().code; }
       catch (error) {
         ctx.ui.notify(`Could not load code settings: ${error instanceof Error ? error.message : String(error)}`, "error");
         return;
       }
-      if (codeSetting === "ttt-tmux") {
+      if (codeSetting != null) {
         if ((launch.stories?.length ?? 0) > 0) {
           ctx.ui.notify("Code stories require the built-in Workbench.", "error");
           return;
         }
         const target = launch.initialTarget;
-        const editorArgs = [ctx.cwd, ...(target == null ? [] : [`${target.path}:${target.range.startLine}`])];
+        const values: Record<string, string> = {
+          cwd: ctx.cwd,
+          file: target?.path ?? "",
+          line: String(target?.range.startLine ?? 1),
+        };
+        const templates = [...codeSetting.command, ...(target == null ? [] : codeSetting.targetArgs)];
+        const [command, ...commandArgs] = templates.map((template) => template.replace(/\{(cwd|file|line)\}/g, (_match, name: string) => values[name]!));
         try {
-          const result = await launchExternalEditor("tmux", ["split-window", "-h", "-c", ctx.cwd, "ttt", ...editorArgs], ctx.cwd);
+          const result = await launchExternalEditor(command!, commandArgs, ctx.cwd);
           if (result.kind === "exit" && result.code === 0) {
-            ctx.ui.notify("Opened TTT in a tmux pane.", "info");
+            ctx.ui.notify("Code command completed.", "info");
           } else {
             const reason = result.kind === "exit" ? `exited with code ${result.code}` : `was terminated by ${result.signal}`;
-            ctx.ui.notify(`Could not open TTT: tmux ${reason}.`, "error");
+            ctx.ui.notify(`Code command ${reason}.`, "error");
           }
         } catch (error) {
-          ctx.ui.notify(`Could not open TTT: ${error instanceof Error ? error.message : String(error)}`, "error");
+          ctx.ui.notify(`Could not run code command: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
         return;
       }

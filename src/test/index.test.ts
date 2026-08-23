@@ -652,21 +652,24 @@ describe("code diff extension", () => {
     });
   });
 
-  it("opens configured TTT in a tmux pane without waiting for the editor", async () => {
+  it("runs the configured code command", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const pi = { registerCommand: vi.fn((name: string, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
     const launchExternalEditor = vi.fn(async () => ({ kind: "exit" as const, code: 0 }));
-    writeFileSync(settingsPath, JSON.stringify({ ...testSettings(), code: "ttt-tmux" }), "utf8");
+    writeFileSync(settingsPath, JSON.stringify({
+      ...testSettings(),
+      code: { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}", "--line", "{line}"] },
+    }), "utf8");
     codeDiffExtension(pi as never, { runExternalEditor: launchExternalEditor });
 
     await commands.get("code")!.handler("app/models/user.rb", ctx);
 
-    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("tmux", [
-      "split-window", "-h", "-c", "/repo", "ttt", "/repo", "app/models/user.rb:1",
+    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("code-open", [
+      "--cwd", "/repo", "--file", "app/models/user.rb", "--line", "1",
     ], "/repo");
     expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
-    expect(ctx.ui.notify).toHaveBeenCalledWith("Opened TTT in a tmux pane.", "info");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Code command completed.", "info");
   });
 
   it("validates /code before mount and stages direct DISCUSS exactly once", async () => {

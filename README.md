@@ -147,18 +147,21 @@ Run the Explorer, or open a repository-relative file directly in INSERT mode:
 /code app/models/user.rb
 ```
 
-The Workbench remains the default. If you want `/code` to open TTT in a new tmux pane, add `"code": "ttt-tmux"` to `~/.pi/agent/pi-code-diff-settings.json`:
+The Workbench remains the default. To run a command from `/code` instead, add it to `~/.pi/agent/pi-code-diff-settings.json`. This example runs TTT through tmux:
 
 ```json
 {
   "version": 1,
-  "code": "ttt-tmux",
+  "code": {
+    "command": ["tmux", "split-window", "-h", "-c", "{cwd}", "ttt", "{cwd}"],
+    "targetArgs": ["{file}:{line}"]
+  },
   "providers": {},
   "repositories": {}
 }
 ```
 
-Start Pi inside tmux first. `/code` returns once tmux creates the pane, so you can switch back to Pi and keep talking while TTT stays open. The `open_code` tool and review UI still use the Workbench.
+`command` is direct argv, not a shell string. `targetArgs` are appended when `/code` receives a path; they support `{cwd}`, `{file}`, and `{line}`. Pi waits for the command to finish. In this example, tmux returns after creating the pane, so Pi is ready while TTT stays open. The `open_code` tool and review UI still use the Workbench.
 
 ![Browse and edit code with pi-coder](docs/assets/diff.gif)
 

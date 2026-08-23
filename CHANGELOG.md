@@ -4,7 +4,7 @@
 
 ### Added
 
-- Optionally open `/code` in a detached TTT tmux pane.
+- Run an optional configured command from `/code`.
 
 ## 0.5.0 - 2026-08-21
 

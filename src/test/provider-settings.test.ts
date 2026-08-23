@@ -94,7 +94,7 @@ describe("provider settings", () => {
   it("loads GitHub as the built-in provider when no settings file exists", () => {
     const settings = loadPiCodeDiffSettings();
 
-    expect(settings.code).toBe("workbench");
+    expect(settings.code).toBeUndefined();
     expect(settings.repositories).toEqual({});
     expect(settings.providers.github).toMatchObject({
       id: "github",
@@ -140,9 +140,11 @@ describe("provider settings", () => {
     expect(getProviderCapability(provider, "unknown")).toBe(false);
   });
 
-  it("accepts only the built-in Workbench or detached TTT pane", () => {
-    expect(parsePiCodeDiffSettings({ ...neutralSettings(), code: "ttt-tmux" }).code).toBe("ttt-tmux");
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: "nvim" })).toThrow(/code must be workbench or ttt-tmux/i);
+  it("accepts one direct code command", () => {
+    const code = { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}"] };
+    expect(parsePiCodeDiffSettings({ ...neutralSettings(), code }).code).toEqual(code);
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: "code-open" })).toThrow(/settings.code must be an object/i);
+    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: { ...code, command: ["code-open", "{file}"] } })).toThrow(/command.*file/i);
   });
 
   it("rejects unknown fields and malformed provider values", () => {
