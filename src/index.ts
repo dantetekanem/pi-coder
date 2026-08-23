@@ -23,6 +23,7 @@ import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComm
 import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
+import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
 import { composeCodeDiscussionPrompt, parseDirectCodeArgs, runGuardedPiWorkbench } from "./adapters/pi/coordinator.js";
@@ -956,7 +957,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             ctx.ui.notify("Draft anchor validation could not be saved; this mount is using the validated in-memory snapshot while the previous full durable snapshot remains intact.", "warning");
           }
         }
-        result = await runReviewApp(ctx, {
+        const mountReview = () => runReviewApp(ctx, {
           files,
           repoRoot,
           loadFileContents: loadFileContentsForReview,
@@ -981,6 +982,13 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             latestSessionDurable = saveReviewSessionWithStatus(sessionIdentity, session, { ...sessionContext, id: sessionId }).saved;
             return true;
           },
+        });
+        result = await withHerdrPaneZoom(mountReview, {
+          run: async (args) => {
+            const command = await pi.exec("herdr", args, { timeout: 2_000 });
+            return { code: command.code, stdout: command.stdout, stderr: command.stderr };
+          },
+          warn: (message) => ctx.ui.notify(message, "warning"),
         });
         firstReview = false;
 
