@@ -47,7 +47,6 @@
     "src/types.ts",
     "src/ui",
     "src/adapters",
-    "src/code",
     "src/workbench",
     "docs",
     "scripts",

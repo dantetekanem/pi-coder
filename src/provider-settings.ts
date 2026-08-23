@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { defaultCodeSettings, parseCodeSettings, type CodeSettings } from "./code/settings.js";
 
 export const PI_CODE_DIFF_SETTINGS_VERSION = 1;
 
@@ -41,7 +40,7 @@ export interface RepositoryProfileSettings {
 
 export interface PiCodeDiffSettings {
   version: typeof PI_CODE_DIFF_SETTINGS_VERSION;
-  code: CodeSettings;
+  code: "workbench" | "ttt-tmux";
   providers: Record<string, ProviderSettings>;
   repositories: Record<string, RepositoryProfileSettings>;
 }
@@ -115,7 +114,7 @@ function withBuiltInProviders(settings: PiCodeDiffSettings): PiCodeDiffSettings 
 function defaultSettings(): PiCodeDiffSettings {
   return withBuiltInProviders({
     version: PI_CODE_DIFF_SETTINGS_VERSION,
-    code: defaultCodeSettings(),
+    code: "workbench",
     providers: {},
     repositories: {},
   });
@@ -239,8 +238,9 @@ export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
   rejectUnknownKeys(value, ["version", "code", "providers", "repositories"], "settings");
   if (value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
+  const code = value.code ?? "workbench";
+  if (code !== "workbench" && code !== "ttt-tmux") throw new Error("settings.code must be workbench or ttt-tmux.");
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
-  const code = parseCodeSettings(value.code);
   const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");

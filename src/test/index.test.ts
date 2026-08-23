@@ -155,22 +155,6 @@ function testSettings() {
   };
 }
 
-function externalCodeSettings() {
-  return {
-    ...testSettings(),
-    code: {
-      version: 1,
-      opener: {
-        kind: "external",
-        executable: "ttt",
-        args: ["{cwd}"],
-        targetArgs: ["{file}:{line}"],
-        host: "auto",
-      },
-    },
-  };
-}
-
 function remoteTarget() {
   return {
     provider: "github",
@@ -239,30 +223,6 @@ function localReviewFile() {
     },
     lastCommit: null,
     allFiles: null,
-  };
-}
-
-function localReviewBridgeFrame() {
-  const target = {
-    path: "src/app.ts",
-    range: { startLine: 1, endLine: 1 },
-    anchor: { algorithm: "sha256" as const, value: "a".repeat(64) },
-  };
-  return {
-    type: "open-code" as const,
-    target,
-    resume: {
-      version: 1 as const,
-      repository: "/repo",
-      sessionId: "automatic-session",
-      identity: "/repo|working|worktree|local",
-      scope: "git-diff" as const,
-      path: target.path,
-      side: "added" as const,
-      range: target.range,
-      focus: { pane: "diff" as const, navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 },
-      contextHash: target.anchor,
-    },
   };
 }
 
@@ -692,6 +652,23 @@ describe("code diff extension", () => {
     });
   });
 
+  it("opens configured TTT in a tmux pane without waiting for the editor", async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const pi = { registerCommand: vi.fn((name: string, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
+    const launchExternalEditor = vi.fn(async () => ({ kind: "exit" as const, code: 0 }));
+    writeFileSync(settingsPath, JSON.stringify({ ...testSettings(), code: "ttt-tmux" }), "utf8");
+    codeDiffExtension(pi as never, { runExternalEditor: launchExternalEditor });
+
+    await commands.get("code")!.handler("app/models/user.rb", ctx);
+
+    expect(launchExternalEditor).toHaveBeenCalledExactlyOnceWith("tmux", [
+      "split-window", "-h", "-c", "/repo", "ttt", "/repo", "app/models/user.rb:1",
+    ], "/repo");
+    expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Opened TTT in a tmux pane.", "info");
+  });
+
   it("validates /code before mount and stages direct DISCUSS exactly once", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const pi = {
@@ -748,119 +725,6 @@ describe("code diff extension", () => {
     expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
       cwd: "/repo",
       launch: { initialTarget: target, capabilities: { discuss: true } },
-      syntaxTheme: "github-dark",
-    });
-  });
-
-  it("routes external /code through the shared opener while syntax remains Workbench-only", async () => {
-    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    const pi = {
-      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
-      registerTool: vi.fn(),
-      registerShortcut: vi.fn(),
-      on: vi.fn(),
-    };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn(), custom: vi.fn(async () => null) } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "closed", changes: "unknown" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    await commands.get("code")!.handler("syntax", ctx);
-    expect(openCode).not.toHaveBeenCalled();
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/syntax.*workbench-only/i), "info");
-
-    await commands.get("code")!.handler("app/models/user.rb", ctx);
-    expect(openCode).toHaveBeenCalledWith("direct-code", ctx, "/repo", {
-      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
-      startInInsertMode: true,
-      capabilities: { discuss: true },
-    });
-    expect(mocks.runPiWorkbench).not.toHaveBeenCalled();
-  });
-
-  it("routes open_code externally, reports unknown changes, and rejects stories before opening", async () => {
-    const tools = new Map<string, any>();
-    const pi = {
-      registerCommand: vi.fn(),
-      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
-      registerShortcut: vi.fn(),
-      on: vi.fn(),
-    };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "closed", changes: "unknown" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    const result = await tools.get("open_code").execute("tool-call", { path: "app/models/user.rb" }, new AbortController().signal, vi.fn(), ctx);
-    expect(openCode).toHaveBeenCalledWith("open-code", ctx, "/repo", {
-      initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
-      startInInsertMode: true,
-      capabilities: { discuss: true },
-    });
-    expect(result.content[0].text).toMatch(/changes.*unknown/i);
-
-    openCode.mockClear();
-    const rejected = await tools.get("open_code").execute("tool-call", {
-      target: { path: "src/app.ts", range: { startLine: 8, endLine: 8 } },
-      stories: [{ id: "why", target: { path: "src/app.ts", range: { startLine: 8, endLine: 8 } }, prose: "Explain the boundary." }],
-    }, new AbortController().signal, vi.fn(), ctx);
-    expect(openCode).not.toHaveBeenCalled();
-    expect(rejected.content[0].text).toMatch(/stories.*workbench-only/i);
-  });
-
-  it("keeps one external /code opener active across a concurrent open_code call", async () => {
-    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    const tools = new Map<string, any>();
-    const firstLaunch = deferred<{ backend: "external"; outcome: { status: "closed"; changes: "unknown" } }>();
-    const pi = {
-      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
-      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
-      registerShortcut: vi.fn(),
-      on: vi.fn(),
-    };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn()
-      .mockImplementationOnce(() => firstLaunch.promise)
-      .mockResolvedValue({ backend: "external", outcome: { status: "closed", changes: "unknown" } });
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    const direct = commands.get("code")!.handler("src/app.ts", ctx);
-    await vi.waitFor(() => expect(openCode).toHaveBeenCalledOnce());
-
-    const blocked = await tools.get("open_code").execute("tool-call", { path: "src/app.ts" }, new AbortController().signal, vi.fn(), ctx);
-    expect(openCode).toHaveBeenCalledOnce();
-    expect(blocked.details).toMatchObject({
-      outcome: expect.objectContaining({
-        status: "failed",
-        code: "PI_WORKBENCH_ACTIVE",
-        message: expect.stringMatching(/already active/i),
-      }),
-    });
-
-    firstLaunch.resolve({ backend: "external", outcome: { status: "closed", changes: "unknown" } });
-    await direct;
-    await tools.get("open_code").execute("tool-call", { path: "src/app.ts" }, new AbortController().signal, vi.fn(), ctx);
-    expect(openCode).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps zero-config /code on the exact Workbench launch contract", async () => {
-    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    const pi = { registerCommand: vi.fn((name: string, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn();
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    await commands.get("code")!.handler("app/models/user.rb", ctx);
-
-    expect(openCode).not.toHaveBeenCalled();
-    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
-      cwd: "/repo",
-      launch: {
-        initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
-        startInInsertMode: true,
-        capabilities: { discuss: true },
-      },
       syntaxTheme: "github-dark",
     });
   });
@@ -1818,127 +1682,6 @@ describe("code diff extension", () => {
     expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
     expect(discussed.details.prompt).toContain("Good to continue the review?");
     expect(discussed.content[0].text.match(/Good to continue the review\?/g)).toHaveLength(1);
-  });
-
-  it("persists then routes review open-code through the external opener before revalidating on confirmed closure", async () => {
-    const tools = new Map<string, any>();
-    const file = localReviewFile();
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
-    const target = { path: "src/app.ts", range: { startLine: 1, endLine: 1 }, anchor: { algorithm: "sha256" as const, value: "a".repeat(64) } };
-    const openCodeFrame = {
-      type: "open-code" as const,
-      target,
-      resume: {
-        version: 1 as const, repository: "/repo", sessionId: "automatic-session", identity: "/repo|working|worktree|local",
-        scope: "git-diff" as const, path: "src/app.ts", side: "added" as const, range: target.range,
-        focus: { pane: "diff" as const, navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 }, contextHash: target.anchor,
-      },
-    };
-    const session = reviewSessionData({ allComment: "Keep this draft", allIntent: "comment", comments: [] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue(reviewData);
-    mocks.runReviewApp
-      .mockImplementationOnce(async (_ctx, options) => { options.onSessionChange(session); return openCodeFrame; })
-      .mockResolvedValueOnce({ type: "cancel" });
-    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "closed", changes: "unknown" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
-
-    expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalled();
-    expect(openCode).toHaveBeenCalledWith("review-bridge", ctx, "/repo", { initialTarget: target, capabilities: { discuss: true } });
-    expect(mocks.getReviewWindowData).toHaveBeenCalledTimes(2);
-    expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not launch an external editor until the local review draft is durable", async () => {
-    const tools = new Map<string, any>();
-    const file = localReviewFile();
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
-    mocks.runReviewApp.mockResolvedValueOnce(localReviewBridgeFrame()).mockResolvedValueOnce({ type: "cancel" });
-    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "closed", changes: "unknown" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
-
-    expect(openCode).not.toHaveBeenCalled();
-    expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
-  });
-
-  it("refreshes and reopens local review after a closed external failure", async () => {
-    const tools = new Map<string, any>();
-    const file = localReviewFile();
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
-    const frame = localReviewBridgeFrame();
-    const session = reviewSessionData({ allComment: "Keep this draft", allIntent: "comment", comments: [] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue(reviewData);
-    mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "old\\n", modifiedContent: "new\\n" });
-    mocks.runReviewApp
-      .mockImplementationOnce(async (_ctx, options) => { options.onSessionChange(session); return frame; })
-      .mockResolvedValueOnce({ type: "cancel" });
-    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "failed", message: "ttt exited with code 7", lifecycle: "closed" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    const result = await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
-
-    expect(openCode).toHaveBeenCalledWith("review-bridge", ctx, "/repo", { initialTarget: frame.target, capabilities: { discuss: true } });
-    expect(mocks.getReviewWindowData).toHaveBeenCalledTimes(2);
-    expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
-    expect(result.details).toMatchObject({ started: true });
-  });
-
-  it("reopens the saved in-memory review immediately when the external opener never started", async () => {
-    const tools = new Map<string, any>();
-    const file = localReviewFile();
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
-    const frame = localReviewBridgeFrame();
-    const session = reviewSessionData({ allComment: "Keep this draft", allIntent: "comment", comments: [] }, file.id, "git-diff");
-    let reopenedOptions: any;
-    mocks.getReviewWindowData.mockResolvedValue(reviewData);
-    mocks.runReviewApp
-      .mockImplementationOnce(async (_ctx, options) => { options.onSessionChange(session); return frame; })
-      .mockImplementationOnce(async (_ctx, options) => { reopenedOptions = options; return { type: "cancel" }; });
-    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "failed", message: "ttt was not started", lifecycle: "not-started" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
-
-    expect(mocks.getReviewWindowData).toHaveBeenCalledOnce();
-    expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
-    expect(reopenedOptions.initialSession).toEqual(session);
-  });
-
-  it("parks the durable review without auto-resuming when the external opener lifecycle is unconfirmed", async () => {
-    const tools = new Map<string, any>();
-    const file = localReviewFile();
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
-    const frame = localReviewBridgeFrame();
-    const session = reviewSessionData({ allComment: "Keep this draft", allIntent: "comment", comments: [] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue(reviewData);
-    mocks.runReviewApp.mockImplementationOnce(async (_ctx, options) => { options.onSessionChange(session); return frame; });
-    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
-    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    const openCode = vi.fn(async () => ({ backend: "external", outcome: { status: "failed", message: "ttt close state was unconfirmed", lifecycle: "unconfirmed" } }));
-    writeFileSync(settingsPath, JSON.stringify(externalCodeSettings()), "utf8");
-
-    codeDiffExtension(pi as never, { openCode } as never);
-    const result = await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
-
-    expect(mocks.getReviewWindowData).toHaveBeenCalledOnce();
-    expect(mocks.runReviewApp).toHaveBeenCalledOnce();
-    expect(result.details).toMatchObject({ message: expect.stringMatching(/parked|resumable/i) });
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/parked|resumable/i), expect.any(String));
   });
 
   it("uses in-memory latestSession across bridge refresh when disk persistence fails", async () => {
