@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -526,6 +526,13 @@ describe("code diff extension", () => {
     const diffCommand = pi.registerCommand.mock.calls.find(([name]) => name === "diff")?.[1];
     const reviewCommand = pi.registerCommand.mock.calls.find(([name]) => name === "review")?.[1];
     expect(reviewCommand).toBe(diffCommand);
+    expect(diffCommand.getArgumentCompletions("full")).toEqual([
+      expect.objectContaining({ value: "fullscreen", label: "fullscreen" }),
+    ]);
+    expect(diffCommand.getArgumentCompletions("fullscreen ")).toEqual([
+      expect.objectContaining({ value: "fullscreen on", label: "on" }),
+      expect.objectContaining({ value: "fullscreen off", label: "off" }),
+    ]);
     expect(pi.registerCommand).not.toHaveBeenCalledWith("code-diff", expect.any(Object));
     expect(pi.registerCommand).not.toHaveBeenCalledWith("interactive-review", expect.any(Object));
     expect(pi.registerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: "interactive_review" }));
@@ -536,7 +543,8 @@ describe("code diff extension", () => {
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
   });
 
-  it("mounts /diff through the Herdr-aware fullscreen boundary", async () => {
+  it("toggles and persists Herdr fullscreen for later reviews", async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
     const tools = new Map<string, any>();
     mocks.getReviewWindowData.mockResolvedValue({
       repoRoot: "/repo",
@@ -547,7 +555,7 @@ describe("code diff extension", () => {
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
-      registerCommand: vi.fn(),
+      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
       registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
       registerShortcut: vi.fn(),
       on: vi.fn(),
@@ -561,12 +569,43 @@ describe("code diff extension", () => {
 
     codeDiffExtension(pi as never);
     await tools.get("open_code_diff").execute("tool-call", {}, new AbortController().signal, vi.fn(), ctx);
+    expect(mocks.withHerdrPaneZoom).toHaveBeenCalledOnce();
 
-    expect(mocks.withHerdrPaneZoom).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
-      run: expect.any(Function),
-      warn: expect.any(Function),
-    }));
+    mocks.withHerdrPaneZoom.mockClear();
+    mocks.runReviewApp.mockClear();
+    await commands.get("diff")!.handler("fullscreen off", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("/diff fullscreen: off", "info");
+    expect(JSON.parse(readFileSync(preferencesPath, "utf8"))).toMatchObject({ herdrFullscreen: false });
+
+    await tools.get("open_code_diff").execute("tool-call", {}, new AbortController().signal, vi.fn(), ctx);
+    expect(mocks.withHerdrPaneZoom).not.toHaveBeenCalled();
     expect(mocks.runReviewApp).toHaveBeenCalledOnce();
+
+    mocks.runReviewApp.mockClear();
+    await commands.get("review")!.handler("fullscreen on", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("/diff fullscreen: on", "info");
+    expect(JSON.parse(readFileSync(preferencesPath, "utf8"))).toMatchObject({ herdrFullscreen: true });
+
+    await tools.get("open_code_diff").execute("tool-call", {}, new AbortController().signal, vi.fn(), ctx);
+    expect(mocks.withHerdrPaneZoom).toHaveBeenCalledOnce();
+    expect(mocks.runReviewApp).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid /diff fullscreen value without starting a review", async () => {
+    const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+    const pi = {
+      registerCommand: vi.fn((name: string, command) => commands.set(name, command)),
+      registerTool: vi.fn(),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+    };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn() } };
+
+    codeDiffExtension(pi as never);
+    await commands.get("diff")!.handler("fullscreen maybe", ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Usage: /diff fullscreen on|off", "error");
+    expect(mocks.getReviewWindowData).not.toHaveBeenCalled();
   });
 
   it("coalesces mutating-tool Git status refreshes asynchronously without replacing the footer", async () => {

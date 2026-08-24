@@ -22,6 +22,7 @@ export interface ReviewPaneVisibility {
 export interface ReviewPreferences {
   diffViewMode: PersistedDiffViewMode;
   codeSyntaxTheme: string;
+  herdrFullscreen: boolean;
   navigatorTreeMode: boolean;
   navigatorFileOrder: PersistedNavigatorFileOrder;
   contextLineNavigation: boolean;
@@ -41,6 +42,7 @@ export const DEFAULT_REVIEW_PANE_VISIBILITY: ReviewPaneVisibility = {
 export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
   diffViewMode: "unified",
   codeSyntaxTheme: DEFAULT_SHIKI_THEME,
+  herdrFullscreen: true,
   navigatorTreeMode: true,
   navigatorFileOrder: "risk",
   contextLineNavigation: false,
@@ -98,6 +100,7 @@ export function loadReviewPreferences(): ReviewPreferences {
     return {
       diffViewMode: isPersistedDiffViewMode(record.diffViewMode) ? record.diffViewMode : DEFAULT_REVIEW_PREFERENCES.diffViewMode,
       codeSyntaxTheme: isPersistedCodeSyntaxTheme(record.codeSyntaxTheme) ? record.codeSyntaxTheme : DEFAULT_REVIEW_PREFERENCES.codeSyntaxTheme,
+      herdrFullscreen: typeof record.herdrFullscreen === "boolean" ? record.herdrFullscreen : DEFAULT_REVIEW_PREFERENCES.herdrFullscreen,
       navigatorTreeMode: typeof record.navigatorTreeMode === "boolean" ? record.navigatorTreeMode : DEFAULT_REVIEW_PREFERENCES.navigatorTreeMode,
       navigatorFileOrder: isPersistedNavigatorFileOrder(record.navigatorFileOrder) ? record.navigatorFileOrder : DEFAULT_REVIEW_PREFERENCES.navigatorFileOrder,
       lastReviewVerdict: isPersistedReviewVerdict(record.lastReviewVerdict) ? record.lastReviewVerdict : DEFAULT_REVIEW_PREFERENCES.lastReviewVerdict,

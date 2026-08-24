@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-08-24
 
 ### Added
 
+- Toggle persistent Herdr pane zoom with `/diff fullscreen on|off`.
 - Use one configured code command for `/code`, `open_code`, `open_code_diff`, and review open-code actions.
 
 ## 0.5.0 - 2026-08-21

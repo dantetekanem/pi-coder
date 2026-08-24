@@ -26,6 +26,7 @@ describe("review preferences", () => {
   it("persists review display and navigation preferences across calls", () => {
     saveReviewPreference({
       diffViewMode: "side-by-side",
+      herdrFullscreen: false,
       navigatorTreeMode: false,
       contextLineNavigation: true,
       commentsGlobal: true,
@@ -41,6 +42,7 @@ describe("review preferences", () => {
     expect(loadReviewPreferences()).toEqual({
       diffViewMode: "side-by-side",
       codeSyntaxTheme: "github-dark",
+      herdrFullscreen: false,
       navigatorTreeMode: false,
       navigatorFileOrder: "risk",
       contextLineNavigation: true,

@@ -91,6 +91,23 @@ const MODE_VALUES = new Set(["working", "staged", "branch", "custom"]);
 const REPOSITORY_MUTATION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
 const REPOSITORY_MUTATION_REFRESH_DELAY_MS = 250;
 
+function getReviewArgumentCompletions(prefix: string) {
+  const normalized = prefix.trimStart().toLowerCase();
+  if (!normalized.includes(" ")) {
+    return "fullscreen".startsWith(normalized)
+      ? [{ value: "fullscreen", label: "fullscreen" }]
+      : null;
+  }
+
+  const match = normalized.match(/^fullscreen\s+(\S*)$/);
+  if (match == null) return null;
+  const valuePrefix = match[1]!;
+  const items = ["on", "off"]
+    .filter((value) => value.startsWith(valuePrefix))
+    .map((value) => ({ value: `fullscreen ${value}`, label: value }));
+  return items.length > 0 ? items : null;
+}
+
 function expandHomePath(path: string): string {
   if (path === "~") return homedir();
   if (path.startsWith("~/")) return resolvePath(homedir(), path.slice(2));
@@ -739,7 +756,9 @@ function getRemoteBodyConsumption(result: ReviewSubmitPayload, includeFileCommen
 
 export default function codeDiffExtension(pi: ExtensionAPI, options: { runExternalEditor?: ExternalEditorLauncher } = {}) {
   const initialShortcutConfig = loadCommentShortcuts();
+  const initialPreferences = loadReviewPreferences();
   const launchExternalEditor = options.runExternalEditor ?? runExternalEditor;
+  let herdrFullscreen = initialPreferences.herdrFullscreen;
   const repositoryChangeStatus = new RepositoryChangeStatusController();
   let activeReview = false;
   let localProgressGeneration = 0;
@@ -983,13 +1002,15 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             return true;
           },
         });
-        result = await withHerdrPaneZoom(mountReview, {
-          run: async (args) => {
-            const command = await pi.exec("herdr", args, { timeout: 2_000 });
-            return { code: command.code, stdout: command.stdout, stderr: command.stderr };
-          },
-          warn: (message) => ctx.ui.notify(message, "warning"),
-        });
+        result = herdrFullscreen
+          ? await withHerdrPaneZoom(mountReview, {
+              run: async (args) => {
+                const command = await pi.exec("herdr", args, { timeout: 2_000 });
+                return { code: command.code, stdout: command.stdout, stderr: command.stderr };
+              },
+              warn: (message) => ctx.ui.notify(message, "warning"),
+            })
+          : await mountReview();
         firstReview = false;
 
         if (result.type === "open-editor") {
@@ -1473,12 +1494,25 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   }
 
   const reviewCommand = {
-    description: "Review and annotate code changes. /diff or /review (local), remote <url | branch>, or base..head",
+    description: "Review and annotate code changes. /diff or /review (local), remote <url | branch>, base..head, or fullscreen on|off",
+    getArgumentCompletions: getReviewArgumentCompletions,
     handler: async (args: string, ctx: ExtensionContext) => {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      if (tokens[0]?.toLowerCase() === "fullscreen") {
+        const value = tokens.length === 2 ? tokens[1]?.toLowerCase() : undefined;
+        if (value !== "on" && value !== "off") {
+          ctx.ui.notify("Usage: /diff fullscreen on|off", "error");
+          return;
+        }
+        herdrFullscreen = value === "on";
+        saveReviewPreference({ herdrFullscreen });
+        ctx.ui.notify(`/diff fullscreen: ${value}`, "info");
+        return;
+      }
       startDiff(args, ctx);
     },
   };
-  let codeSyntaxTheme = loadReviewPreferences().codeSyntaxTheme;
+  let codeSyntaxTheme = initialPreferences.codeSyntaxTheme;
 
   async function runCodeWorkbench(
     origin: "direct-code" | "open-code" | "review-bridge",
