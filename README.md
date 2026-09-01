@@ -46,7 +46,7 @@ Useful targets:
 /diff fullscreen on|off       # toggle Herdr pane zoom for future reviews
 ```
 
-In Herdr, `/diff` zooms the current pane while the review is open and restores the previous layout afterward. Fullscreen is on by default; `/diff fullscreen off` disables it persistently until `/diff fullscreen on` enables it again.
+In Herdr, `/diff` zooms the current pane while the review is open and restores the previous layout afterward. Fullscreen is on by default; `/diff fullscreen off` disables it persistently until `/diff fullscreen on` enables it again. Launchers can set `PI_CODE_DIFF_HERDR_FULLSCREEN=on|off` to override the initial behavior for one Pi process without changing the saved preference.
 
 The review UI supports line, file, and review-wide feedback. Feedback can be marked as:
 

@@ -758,7 +758,12 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   const initialShortcutConfig = loadCommentShortcuts();
   const initialPreferences = loadReviewPreferences();
   const launchExternalEditor = options.runExternalEditor ?? runExternalEditor;
-  let herdrFullscreen = initialPreferences.herdrFullscreen;
+  const fullscreenOverride = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN?.trim().toLowerCase();
+  let herdrFullscreen = fullscreenOverride === "off"
+    ? false
+    : fullscreenOverride === "on"
+      ? true
+      : initialPreferences.herdrFullscreen;
   const repositoryChangeStatus = new RepositoryChangeStatusController();
   let activeReview = false;
   let localProgressGeneration = 0;

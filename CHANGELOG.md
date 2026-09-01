@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-09-01
+
+### Added
+
+- Allow launchers to override Herdr fullscreen for one Pi process with `PI_CODE_DIFF_HERDR_FULLSCREEN=on|off` without changing the saved preference.
+
 ## 0.6.0 - 2026-08-24
 
 ### Added

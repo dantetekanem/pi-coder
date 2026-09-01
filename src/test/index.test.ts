@@ -43,6 +43,7 @@ const preferencesPath = join(preferencesDir, "code-diff-preferences.json");
 const settingsPath = join(preferencesDir, "provider-settings.json");
 const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
 const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalHerdrFullscreen = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
 process.env.PI_CODE_DIFF_PREFERENCES_PATH = preferencesPath;
 process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
 
@@ -51,6 +52,8 @@ afterAll(() => {
   else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
   if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
   else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalHerdrFullscreen == null) delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
+  else process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = originalHerdrFullscreen;
   rmSync(preferencesDir, { recursive: true, force: true });
 });
 
@@ -263,6 +266,7 @@ function reviewSessionData(
 describe("code diff extension", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
     rmSync(preferencesPath, { force: true });
     writeFileSync(settingsPath, JSON.stringify(testSettings()), "utf8");
     mocks.loadReviewSession.mockReturnValue(null);
@@ -541,6 +545,38 @@ describe("code diff extension", () => {
     expect(openCode.parameters.properties.path).toBeDefined();
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
+  });
+
+  it("honors a process-scoped Herdr fullscreen override without changing preferences", async () => {
+    const tools = new Map<string, any>();
+    writeFileSync(preferencesPath, JSON.stringify({ herdrFullscreen: true }), "utf8");
+    process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = "off";
+    mocks.getReviewWindowData.mockResolvedValue({
+      repoRoot: "/repo",
+      files: [localReviewFile()],
+      branchBaseRevision: undefined,
+      modifiedRevision: undefined,
+      visibleScopes: ["git-diff"],
+    });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
+    const pi = {
+      registerCommand: vi.fn(),
+      registerTool: vi.fn((tool) => tools.set(tool.name, tool)),
+      registerShortcut: vi.fn(),
+      on: vi.fn(),
+      exec: vi.fn(),
+    };
+    const ctx = {
+      hasUI: true,
+      cwd: "/repo",
+      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() },
+    };
+
+    codeDiffExtension(pi as never);
+    await tools.get("open_code_diff").execute("tool-call", {}, new AbortController().signal, vi.fn(), ctx);
+
+    expect(mocks.withHerdrPaneZoom).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(preferencesPath, "utf8"))).toMatchObject({ herdrFullscreen: true });
   });
 
   it("toggles and persists Herdr fullscreen for later reviews", async () => {
