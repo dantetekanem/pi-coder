@@ -1214,7 +1214,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     const discussionChoice = "Start discussion with agents";
     const endActions = buildReviewEndActions(loadReviewPreferences().lastReviewVerdict);
     const choices = [...endActions.choices];
-    if (discussionPrompt.length > 0) choices.push(discussionChoice);
+    if (discussionPrompt.length > 0) choices.unshift(discussionChoice);
     const choice = await ctx.ui.select(`PR #${pr.number}: ${pr.title}`, choices);
     if (choice == null) {
       ctx.ui.notify("Review kept as a draft; nothing was submitted.", "info");

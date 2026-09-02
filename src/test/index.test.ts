@@ -1112,10 +1112,10 @@ describe("code diff extension", () => {
     );
 
     expect(ctx.ui.select).toHaveBeenCalledWith("PR #1: Add review mode", [
+      "Start discussion with agents",
       "Approve",
       "Request changes",
       "Post Comments",
-      "Start discussion with agents",
     ]);
     expect(mocks.composeDiscussionPrompt).toHaveBeenCalledWith([file], payload);
     expect(mocks.createReviewSessionId).toHaveBeenCalledWith("pr|github|example/widgets|1");

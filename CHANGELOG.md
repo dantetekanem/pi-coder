@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 - 2026-09-02
+
+### Changed
+
+- Put `Start discussion with agents` first among remote review completion actions when discussion items are present.
+
 ## 0.6.1 - 2026-09-01
 
 ### Added
