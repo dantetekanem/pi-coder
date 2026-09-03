@@ -9,6 +9,14 @@ It also keeps a compact repository summary in Pi's footer so you can see the cur
 
 For a deeper walkthrough of the workflow, usage, and the engineering reasoning behind it, read [The Human in the Loop](https://blog.leonardopereira.com/2026/08/19/the-human-in-the-loop/).
 
+## Try without installing
+
+```bash
+pi -e npm:pi-coder
+```
+
+This runs the published package for the current Pi invocation without adding it to your project configuration.
+
 ## Install
 
 ```bash
@@ -34,7 +42,7 @@ Run `/diff` or `/review` inside a repository:
 
 `/review` is an alias for `/diff`; both commands accept the same targets.
 
-![Review changes with pi-coder](docs/assets/code.gif)
+![Review changes with pi-coder](https://raw.githubusercontent.com/dantetekanem/pi-coder/main/docs/assets/code.gif)
 
 Useful targets:
 
@@ -58,77 +66,7 @@ GitHub pull requests work by default through the authenticated [`gh`](https://cl
 
 ### Remote providers
 
-After `gh auth login`, a GitHub URL works without configuration:
-
-```text
-/diff remote https://github.com/owner/repository/pull/123
-```
-
-Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings extend the built-in GitHub provider; a local `providers.github` entry explicitly overrides it. Provider operations are executable-plus-argument arrays, never shell commands. Template values such as `{repo}`, `{number}`, `{branch}`, and `{payloadPath}` are passed as individual arguments.
-
-```json
-{
-  "version": 1,
-  "providers": {
-    "secondary": {
-      "label": "Secondary code host",
-      "executable": "forge",
-      "urls": {
-        "patterns": [
-          { "host": "code.example", "path": "/{repo}/change/{number}" }
-        ],
-        "canonical": "https://code.example/{repo}/change/{number}",
-        "clone": "https://code.example/{repo}.git"
-      },
-      "operations": {
-        "pullRequest": { "args": ["change", "show", "{repo}", "{number}"] },
-        "reviews": { "args": ["change", "reviews", "{repo}", "{number}"] },
-        "branchLookup": { "args": ["change", "list", "{repo}", "--head", "{branch}"] },
-        "identity": { "args": ["identity", "--json"] },
-        "submitReview": { "args": ["change", "review", "{repo}", "{number}", "--input", "{payloadPath}"] }
-      },
-      "refs": {
-        "head": "refs/changes/{number}/head"
-      },
-      "fields": {
-        "number": "id",
-        "title": "subject",
-        "body": "description",
-        "additions": "metrics.added",
-        "deletions": "metrics.removed",
-        "changedFiles": "metrics.files",
-        "author": ["actor.handle", "user.handle"],
-        "state": "phase",
-        "reviewState": "decision",
-        "headRefName": "source.name",
-        "headRefOid": "source.oid",
-        "baseRefName": "target.name",
-        "identityLogin": "login",
-        "submissionId": "id",
-        "submissionState": "state"
-      },
-      "capabilities": {
-        "atomicReview": true,
-        "baseRevisionRequired": false,
-        "fileComments": false,
-        "requestChangesBodyRequired": false,
-        "validateSubmitResponse": true,
-        "validateTargetBeforeSubmit": true
-      }
-    }
-  },
-  "repositories": {
-    "owner/repository": {
-      "cwd": "/absolute/path/to/checkout",
-      "subdir": "packages/app",
-      "pathspecs": ["packages/app", "shared/ui"],
-      "importAliases": { "@shared": "shared/ui" }
-    }
-  }
-}
-```
-
-`pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`.
+GitHub pull requests work through the authenticated [`gh`](https://cli.github.com/) CLI without extra configuration. See [Remote providers](docs/remote-providers.md) to add another code host or configure repository-specific paths.
 
 Common review controls:
 
@@ -167,7 +105,7 @@ The Workbench remains the default. To use one command for every code-opening int
 
 The same command handles `/code`, `open_code`, `open_code_diff`, and the review UI's open-code action. Without a configured command, the existing Workbench and review UI behavior remains unchanged.
 
-![Browse and edit code with pi-coder](docs/assets/diff.gif)
+![Browse and edit code with pi-coder](https://raw.githubusercontent.com/dantetekanem/pi-coder/main/docs/assets/diff.gif)
 
 `/code` fills the small gap between the coding agent and you. It is for the last 1% of the work, when you want to open the file yourself, read the code around it, make a small change, or point to exact lines and ask a question. Instead of leaving Pi or asking the agent to paste fragments into the conversation, you can work with the code directly and continue where you left off.
 
@@ -196,6 +134,10 @@ Agents can use the same interfaces through:
 - `open_code` — run the configured code command at an optional path or structured target; without one, open the Workbench.
 - `open_code_diff` — run the configured code command; without one, open `/diff` with an optional target and prepopulated comments.
 - `submit_pr_review` — submit a confirmed configured-provider review.
+
+## Security and data access
+
+Read [SECURITY.md](SECURITY.md) for private vulnerability reporting and [docs/access.md](docs/access.md) for the exact subprocess, filesystem, and network access used by the package.
 
 ## Development
 
