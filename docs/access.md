@@ -27,4 +27,4 @@
 
 ## Release access
 
-Publishing is automated only for a pushed `v*` Git tag whose name exactly matches `package.json`'s version. The GitHub Actions publish job has read-only repository contents permission plus `id-token: write` for npm provenance; it runs `npm publish --provenance` and does not use a repository write token.
+Publishing is staged only for a pushed `v*` Git tag whose name exactly matches `package.json`'s version. The GitHub Actions publish job has read-only repository contents permission plus `id-token: write` for npm provenance; it runs `npm stage publish` and does not use a repository write token. A maintainer must review and approve the staged release with 2FA before it becomes public.

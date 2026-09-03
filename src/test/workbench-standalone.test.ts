@@ -41,7 +41,7 @@ describe("standalone workbench host boundary", () => {
       "src/git-change-status.ts",
       "src/git-filter-policy.ts",
       "scripts",
-      "docs",
+      "docs/*.md",
       "tsconfig.workbench.json",
     ]));
   });
