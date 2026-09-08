@@ -9,3 +9,7 @@ function toEscapeSequence(character: string): string {
 export function sanitizeTerminalText(text: string): string {
   return text.replace(CONTROL_CHARACTER_PATTERN, toEscapeSequence);
 }
+
+export function sanitizeTerminalMultilineText(text: string): string {
+  return text.split(/\r?\n/).map(sanitizeTerminalText).join("\n");
+}

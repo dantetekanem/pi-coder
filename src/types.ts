@@ -55,9 +55,15 @@ export interface ReviewFileContents {
 }
 
 export interface ReviewContextPanelSource {
+  conversation?: import("./conversation.js").ConversationReader;
   title: string;
   loadingText: string;
-  load: () => Promise<string>;
+  /**
+   * Returns the first usable context. Sources may subsequently call `onUpdate` with a complete
+   * replacement string, for example after optional enrichment finishes. Existing zero-argument
+   * sources remain compatible.
+   */
+  load: (onUpdate?: (text: string) => void, options?: import("./conversation.js").ConversationLoadOptions) => Promise<string>;
   /** Canonical http(s) URL opened from the PR context pane. */
   url?: string;
 }
@@ -70,24 +76,29 @@ export interface ReviewReplyItem {
   author: string;
   /** Bounded, control-character-escaped reply text. Never rendered raw. */
   body: string;
+  bodyTruncated?: boolean;
   createdAt?: string;
   url?: string;
   path?: string;
   line: number | null;
-  resolved: boolean;
+  resolved: boolean | null;
 }
 
 export interface ReviewRepliesSnapshot {
+  conversation?: import("./conversation.js").ConversationSnapshot;
+  totalReplies?: number;
+  displayTruncated?: boolean;
   replies: ReviewReplyItem[];
   selfLogin: string;
   fetchedAt: string;
 }
 
 export interface ReviewRepliesPanelSource {
+  conversation?: import("./conversation.js").ConversationReader;
   title: string;
   loadingText: string;
   /** Reads only the current pull request; the pane never queues a second one. */
-  load: () => Promise<ReviewRepliesSnapshot>;
+  load: (options?: import("./conversation.js").ConversationLoadOptions) => Promise<ReviewRepliesSnapshot>;
   /** On-demand, read-only analysis. Never posts anything back to the provider. */
   analyze?: (reply: ReviewReplyItem) => Promise<string>;
 }

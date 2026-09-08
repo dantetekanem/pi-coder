@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Inspect full fetched PR review threads, refresh or load more without losing selection, jump to verified code anchors, and edit response drafts within the open review window.
+
+### Fixed
+
+- Load basic GitHub context without local provider configuration and show deterministic facts before optional model explanations.
+- Share paginated conversation retrieval across context and replies, with explicit coverage, fetch budgets, and unknown resolution states.
+
 ## 0.6.2 - 2026-09-02
 
 ### Changed

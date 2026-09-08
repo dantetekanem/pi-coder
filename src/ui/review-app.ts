@@ -35,10 +35,12 @@ import { detectPiLanguage, highlightCodeLineWithPi } from "../pi-render.js";
 import { loadReviewPreferences, saveReviewPreference, type ReviewPaneVisibility } from "../preferences.js";
 import { orderNavigatorFiles, type NavigatorFileOrder, type ReviewOrderSignals } from "../review-order.js";
 import type { ReviewSessionData } from "../review-session.js";
+import type { ConversationLoadOptions, ConversationSnapshot, ConversationThread } from "../conversation.js";
+import { createReviewRepliesSnapshot } from "../review-replies.js";
 import { applyResolvedSeedComments, type ResolvedSeedComment } from "../seed-comments.js";
 import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from "../shortcuts.js";
 import { filterFilesBySearch } from "../search.js";
-import { sanitizeTerminalText } from "../sanitize.js";
+import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
 import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewContextPanelSource, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
@@ -822,6 +824,7 @@ export interface ReviewHeaderInfo {
   queue?: { position: number; total?: number };
   openThreads?: number;
   awaitingReply?: number;
+  conversationLabel?: string;
 }
 
 export interface ReviewHeaderCounts {
@@ -844,6 +847,7 @@ export function buildReviewHeaderText(info: ReviewHeaderInfo, counts: ReviewHead
   if (info.revision != null && info.revision.length > 0) parts.push(`@${shortHeaderRevision(info.revision)}`);
   parts.push(`${counts.reviewed}/${counts.files} reviewed`);
   parts.push(`${counts.comments} comment${counts.comments === 1 ? "" : "s"}`);
+  if (info.conversationLabel != null) parts.push(info.conversationLabel);
   if (info.openThreads != null) {
     const awaiting = info.awaitingReply == null || info.awaitingReply === 0 ? "" : `, ${info.awaitingReply} awaiting reply`;
     parts.push(`${info.openThreads} open thread${info.openThreads === 1 ? "" : "s"}${awaiting}`);
@@ -1521,6 +1525,9 @@ export class ReviewApp {
   private diffScroll = 0;
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
+  /** Only the active context request may update the pane after optional enrichment finishes. */
+  private contextRequestToken = 0;
+  private disposed = false;
   private repliesPanelState: RepliesPanelState = { status: "idle" };
   private replyAnalysis: ReplyAnalysisState = { status: "idle" };
   /** Only the newest replies request may write state, so an in-flight refresh cannot overwrite it. */
@@ -1529,6 +1536,17 @@ export class ReviewApp {
   private repliesScroll = 0;
   private repliesPageSize = 1;
   private selectedReplyIndex = 0;
+  private conversation: ConversationSnapshot | undefined;
+  private repliesRefreshing = false;
+  private allThreads = false;
+  private openedThread: ConversationThread | null = null;
+  private threadScroll = 0;
+  private threadPageSize = 1;
+  private threadLineCount = 0;
+  private threadJumpToken = 0;
+  private threadBodyCache: { thread: ConversationThread; width: number; lines: string[] } | null = null;
+  private readonly responseDrafts = new Map<string, string>();
+  private editingResponse: string | null = null;
   private contextScroll = 0;
   private contextLineCount = 0;
   private navigatorPageSize = 1;
@@ -1600,6 +1618,7 @@ export class ReviewApp {
     this.syncCursorMode();
 
     queueMicrotask(() => {
+      if (this.disposed) return;
       this.ensureActiveEntry();
       this.ensureContextPanel();
       this.requestRender();
@@ -1607,6 +1626,10 @@ export class ReviewApp {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.contextRequestToken += 1;
+    this.repliesRequestToken += 1;
+    this.analysisRequestToken += 1;
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -1625,9 +1648,9 @@ export class ReviewApp {
 
   private syncCursorMode(): void {
     if (typeof this.tui.setShowHardwareCursor === "function") {
-      this.tui.setShowHardwareCursor(this.editTarget != null || this.previousHardwareCursor);
+      this.tui.setShowHardwareCursor(this.editTarget != null || this.editingResponse != null || this.previousHardwareCursor);
     }
-    (this.editor as unknown as { focused?: boolean }).focused = this.editTarget != null && this.editTarget.intent !== "modify";
+    this.editor.focused = this.editingResponse != null || (this.editTarget != null && this.editTarget.intent !== "modify");
   }
 
   private getSessionData(): ReviewSessionData {
@@ -1650,9 +1673,10 @@ export class ReviewApp {
   }
 
   private requestRender(): void {
+    if (this.disposed) return;
     if (typeof this.tui.requestRender === "function") this.tui.requestRender();
     if (this.options.onSessionChange == null) return;
-    if (this.editTarget != null) {
+    if (this.editTarget != null || this.editingResponse != null) {
       if (this.sessionSaveTimer != null) clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
       return;
@@ -1667,17 +1691,38 @@ export class ReviewApp {
   private ensureContextPanel(): void {
     const source = this.options.contextPanelSource;
     if (source == null || !this.paneVisibility.context || this.contextPanelState.status !== "idle") return;
+    this.loadContextPanel();
+  }
 
-    this.contextPanelState = { status: "loading" };
-    this.requestRender();
-    void source.load().then((text) => {
+  private loadContextPanel(options?: ConversationLoadOptions, preservePlace = false): void {
+    const source = this.options.contextPanelSource;
+    if (source == null) return;
+    this.contextRequestToken += 1;
+    const token = this.contextRequestToken;
+    let receivedUpdate = false;
+    const isCurrent = () => !this.disposed && token === this.contextRequestToken;
+    const applyUpdate = (text: string) => {
+      if (!isCurrent()) return;
+      receivedUpdate = true;
       this.contextPanelState = { status: "ready", text };
-      this.contextScroll = 0;
+      this.adoptConversation(source.conversation?.current);
+      this.requestRender();
+    };
+
+    if (!preservePlace || this.contextPanelState.status !== "ready") this.contextPanelState = { status: "loading" };
+    this.requestRender();
+    const loading = options == null ? source.load(applyUpdate) : source.load(applyUpdate, options);
+    void loading.then((text) => {
+      if (!isCurrent() || receivedUpdate) return;
+      this.contextPanelState = { status: "ready", text };
+      if (!preservePlace) this.contextScroll = 0;
+      this.adoptConversation(source.conversation?.current);
       this.requestRender();
     }).catch((error: unknown) => {
+      if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
       this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
-      this.contextScroll = 0;
+      if (!preservePlace) this.contextScroll = 0;
       this.requestRender();
     });
   }
@@ -1692,27 +1737,58 @@ export class ReviewApp {
    * Reads only the current pull request. The race token means a stale response from an earlier
    * refresh is dropped instead of replacing newer data.
    */
-  private loadReplies(): void {
+  private loadReplies(options?: ConversationLoadOptions): void {
     const source = this.options.repliesSource;
     if (source == null) return;
-
+    const context = this.options.contextPanelSource;
+    const shared = source.conversation != null && source.conversation === context?.conversation;
     this.repliesRequestToken += 1;
     const token = this.repliesRequestToken;
-    this.repliesPanelState = { status: "loading" };
+    this.repliesRefreshing = true;
+    if (context != null && (shared || !options?.continuation)
+      && (options != null || (shared && this.contextPanelState.status !== "loading"))) {
+      this.loadContextPanel(options ?? {}, true);
+    }
+    if (this.repliesPanelState.status !== "ready") this.repliesPanelState = { status: "loading" };
     this.requestRender();
-    void source.load().then((snapshot) => {
-      if (token !== this.repliesRequestToken) return;
+    // One refresh creates the generation; the other source joins it. Resumes share the exact token.
+    void source.load(shared && options?.refresh ? {} : options).then((snapshot) => {
+      if (this.disposed || token !== this.repliesRequestToken) return;
+      this.repliesRefreshing = false;
+      if (snapshot.conversation && this.conversation && (snapshot.conversation.identity !== this.conversation.identity || snapshot.conversation.generation < this.conversation.generation)) {
+        if (this.repliesPanelState.status !== "ready") this.repliesPanelState = { status: "error", error: "Conversation changed while loading. Refresh to retry." };
+        this.requestRender(); return;
+      }
+      const selectedId = this.selectedReply()?.id;
       this.repliesPanelState = { status: "ready", snapshot };
-      this.repliesScroll = 0;
-      this.selectedReplyIndex = Math.min(this.selectedReplyIndex, Math.max(0, snapshot.replies.length - 1));
+      this.adoptConversation(snapshot.conversation, selectedId);
+      this.restoreReplySelection(selectedId);
       this.requestRender();
     }).catch((error: unknown) => {
-      if (token !== this.repliesRequestToken) return;
+      if (this.disposed || token !== this.repliesRequestToken) return;
+      this.repliesRefreshing = false;
+      this.adoptConversation(source.conversation?.current);
       const message = error instanceof Error ? error.message : String(error);
-      this.repliesPanelState = { status: "error", error: sanitizeTerminalText(message) };
-      this.repliesScroll = 0;
+      if (this.repliesPanelState.status === "ready") this.setMessage(`Conversation refresh failed: ${message}`);
+      else this.repliesPanelState = { status: "error", error: sanitizeTerminalText(message) };
       this.requestRender();
     });
+  }
+
+  private adoptConversation(snapshot: ConversationSnapshot | undefined, selectedId = this.selectedReply()?.id): void {
+    if (snapshot == null || snapshot === this.conversation || (this.conversation != null && (snapshot.identity !== this.conversation.identity || snapshot.generation < this.conversation.generation))) return;
+    this.conversation = snapshot;
+    if (this.repliesPanelState.status === "ready") {
+      this.repliesPanelState = { status: "ready", snapshot: createReviewRepliesSnapshot(snapshot, this.repliesPanelState.snapshot.selfLogin) };
+    }
+    if (this.openedThread != null) this.openedThread = snapshot.threads.find((thread) => thread.id === this.openedThread?.id) ?? this.openedThread;
+    this.restoreReplySelection(selectedId);
+  }
+
+  private restoreReplySelection(id: string | undefined): void {
+    const replies = this.getReplies();
+    const index = replies.findIndex((reply) => reply.id === id);
+    this.selectedReplyIndex = index >= 0 ? index : Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1));
   }
 
   private refreshReplies(): void {
@@ -1723,12 +1799,21 @@ export class ReviewApp {
     }
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
-    this.loadReplies();
-    this.setMessage("Refreshing replies for this PR...");
+    this.loadReplies({ refresh: true });
+    this.setMessage("Refreshing conversation for this PR...");
   }
 
   private getReplies(): ReviewReplyItem[] {
+    if (this.allThreads && this.conversation != null) return this.conversation.threads.map((thread) => this.threadReply(thread));
     return this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot.replies : [];
+  }
+
+  private threadReply(thread: ConversationThread): ReviewReplyItem {
+    const comment = thread.comments[0];
+    return { id: `thread:${thread.id}`, threadId: thread.id, commentId: comment?.id ?? thread.id,
+      author: comment?.author ?? "unknown", body: comment?.body.slice(0, 1200) ?? "Comments unavailable in fetched data.",
+      url: thread.comments.find((item) => item.url != null)?.url, path: thread.path, line: thread.line ?? null, resolved: thread.resolved,
+      bodyTruncated: (comment?.body.length ?? 0) > 1200 };
   }
 
   private selectedReply(): ReviewReplyItem | null {
@@ -1754,6 +1839,19 @@ export class ReviewApp {
 
   private openSelectedReply(): void {
     const reply = this.selectedReply();
+    const thread = this.conversation?.threads.find((item) => item.id === reply?.threadId);
+    if (thread != null) {
+      this.threadJumpToken += 1;
+      this.openedThread = thread;
+      this.threadScroll = 0;
+      this.requestRender();
+      return;
+    }
+    this.openReplyUrl();
+  }
+
+  private openReplyUrl(): void {
+    const reply = this.openedThread == null ? this.selectedReply() : this.threadReply(this.openedThread);
     if (reply == null) {
       this.setMessage("No reply is selected.");
       this.requestRender();
@@ -1771,7 +1869,10 @@ export class ReviewApp {
   /** Read-only, explicitly requested, and never posts anything back to the provider. */
   private analyzeSelectedReply(): void {
     const source = this.options.repliesSource;
-    const reply = this.selectedReply();
+    const thread = this.openedThread;
+    const reply = thread == null ? this.selectedReply() : {
+      ...this.threadReply(thread), body: thread.comments.map((comment) => `${sanitizeTerminalText(comment.author)}:\n${sanitizeTerminalMultilineText(comment.body)}`).join("\n\n").slice(0, 24_000),
+    };
     if (source?.analyze == null) {
       this.setMessage("Reply analysis is not available in this review.");
       this.requestRender();
@@ -1793,15 +1894,95 @@ export class ReviewApp {
     this.replyAnalysis = { status: "loading", replyId: reply.id };
     this.requestRender();
     void source.analyze(reply).then((text) => {
-      if (token !== this.analysisRequestToken) return;
-      this.replyAnalysis = { status: "ready", replyId: reply.id, text: sanitizeTerminalText(text) };
+      if (this.disposed || token !== this.analysisRequestToken) return;
+      this.replyAnalysis = { status: "ready", replyId: reply.id, text: sanitizeTerminalMultilineText(text) };
       this.requestRender();
     }).catch((error: unknown) => {
-      if (token !== this.analysisRequestToken) return;
+      if (this.disposed || token !== this.analysisRequestToken) return;
       const message = error instanceof Error ? error.message : String(error);
       this.replyAnalysis = { status: "error", replyId: reply.id, error: sanitizeTerminalText(message) };
       this.requestRender();
     });
+  }
+
+  private openResponseDraft(): void {
+    const thread = this.openedThread;
+    if (thread == null) return;
+    const analysis = this.replyAnalysis;
+    const suggestion = analysis.status === "ready" && analysis.replyId === `thread:${thread.id}`
+      ? analysis.text.match(/Suggested response[:.]?\s*\n?([\s\S]*)$/i)?.[1]?.trim() ?? "" : "";
+    this.editingResponse = thread.id;
+    this.editor.setText(this.responseDrafts.get(thread.id) ?? suggestion);
+    this.syncCursorMode();
+    this.requestRender();
+  }
+
+  private loadMoreConversation(): void {
+    const continuation = this.conversation?.continuation;
+    if (continuation == null) this.setMessage("No continuation available. Refresh to retry unavailable conversation data.");
+    else if (!this.repliesRefreshing) this.loadReplies({ continuation });
+    this.requestRender();
+  }
+
+  private async jumpThreadToCode(): Promise<void> {
+    const token = ++this.threadJumpToken;
+    const thread = this.openedThread;
+    const scope = this.visibleScopes().includes("all-files") ? "all-files" : this.state.activeScope;
+    const file = thread == null ? undefined : getScopedFiles(this.files, scope).find((candidate) => {
+      const comparison = scope === "all-files" ? candidate.allFiles : scope === "git-diff" ? candidate.gitDiff : candidate.lastCommit;
+      const path = thread.side === "deleted" ? comparison?.oldPath : comparison?.newPath;
+      return path != null && joinReviewPath(candidate.pathPrefix, path) === thread.path;
+    });
+    const comparison = file == null ? undefined : scope === "all-files" ? file.allFiles : scope === "git-diff" ? file.gitDiff : file.lastCommit;
+    if (thread == null || file == null || thread.side == null || !Number.isSafeInteger(thread.line) || thread.line! < 1
+      || thread.outdated === true || thread.headRevision == null || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(thread.headRevision)
+      || thread.headRevision !== this.options.reviewHeader?.revision || comparison?.modifiedRevision !== thread.headRevision
+      || (thread.side === "deleted" && (thread.baseRevision == null || thread.baseRevision !== comparison?.originalRevision))
+      || this.repoRoot !== this.options.repoRoot || !this.conversation?.threads.some((item) => item.id === thread.id)) {
+      this.setMessage("Thread anchor unavailable or stale for this comparison; use its browser link."); this.requestRender(); return;
+    }
+    const previous = this.state;
+    const conversation = this.conversation;
+    const repoRoot = this.repoRoot;
+    const selected = getSelectedLineTarget(previous, previous.activeFileId, previous.activeScope);
+    const isCurrent = () => {
+      const current = getSelectedLineTarget(this.state, this.state.activeFileId, this.state.activeScope);
+      return !this.disposed && this.state.activeFileId === previous.activeFileId && this.state.activeScope === previous.activeScope
+        && this.state.focus === previous.focus && (selected == null || (current?.side === selected.side && current.line === selected.line && current.endLine === selected.endLine))
+        && this.conversation === conversation && this.repoRoot === repoRoot && token === this.threadJumpToken
+        && this.openedThread === thread && this.editingResponse == null;
+    };
+    try {
+      const cached = this.getEntry(file.id, scope);
+      const contents = cached?.status === "ready" ? cached.contents : await this.options.loadFileContents(repoRoot, file, scope);
+      if (!isCurrent()) return;
+      const text = thread.side === "added" ? contents.modifiedContent : contents.originalContent;
+      const available = thread.side === "added" ? contents.modifiedAvailable : contents.originalAvailable;
+      if (available === false || thread.line! > logicalLineCount(text)) throw new Error("Thread anchor content is unavailable.");
+      const baseDiff = cached?.status === "ready" ? cached.baseDiff : buildStructuredDiff(contents.originalContent, contents.modifiedContent, DEFAULT_CONTEXT_LINES);
+      const rowIndex = baseDiff.rows.findIndex((row) => (thread.side === "added" ? row.newLineNumber : row.oldLineNumber) === thread.line);
+      if (rowIndex < 0) throw new Error("Thread anchor unavailable in this diff.");
+      const expanded = new Set(this.expandedContextRows.get(this.cacheKey(file.id, scope)) ?? []);
+      for (let index = Math.max(0, rowIndex - DEFAULT_CONTEXT_LINES); index <= Math.min(baseDiff.rows.length - 1, rowIndex + DEFAULT_CONTEXT_LINES); index++) expanded.add(index);
+      this.expandedContextRows.set(this.cacheKey(file.id, scope), expanded);
+      this.diffLayoutCache.clear();
+      this.contextLineNavigation = true;
+      if (thread.side === "deleted" && baseDiff.rows[rowIndex]?.newLineNumber != null) this.diffViewMode = "side-by-side";
+      this.paneVisibility = { ...this.paneVisibility, diff: true };
+      setBoundedMapEntry(this.cache, this.cacheKey(file.id, scope), { status: "ready", contents, baseDiff }, MAX_LOADED_FILE_ENTRIES);
+      this.relatedFilterAnchorFileId = null;
+      this.state = setScope(this.state, this.files, scope);
+      this.state = setSearchQuery(this.state, this.files, "");
+      this.state = setActiveFileId(this.state, this.files, file.id);
+      this.state = setSelectedLineTarget(this.state, file.id, scope, { side: thread.side, line: thread.line! });
+      this.state = setFocus({ ...this.state, hideUnchanged: false }, "diff");
+      this.showAllLocales = true;
+      this.diffScroll = 0;
+      this.requestRender();
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.setMessage(error instanceof Error ? error.message : "Thread anchor unavailable."); this.requestRender();
+    }
   }
 
   private effectivePaneVisibility(): ReviewPaneVisibility {
@@ -3633,7 +3814,8 @@ export class ReviewApp {
     }
     if (pane === "replies") {
       this.state = setFocus(this.state, "replies");
-      this.moveReplySelection(delta);
+      if (this.openedThread != null) { this.threadScroll = Math.max(0, this.threadScroll + delta); this.requestRender(); }
+      else this.moveReplySelection(delta);
       return true;
     }
 
@@ -3712,6 +3894,34 @@ export class ReviewApp {
   }
 
   handleInput(data: string): void {
+    if (this.editingResponse != null) {
+      const id = this.editingResponse;
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("c"))) this.editingResponse = null;
+      else this.editor.handleInput(matchesKey(data, Key.shift("enter")) ? "\n" : data);
+      this.responseDrafts.set(id, this.editor.getExpandedText());
+      this.syncCursorMode();
+      this.requestRender();
+      return;
+    }
+    if (this.state.focus === "replies" && this.openedThread != null) {
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+        this.threadJumpToken += 1;
+        this.openedThread = null; this.threadBodyCache = null; this.requestRender(); return;
+      }
+      if (data === "e") { this.openResponseDraft(); return; }
+      if (data === "v") { void this.jumpThreadToCode(); return; }
+      let delta = 0;
+      if (matchesKey(data, Key.down) || data === "j") delta = 1;
+      if (matchesKey(data, Key.up) || data === "k") delta = -1;
+      if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.ctrl("f"))) delta = this.threadPageSize;
+      if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.ctrl("b"))) delta = -this.threadPageSize;
+      if (matchesKey(data, Key.ctrl("d"))) delta = getHalfPageStep(this.threadPageSize);
+      if (matchesKey(data, Key.ctrl("u"))) delta = -getHalfPageStep(this.threadPageSize);
+      if (delta || data === "g" || data === "G") {
+        this.threadScroll = data === "g" ? 0 : data === "G" ? this.threadLineCount : Math.max(0, this.threadScroll + delta);
+        this.requestRender(); return;
+      }
+    }
     if (this.reanchorTarget != null) {
       this.handleReanchorInput(data);
       return;
@@ -3806,6 +4016,13 @@ export class ReviewApp {
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.requestCancel(); return; }
 
     if (this.state.focus === "replies") {
+      if (data === "m") { this.loadMoreConversation(); return; }
+      if (data === "o") { this.openReplyUrl(); return; }
+      if (data === "t") {
+        if (this.conversation == null) this.setMessage("Full conversation is unavailable from this source.");
+        else { this.threadJumpToken += 1; this.allThreads = !this.allThreads; this.openedThread = null; this.selectedReplyIndex = 0; this.repliesScroll = 0; }
+        this.requestRender(); return;
+      }
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveReplySelection(1);
         return;
@@ -4505,6 +4722,59 @@ export class ReviewApp {
       .map((line) => this.theme.bg("toolPendingBg", line));
   }
 
+  private conversationLabel(): string {
+    const snapshot = this.conversation;
+    if (snapshot == null) return "Conversation coverage unknown";
+    const open = snapshot.threads.filter((thread) => thread.resolved === false).length;
+    const unknown = snapshot.threads.filter((thread) => thread.resolved == null).length;
+    return `Conversation ${snapshot.coverage} · g${snapshot.generation} · ${open} known open${unknown ? `, ${unknown} resolution unknown` : ""} · ${snapshot.fetchedAt}`;
+  }
+
+  private renderThread(width: number, height: number): string[] {
+    const thread = this.openedThread!;
+    const contentWidth = Math.max(1, width - 2);
+    const lines: string[] = [];
+    if (this.editingResponse != null) {
+      lines.push(this.theme.fg("muted", "Draft for this window only; not sent."));
+      pushWrappedText(lines, this.theme, "Esc/Enter keep · Shift+Enter newline", contentWidth, "dim");
+      lines.splice(Math.max(0, height - 3));
+      const available = Math.max(1, height - 2 - lines.length);
+      const editorLines = this.editor.render(contentWidth);
+      const cursor = editorLines.findIndex((line) => line.includes(CURSOR_MARKER));
+      const start = Math.max(0, Math.min(editorLines.length - available, cursor - available + 1));
+      lines.push(...editorLines.slice(start, start + available));
+      return renderBox("Response draft", width, height, this.theme, lines, true);
+    }
+    pushWrappedText(lines, this.theme, this.conversationLabel(), contentWidth, "dim");
+    pushWrappedText(lines, this.theme, "↑↓ scroll · g/G ends · Esc back", contentWidth, "dim");
+    pushWrappedText(lines, this.theme, "e draft · v code · o link · A analyze · r refresh", contentWidth, "dim");
+    if (this.conversation?.continuation) lines.push(this.theme.fg("accent", "m load more"));
+    if (this.repliesRefreshing) lines.push(this.theme.fg("dim", "Refreshing conversation…"));
+    if (!this.conversation?.threads.some((item) => item.id === thread.id)) {
+      pushWrappedText(lines, this.theme, "Thread absent from latest fetched data; showing the previous copy.", contentWidth, "muted");
+    }
+    if (this.threadBodyCache?.thread !== thread || this.threadBodyCache.width !== contentWidth) {
+      const body: string[] = [];
+      for (const comment of thread.comments) {
+        body.push(this.theme.fg("accent", sanitizeTerminalText(comment.author)));
+        for (const line of wrapTextWithAnsi(sanitizeTerminalMultilineText(comment.body), contentWidth)) body.push(this.theme.fg("text", line));
+        body.push("");
+      }
+      this.threadBodyCache = { thread, width: contentWidth, lines: body };
+    }
+    const body = [...this.threadBodyCache.lines];
+    const analysis = this.replyAnalysis;
+    if (analysis.status !== "idle" && analysis.replyId === `thread:${thread.id}`) {
+      const text = analysis.status === "loading" ? "Analyzing thread…" : analysis.status === "error" ? `Analysis failed: ${analysis.error}` : analysis.text;
+      for (const line of wrapTextWithAnsi(text, contentWidth)) body.push(this.theme.fg("muted", line));
+    }
+    this.threadPageSize = Math.max(1, height - 2 - lines.length);
+    this.threadLineCount = body.length;
+    this.threadScroll = Math.max(0, Math.min(this.threadScroll, body.length - this.threadPageSize));
+    lines.push(...body.slice(this.threadScroll, this.threadScroll + this.threadPageSize));
+    return renderBox("Thread", width, height, this.theme, lines, this.state.focus === "replies");
+  }
+
   private renderContextPanel(width: number, height: number): string[] {
     const source = this.options.contextPanelSource;
     const focused = this.state.focus === "context";
@@ -4525,6 +4795,7 @@ export class ReviewApp {
       lines.push(...buildContextPanelLines(this.theme, width, this.contextPanelState.text));
     }
 
+    if (this.conversation != null || this.options.contextPanelSource?.conversation != null) lines.unshift(this.theme.fg("dim", this.conversationLabel()));
     const bodyHeight = Math.max(1, Math.floor(height) - 2);
     this.contextLineCount = lines.length;
     this.contextPageSize = bodyHeight;
@@ -4533,6 +4804,7 @@ export class ReviewApp {
   }
 
   private renderRepliesPanel(width: number, height: number): string[] {
+    if (this.openedThread != null) return this.renderThread(width, height);
     const source = this.options.repliesSource;
     const focused = this.state.focus === "replies";
     const lines: string[] = [];
@@ -4545,29 +4817,44 @@ export class ReviewApp {
       return renderBox("Replies", width, height, this.theme, lines, false);
     }
 
-    if (this.repliesPanelState.status === "idle" || this.repliesPanelState.status === "loading") {
+    if (!(this.allThreads && this.conversation) && (this.repliesPanelState.status === "idle" || this.repliesPanelState.status === "loading")) {
       pushWrappedText(lines, this.theme, source.loadingText, contentWidth);
       this.repliesScroll = 0;
       this.repliesPageSize = bodyHeight;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
     }
 
-    if (this.repliesPanelState.status === "error") {
+    if (this.repliesPanelState.status === "error" && !this.allThreads) {
       lines.push(this.theme.fg("error", "Could not load replies."));
+      if (this.conversation != null) lines.push(this.theme.fg("accent", "t inspect fetched threads"));
       pushWrappedText(lines, this.theme, this.repliesPanelState.error, contentWidth, "muted");
       this.repliesScroll = 0;
       this.repliesPageSize = bodyHeight;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
     }
 
-    const replies = this.repliesPanelState.snapshot.replies;
+    const snapshot = this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot : undefined;
+    const replies = this.getReplies();
+    const conversation = this.conversation;
+    if (conversation != null) {
+      pushWrappedText(lines, this.theme, this.conversationLabel(), contentWidth, "dim");
+      if (conversation.reasons.length) pushWrappedText(lines, this.theme, conversation.reasons.join("; "), contentWidth, "dim");
+    }
     this.selectedReplyIndex = Math.max(0, Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1)));
-    lines.push(this.theme.fg("muted", `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`));
-    lines.push(this.theme.fg("dim", "↑↓ select • Enter open • r refresh • A analyze"));
+    lines.push(this.theme.fg("muted", this.allThreads ? `${replies.length} fetched threads`
+      : snapshot?.displayTruncated ? `Showing ${replies.length} of ${snapshot.totalReplies} fetched replies`
+      : `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`));
+    pushWrappedText(lines, this.theme, "↑↓ select · Enter open · r refresh · A analyze", contentWidth, "dim");
+    if (conversation != null) {
+      pushWrappedText(lines, this.theme, `t ${this.allThreads ? "personal replies" : "all threads"} · o browser`, contentWidth, "dim");
+      if (conversation.continuation) lines.push(this.theme.fg("accent", "m load more"));
+    }
+    if (this.repliesRefreshing) lines.push(this.theme.fg("dim", "Refreshing conversation…"));
     lines.push("");
 
     if (replies.length === 0) {
-      lines.push(this.theme.fg("dim", "No replies to review."));
+      pushWrappedText(lines, this.theme, conversation == null ? "No replies in supplied data; coverage unknown."
+        : conversation.coverage !== "complete" ? "No replies in fetched data; conversation incomplete." : "No replies to review.", contentWidth, "dim");
       this.repliesScroll = 0;
       this.repliesPageSize = 1;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
@@ -4582,7 +4869,7 @@ export class ReviewApp {
       const location = reply.path == null || reply.path.length === 0
         ? "Pull request"
         : `${sanitizeTerminalText(reply.path)}${reply.line == null ? "" : `:${reply.line}`}`;
-      const resolution = reply.resolved ? "resolved" : "unresolved";
+      const resolution = reply.resolved == null ? "resolution unknown" : reply.resolved ? "resolved" : "unresolved";
       pushWrappedText(block, this.theme, `${location} • ${resolution}`, contentWidth, "dim", "   ");
       block.push(...buildCommentPanelTextLines(this.theme, width, reply.body, "muted", "   ", 4));
 
@@ -4772,7 +5059,10 @@ export class ReviewApp {
     const headerLines: string[] = [];
     if (this.options.reviewHeader != null) {
       const scopedFiles = getScopedFiles(this.files, this.state.activeScope);
-      headerLines.push(buildReviewHeaderLine(this.theme, frameInnerWidth, this.options.reviewHeader, {
+      headerLines.push(buildReviewHeaderLine(this.theme, frameInnerWidth, {
+        ...this.options.reviewHeader,
+        ...(this.options.contextPanelSource || this.options.repliesSource ? { openThreads: undefined, awaitingReply: undefined, conversationLabel: this.conversationLabel() } : {}),
+      }, {
         files: scopedFiles.length,
         reviewed: scopedFiles.filter((file) => this.reviewedFileIds.has(file.id)).length,
         comments: getDraftCommentCount(this.state),

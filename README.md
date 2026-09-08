@@ -79,6 +79,29 @@ Common review controls:
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
 
+### Current PR context and conversation
+
+The context pane shows fetched facts before the optional generated explanation. Missing checks or conversation data remain labeled unavailable; a model summary cannot replace those facts. The header, context, and replies use the same conversation generation and fetch timestamp.
+
+In Pane 5, focus Replies to use these controls:
+
+| Key | Action |
+| --- | --- |
+| `t` | Switch between personal replies and all fetched review threads |
+| `Enter` | Open the selected thread with all fetched comment text |
+| `r` / `m` | Refresh the conversation / load more when continuation is available |
+| `o` | Open the thread's browser link |
+| `v` in a thread | Jump to a verified code anchor; unavailable or stale anchors leave the code selection unchanged |
+| `A` / `e` in a thread | Analyze the thread / edit a suggested response |
+| Arrow keys, paging keys, `g` / `G` | Scroll the thread |
+| `Esc` in a thread | Return to the list |
+
+Refresh keeps the selected thread and code. If a thread is absent from newly fetched data, its previous copy stays visible with a warning. Code jumps require matching immutable revision, side, path, and available line content; old-side jumps also require a matching base revision.
+
+Fetch coverage is separate from list previews: personal replies are limited to 100 entries and body previews to 1,200 characters. Open a thread to inspect its fetched text or load additional pages. Thread analysis uses at most 24,000 characters. Suggested responses remain editable across refreshes **in this review window only**; Enter or Esc keeps the buffer, and Shift+Enter inserts a newline. These response buffers are not parked, saved across closing, submitted as review feedback, or sent to the provider. No action resolves a remote thread.
+
+See [Remote providers](docs/remote-providers.md#conversation-retrieval) for fetch budgets and custom-provider pagination.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:

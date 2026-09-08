@@ -10,6 +10,7 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
+import { getConversationReader, type ConversationSnapshot } from "./conversation.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -42,9 +43,17 @@ interface PullRequestCheck {
 }
 
 interface PullRequestDetails {
+  conversation?: ConversationSnapshot;
+  conversationLoading?: boolean;
+  conversationError?: string;
+  suppliedConversation?: boolean;
   url?: string;
   isDraft?: boolean;
+  detailsUnavailable?: boolean;
   checksUnavailable?: boolean;
+  commentsUnavailable?: boolean;
+  reviewsUnavailable?: boolean;
+  reviewThreadsUnavailable?: boolean;
   mergeStateStatus?: string;
   reviewDecision?: string;
   comments?: PullRequestComment[];
@@ -60,36 +69,7 @@ interface StatusSummary {
   reason: string;
 }
 
-const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
-
-const QUERY_OPEN_TOKEN = "__CODE_DIFF_QUERY_OPEN__";
-const QUERY_CLOSE_TOKEN = "__CODE_DIFF_QUERY_CLOSE__";
-
-const OPEN_REVIEW_THREADS_QUERY = `
-query PullRequestOpenThreads($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 50) {
-        nodes {
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 20) {
-            nodes {
-              author { login }
-              body
-              createdAt
-              url
-              path
-              line
-            }
-          }
-        }
-      }
-    }
-  }
-}`;
+const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Head", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
 
 function providerForTarget(target: RemoteReviewTarget): ProviderSettings {
   const providerId = target.provider ?? target.handoff?.provider;
@@ -138,7 +118,7 @@ function compact(value: string | undefined, maxLength: number): string {
 }
 
 function latestSubstantiveItems(items: PullRequestComment[] | undefined, limit: number): PullRequestComment[] {
-  return [...(items ?? [])]
+  return [...(items ?? [])].reverse()
     .filter((item) => stripMarkup(item.body ?? "").length > 0 || item.state != null)
     .sort((a, b) => String(b.submittedAt ?? b.createdAt ?? "").localeCompare(String(a.submittedAt ?? a.createdAt ?? "")))
     .slice(0, limit);
@@ -146,7 +126,7 @@ function latestSubstantiveItems(items: PullRequestComment[] | undefined, limit: 
 
 function openReviewThreads(details: PullRequestDetails, limit: number): PullRequestThread[] {
   return [...(details.openReviewThreads ?? [])]
-    .filter((thread) => thread.isResolved !== true && thread.isOutdated !== true)
+    .filter((thread) => thread.isResolved === false && thread.isOutdated !== true)
     .filter((thread) => latestSubstantiveItems(thread.comments, 1).length > 0)
     .sort((a, b) => {
       const aLatest = latestSubstantiveItems(a.comments, 1)[0];
@@ -203,6 +183,7 @@ function hasStackBlocker(details: PullRequestDetails): boolean {
 }
 
 function deriveStatus(details: PullRequestDetails): StatusSummary {
+  if (details.detailsUnavailable) return { status: "pending", reason: "PR details unavailable" };
   if (details.isDraft) return { status: "blocked", reason: "draft PR" };
   if (hasChangesRequested(details)) return { status: "blocked", reason: "changes requested" };
 
@@ -210,6 +191,10 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
   if (failed.length > 0) return { status: "blocked", reason: `${failed.length} failing check${failed.length === 1 ? "" : "s"}` };
 
   if (openReviewThreads(details, 1).length > 0) return { status: "pending", reason: "open review comments" };
+  if (details.conversationLoading || details.suppliedConversation) return { status: "pending", reason: "review conversation coverage unknown" };
+  if (details.conversationError || details.reviewThreadsUnavailable || details.reviewsUnavailable || details.commentsUnavailable) return { status: "pending", reason: "review conversation unavailable" };
+  if (details.conversation?.coverage !== undefined && details.conversation.coverage !== "complete") return { status: "pending", reason: "review conversation incomplete" };
+  if (details.conversation?.threads.some((thread) => thread.resolved === null)) return { status: "pending", reason: "review resolution unknown" };
   if (hasStackBlocker(details)) return { status: "blocked", reason: "stack or merge blocker called out in comments" };
 
   const mergeState = String(details.mergeStateStatus ?? "").toUpperCase();
@@ -233,6 +218,7 @@ function extractBodySignal(body: string): string {
 
 function formatChecks(details: PullRequestDetails, provider: ProviderSettings): string {
   if (details.checksUnavailable) return `Check details unavailable from ${provider.label} context.`;
+  if ((details.statusCheckRollup ?? []).length === 0) return "No check runs reported.";
   const failed = failingChecks(details).slice(0, 4).map(checkName);
   if (failed.length > 0) return `Failing: ${failed.join(", ")}`;
   const pending = pendingChecks(details).slice(0, 4).map(checkName);
@@ -262,57 +248,54 @@ function formatReadableSummary(value: string): string {
   return readable.join("\n").trim();
 }
 
-function replaceSummaryField(summary: string, label: string, value: string): string {
-  const field = `${label}:`;
-  const cleanValue = stripMarkup(value);
-  const lines = summary.split("\n");
-  const index = lines.findIndex((line) => line.trim() === field);
-  if (index < 0) return `${field}\n${cleanValue}\n\n${summary}`.trim();
-
-  let end = index + 1;
-  while (end < lines.length && lines[end]!.trim().length === 0) end += 1;
-  if (end < lines.length) lines[end] = cleanValue;
-  else lines.push(cleanValue);
-  return lines.join("\n").trim();
-}
-
 function formatDiffStats(target: RemoteReviewTarget): string {
   const pr = target.pullRequest!;
   const fileLabel = pr.changedFiles === 1 ? "file" : "files";
   return `${pr.changedFiles} ${fileLabel} touched | +${pr.additions}/-${pr.deletions}`;
 }
 
-function enforceIdentityFields(summary: string, target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
-  const pr = target.pullRequest!;
-  const url = details.url ?? pullRequestUrl(target, provider);
-  return [
-    ["Diff", formatDiffStats(target)],
-    ["Author", pr.authorLogin],
-    ["URL", url],
-    ["Title", pr.title],
-  ].reduce((current, [label, value]) => replaceSummaryField(current, label, value), summary);
-}
-
-function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
-  const pr = target.pullRequest!;
-  const status = deriveStatus(details);
+function formatConversation(details: PullRequestDetails): string {
+  const unavailable = [
+    details.reviewThreadsUnavailable ? "review threads" : undefined,
+    details.reviewsUnavailable ? "reviews" : undefined,
+    details.commentsUnavailable ? "PR comments" : undefined,
+  ].filter((section): section is string => section != null);
   const threads = openReviewThreads(details, 4).map((thread) => formatThreadSummary(thread, 180));
   const reviews = latestSubstantiveItems(details.reviews, 3)
     .map((review) => `${review.author?.login ?? "unknown"} ${String(review.state ?? "commented").toLowerCase().replace(/_/g, " ")}${stripMarkup(review.body ?? "").length > 0 ? `: ${compact(review.body, 120)}` : ""}`);
   const comments = latestSubstantiveItems(details.comments, 3)
     .map((comment) => `${comment.author?.login ?? "unknown"}: ${compact(comment.body, 160)}`);
+  const unknown = details.conversation?.threads.filter((thread) => thread.resolved === null).length ?? 0;
+  const unknownThreads = (details.openReviewThreads ?? []).filter((thread) => thread.isResolved == null).slice(0, 4).map((thread) => formatThreadSummary(thread, 180));
+  const known = threads.length > 0 ? threads.join("; ") : unknownThreads.length ? unknownThreads.join("; ") : reviews.length > 0 ? reviews.join("; ") : comments.length > 0 ? comments.join("; ") : undefined;
+  if (details.conversationError) return `${known ? `${known}; ` : ""}Unavailable: ${details.conversationError}`;
+  if (details.conversationLoading) return `${known ? `${known}; ` : ""}Conversation loading; coverage unknown.`;
+  if (details.suppliedConversation) return `${known ? `${known}; ` : ""}Supplied conversation; coverage unknown.`;
+  if (details.conversation && details.conversation.coverage !== "complete") {
+    const availability = unavailable.length ? `Unavailable: ${unavailable.join(", ")}.` : "";
+    return `${known ? `${known}; ` : ""}${availability} Coverage: ${details.conversation.coverage}; ${details.conversation.reasons.join("; ")}.${unknown ? ` Resolution unknown for ${unknown} thread(s).` : ""}`;
+  }
+  if (unknown) return `${known ?? "Review comments fetched."} Resolution unknown for ${unknown} thread(s).`;
+  if (unavailable.length > 0) return known == null ? `Unavailable: ${unavailable.join(", ")}.` : `${known}; Unavailable: ${unavailable.join(", ")}.`;
+  return known ?? "None found.";
+}
+
+function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
+  const pr = target.pullRequest!;
+  const status = deriveStatus(details);
   const bodySignal = extractBodySignal(pr.body);
 
   return [
     `Title: ${pr.title}`,
     `URL: ${details.url ?? pullRequestUrl(target, provider)}`,
     `Author: ${pr.authorLogin}`,
+    `Head: ${pr.headRefName} @ ${pr.headRefOid}`,
     `Diff: ${formatDiffStats(target)}`,
     `Status: ${status.status} - ${status.reason}`,
     `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
-    "Changes: Not summarized by the model; read the diff for implementation details.",
+    "Changes: Read the diff for implementation details.",
     `Validation: ${formatChecks(details, provider)}`,
-    `Open comments: ${threads.length > 0 ? threads.join("; ") : reviews.length > 0 ? reviews.join("; ") : comments.length > 0 ? comments.join("; ") : "None found."}`,
+    `Open comments: ${formatConversation(details)}`,
     pr.stackParent != null ? `Stack: parent #${pr.stackParent.number} ${pr.stackParent.title}` : undefined,
   ].filter((line): line is string => line != null).join("\n");
 }
@@ -346,13 +329,13 @@ function formatSummaryInput(target: RemoteReviewTarget, details: PullRequestDeta
     compact(pr.body, 6000) || "No body.",
     "",
     "Open review comments:",
-    openThreads || "No unresolved review threads found.",
+    openThreads || formatConversation(details),
     "",
     "Reviews:",
-    reviews || "No review bodies found.",
+    reviews || "No review bodies in fetched data; see conversation coverage.",
     "",
     "PR conversation comments:",
-    comments || "No PR conversation comments found.",
+    comments || "No PR comments in fetched data; see conversation coverage.",
   ].join("\n");
 }
 
@@ -402,14 +385,6 @@ function providerCheck(provider: ProviderSettings, value: unknown): PullRequestC
   };
 }
 
-function encodeProviderQuery(value: string): string {
-  return value.replaceAll("{", QUERY_OPEN_TOKEN).replaceAll("}", QUERY_CLOSE_TOKEN);
-}
-
-function decodeProviderQuery(value: string): string {
-  return value.replaceAll(QUERY_OPEN_TOKEN, "{").replaceAll(QUERY_CLOSE_TOKEN, "}");
-}
-
 function parseProviderJson(provider: ProviderSettings, value: string, label: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -427,76 +402,26 @@ async function fetchProviderOperation(
   label: string,
 ): Promise<unknown> {
   const rendered = renderProviderOperation(provider, operation, values);
-  const args = rendered.args.map(decodeProviderQuery);
-  const result = await pi.exec(provider.executable, args, { cwd: target.gitRoot, timeout: 45000 });
+  const result = await pi.exec(provider.executable, rendered.args, { cwd: target.gitRoot, timeout: 45000 });
   if (result.code !== 0 || result.stdout.trim().length === 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || `Could not fetch ${provider.label} ${label}.`);
   }
   return parseProviderJson(provider, result.stdout.trim(), label);
 }
 
-function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
-  const parsed = value as {
-    data?: {
-      repository?: {
-        pullRequest?: {
-          reviewThreads?: {
-            nodes?: Array<{
-              isResolved?: boolean;
-              isOutdated?: boolean;
-              path?: string;
-              line?: number | null;
-              comments?: { nodes?: PullRequestComment[] };
-            }>;
-          };
-        };
-      };
-    };
+function unavailablePullRequestDetails(target: RemoteReviewTarget, provider: ProviderSettings): PullRequestDetails {
+  return {
+    url: pullRequestUrl(target, provider),
+    detailsUnavailable: true,
+    checksUnavailable: true,
+    commentsUnavailable: true,
+    reviewsUnavailable: true,
+    reviewThreadsUnavailable: true,
+    comments: [],
+    reviews: [],
+    openReviewThreads: [],
+    statusCheckRollup: [],
   };
-  return (parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).map((thread) => ({
-    isResolved: thread.isResolved,
-    isOutdated: thread.isOutdated,
-    path: thread.path,
-    line: thread.line,
-    comments: thread.comments?.nodes ?? [],
-  }));
-}
-
-async function fetchOpenReviewThreads(
-  pi: ExtensionAPI,
-  target: RemoteReviewTarget,
-  provider: ProviderSettings,
-  repo: string,
-  number: string,
-): Promise<PullRequestThread[]> {
-  const parts = repo.split("/");
-  const parsedNumber = Number.parseInt(number, 10);
-  if (getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
-    try {
-      const payload = await fetchProviderOperation(pi, target, provider, "reviewThreads", {
-        owner: parts[0]!,
-        name: parts[1]!,
-        number: parsedNumber,
-        query: encodeProviderQuery(OPEN_REVIEW_THREADS_QUERY.replace(/\s+/g, " ").trim()),
-      }, `PR #${number} review threads`);
-      return parseGraphqlReviewThreads(payload);
-    } catch {
-      if (provider.operations.reviewComments == null) return [];
-    }
-  }
-
-  const payload = await fetchProviderOperation(pi, target, provider, "reviewComments", { repo, number }, `PR #${number} review comments`);
-  const rows = providerRows(provider, "pullRequestReviewComments", payload, true);
-  return rows.map((row) => {
-    const comment = providerComment(provider, row);
-    return {
-      path: comment.path,
-      line: comment.line,
-      isResolved: providerBoolean(provider, "commentResolved", row) === true,
-      isOutdated: providerBoolean(provider, "commentOutdated", row) === true,
-      comments: [comment],
-    };
-  });
 }
 
 async function fetchPullRequestDetails(
@@ -506,37 +431,45 @@ async function fetchPullRequestDetails(
 ): Promise<PullRequestDetails> {
   const pr = target.pullRequest!;
   const repo = target.repo ?? pr.repo;
-  if (repo == null) throw new Error(`Could not fetch ${provider.label} PR #${pr.number} context without a repository.`);
+  if (repo == null) return unavailablePullRequestDetails(target, provider);
 
-  const detailsPayload = await fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`);
-  const separateContext = getProviderCapability(provider, "separatePullRequestContext");
-  const [commentsPayload, reviewsPayload, openReviewThreads] = await Promise.all([
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestComments", { repo, number: pr.number }, `PR #${pr.number} comments`)
-      : Promise.resolve(detailsPayload),
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestReviews", { repo, number: pr.number }, `PR #${pr.number} reviews`)
-      : Promise.resolve(detailsPayload),
-    fetchOpenReviewThreads(pi, target, provider, repo, pr.number),
+  const [detailsResult] = await Promise.allSettled([
+    fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`),
   ]);
+  const detailsPayload = detailsResult.status === "fulfilled" ? detailsResult.value : undefined;
+  // Embedded provider detail lists remain useful known facts, but are never pagination proof.
+  const embedded = (field: string) => {
+    try { return providerRows(provider, field, detailsPayload, false).map((row) => providerComment(provider, row)); } catch { return []; }
+  };
+  const comments = embedded("pullRequestComments");
+  const reviews = embedded("pullRequestReviews");
+
+  let checks: PullRequestCheck[] = [];
+  let checksUnavailable = detailsResult.status === "rejected" || !getProviderCapability(provider, "pullRequestChecks");
+  try {
+    checks = providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
+  } catch {
+    checksUnavailable = true;
+  }
 
   const directDecision = providerString(provider, "pullRequestReviewDecision", detailsPayload);
   const reviewDecision = directDecision
     ?? (providerBoolean(provider, "pullRequestChangesRequested", detailsPayload) === true
       ? "CHANGES_REQUESTED"
       : providerBoolean(provider, "pullRequestApproved", detailsPayload) === true ? "APPROVED" : undefined);
-  const checks = providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
 
   return {
+    conversationLoading: true,
+    detailsUnavailable: detailsResult.status === "rejected",
     url: providerString(provider, "pullRequestUrl", detailsPayload) ?? pullRequestUrl(target, provider),
     isDraft: providerBoolean(provider, "pullRequestDraft", detailsPayload),
     mergeStateStatus: providerString(provider, "pullRequestMergeState", detailsPayload)?.toUpperCase(),
     reviewDecision,
-    comments: providerRows(provider, "pullRequestComments", commentsPayload, separateContext).map((row) => providerComment(provider, row)),
-    reviews: providerRows(provider, "pullRequestReviews", reviewsPayload, separateContext).map((row) => providerComment(provider, row)),
-    openReviewThreads,
+    comments,
+    reviews,
+    openReviewThreads: [],
     statusCheckRollup: checks,
-    checksUnavailable: !getProviderCapability(provider, "pullRequestChecks"),
+    checksUnavailable,
     createdAt: providerString(provider, "pullRequestCreatedAt", detailsPayload),
     updatedAt: providerString(provider, "pullRequestUpdatedAt", detailsPayload),
   };
@@ -544,20 +477,13 @@ async function fetchPullRequestDetails(
 
 function buildAgentPrompt(summaryInput: string): string {
   return [
-    "Summarize this pull request for a reviewer already looking at the diff.",
+    "Write an optional reviewer-focused explanation for a pull request whose facts are shown separately.",
     "Output plain text only, no markdown table, no preamble, no emoji, ASCII only.",
-    "Do not mention these instructions or use phrases like 'what matters most'.",
-    "The reviewer needs only the important context, focused on the problem this PR solves.",
+    "Do not restate title, URL, author, diff counts, status, checks, or other factual fields.",
+    "Focus on the problem this PR solves, the important implementation choice, and reviewer risk.",
     "Keep implementation details short unless they explain reviewer risk or the problem.",
-    "Required labels: Title, URL, Author, Diff, Status, Problem, Changes, Validation, Open comments. Add Stack only if relevant.",
-    "Title, URL, Author, and Diff must exactly match the input values.",
-    "Problem must explain the user, merchant, developer, or system pain being solved in one or two sentences.",
-    "Open comments must summarize unresolved review threads only. If none exist, write None found.",
-    "Use PR comments and reviews only when they affect review readiness, validation, blockers, or unresolved questions.",
-    "Put each label on its own line with the value on the following line.",
-    "Status must be exactly one of pending, blocked, approved, followed by a short reason using an ASCII hyphen separator.",
-    "Use readable section blocks separated by blank lines, not one dense paragraph.",
-    "Limit the whole response to roughly 180 words.",
+    "Use PR comments and reviews only when they affect review readiness, blockers, or unresolved questions.",
+    "Limit the response to roughly 120 words.",
     "",
     summaryInput,
   ].join("\n");
@@ -597,14 +523,15 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   if (handoff == null || !hasHandoffContext(handoff)) return undefined;
   return {
     url: pullRequestUrl(target, provider),
+    suppliedConversation: true,
     reviewDecision: handoff.reviewDecision,
     comments: [],
     reviews: handoff.reviews.map((review) => ({ author: { login: review.author }, state: review.state })),
     openReviewThreads: (handoff.threads ?? []).map((thread) => ({
       path: thread.path,
       line: thread.line ?? null,
-      isResolved: thread.resolved === true,
-      isOutdated: thread.outdated === true,
+      isResolved: thread.resolved,
+      isOutdated: thread.outdated,
       comments: thread.comments.map((comment) => ({
         author: { login: comment.author },
         body: comment.body,
@@ -619,32 +546,62 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   };
 }
 
-async function loadRemotePullRequestSummary(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  target: RemoteReviewTarget,
-  provider: ProviderSettings,
-): Promise<string> {
-  const supplied = suppliedPullRequestDetails(target, provider);
-  const details = supplied ?? await fetchPullRequestDetails(pi, target, provider);
-  const suppliedSummary = target.handoff?.summary;
-  if (suppliedSummary != null) return enforceIdentityFields(formatReadableSummary(suppliedSummary), target, details, provider);
-  const fallback = fallbackSummary(target, details, provider);
-  try {
-    const generated = await summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
-    return enforceIdentityFields(formatReadableSummary(generated ?? fallback), target, details, provider);
-  } catch {
-    return enforceIdentityFields(formatReadableSummary(fallback), target, details, provider);
-  }
+function appendGeneratedExplanation(facts: string, explanation: string): string {
+  const clean = cleanAgentOutput(explanation);
+  return clean.length === 0 ? facts : `${facts}\n\nGenerated explanation (optional):\n${clean}`;
+}
+
+function applyConversation(details: PullRequestDetails, conversation: ConversationSnapshot): PullRequestDetails {
+  const comment = (entry: import("./conversation.js").ConversationComment): PullRequestComment => ({ ...entry, author: { login: entry.author } });
+  return {
+    ...details, conversation, conversationLoading: false,
+    comments: conversation.sections.comments === "complete" ? conversation.comments.map(comment) : conversation.comments.length ? conversation.comments.map(comment) : details.comments,
+    reviews: conversation.sections.reviews === "complete" ? conversation.reviews.map(comment) : conversation.reviews.length ? conversation.reviews.map(comment) : details.reviews,
+    openReviewThreads: conversation.threads.map((thread) => ({ path: thread.path, line: thread.line, isResolved: thread.resolved ?? undefined, isOutdated: thread.outdated, comments: thread.comments.map(comment) })),
+    commentsUnavailable: conversation.sections.comments === "unavailable" && !details.comments?.length,
+    reviewsUnavailable: conversation.sections.reviews === "unavailable" && !details.reviews?.length,
+    reviewThreadsUnavailable: conversation.sections.threads === "unavailable",
+  };
 }
 
 export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined): ReviewContextPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
+  let requestToken = 0;
   return {
+    conversation: getConversationReader(pi, target, provider),
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
-    load: () => loadRemotePullRequestSummary(pi, ctx, target, provider),
+    load: async (onUpdate, options) => {
+      const token = ++requestToken;
+      // Explicit refresh/resume (or joining one with {}) must not reuse supplied conversation facts.
+      const supplied = options == null ? suppliedPullRequestDetails(target, provider) : undefined;
+      // Handle rejected options/tokens now, before a potentially slow detail request yields to Node.
+      const conversation = supplied ? undefined : getConversationReader(pi, target, provider).load(options).then(
+        (snapshot) => ({ snapshot }),
+        (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+      );
+      let details = supplied ?? await fetchPullRequestDetails(pi, target, provider);
+      let facts = formatReadableSummary(fallbackSummary(target, details, provider));
+      let explanation = supplied ? target.handoff?.summary : undefined;
+      const publish = () => { if (token === requestToken) onUpdate?.(explanation ? appendGeneratedExplanation(facts, explanation) : facts); };
+      const enrich = () => {
+        if (token !== requestToken) return;
+        if (explanation != null) queueMicrotask(publish);
+        else void summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider))
+          .then((generated) => { if (generated != null) { explanation = generated; publish(); } })
+          .catch(() => undefined);
+      };
+      if (conversation) void conversation.then((result) => {
+        details = "snapshot" in result ? applyConversation(details, result.snapshot)
+          : { ...details, conversationLoading: false, conversationError: result.error };
+        facts = formatReadableSummary(fallbackSummary(target, details, provider));
+        publish();
+        enrich();
+      }).catch(() => undefined);
+      else enrich();
+      return facts;
+    },
     url: pullRequestUrl(target, provider),
   };
 }

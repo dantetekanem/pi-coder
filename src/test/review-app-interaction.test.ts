@@ -2,10 +2,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import type { ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
+import { createRemotePullRequestSummarySource } from "../pr-summary.js";
+import type { RemoteReviewTarget } from "../remote.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
+import type { ConversationSnapshot } from "../conversation.js";
 
 const STATUS_CELL_BOUND = 96;
 const STATUS_BYTE_BOUND = 256;
@@ -30,16 +33,20 @@ function expectSafeStatus(app: ReviewApp, marker: string): void {
 }
 
 const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
+const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
 let preferencesDir: string;
 
 beforeEach(() => {
   preferencesDir = mkdtempSync(join(tmpdir(), "pi-code-diff-review-app-"));
   process.env.PI_CODE_DIFF_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
+  process.env.PI_CODE_DIFF_SETTINGS_PATH = join(preferencesDir, "settings.json");
 });
 
 afterEach(() => {
   if (originalPreferencesPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
   else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
+  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
   rmSync(preferencesDir, { recursive: true, force: true });
 });
 
@@ -1337,6 +1344,220 @@ describe("Replies pane", () => {
     return { ...harness, load, analyze };
   }
 
+  function conversationSnapshot(): ConversationSnapshot {
+    return {
+      identity: "current-pr", generation: 1, fetchedAt: "2026-01-01T00:00:00.000Z", coverage: "complete",
+      sections: { threads: "complete", comments: "complete", reviews: "complete" }, reasons: [], retainedBytes: 4000,
+      comments: [], reviews: [], threads: [
+        { id: "thread-0", resolved: false, outdated: false, path: "src/app.ts", line: 1, side: "added", headRevision: "a".repeat(40),
+          comments: [{ id: "self", author: "author", body: "Original question" }, { id: "comment-0", author: "reviewer", body: "Full reply " + "x".repeat(1800) + "\nTAIL\\x07\u0007", path: "src/app.ts", line: 1, url: "https://github.com/example/widgets/pull/12#discussion_r0" }] },
+        { id: "other-thread", resolved: null, comments: [{ id: "other", author: "someone", body: "Thread without my participation" }] },
+      ],
+    };
+  }
+
+  it("opens the complete sanitized thread and keeps every fetched thread reachable", async () => {
+    const snapshot = { ...makeRepliesSnapshot(1), conversation: conversationSnapshot() };
+    const openUrl = vi.fn(async (url: string) => ({ status: "opened" as const, url }));
+    const { app } = await createRepliesHarness(snapshot, { openUrl });
+    focusReplies(app);
+    const selectedCode = structuredClone((app as any).state);
+    app.handleInput("\r");
+    expect(app.render(200).join("\n")).toContain("Original question");
+    app.handleInput("G");
+    expect(app.render(200).join("\n")).toContain("TAIL\\x07\\x07");
+    expect((app as any).state).toEqual(selectedCode);
+    expect(openUrl).not.toHaveBeenCalled();
+    app.handleInput("o");
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalledWith(snapshot.conversation.threads[0]!.comments[1]!.url));
+    app.handleInput("\u001b"); app.handleInput("t"); app.handleInput("j"); app.handleInput("\r");
+    expect(app.render(200).join("\n")).toContain("Thread without my participation");
+    app.dispose();
+  });
+
+  it("retains an editable suggested response without submitting feedback or sending it", async () => {
+    const analyze = vi.fn(async (_reply: ReviewReplyItem) => "Asks:\nClarify.\nSuggested response:\nThanks, I will check.");
+    const { app, done } = await createRepliesHarness({ ...makeRepliesSnapshot(1), conversation: conversationSnapshot() }, { analyze, openUrl: async (url) => ({ status: "opened", url }) });
+    focusReplies(app); app.handleInput("\r"); app.handleInput("A");
+    await vi.waitFor(() => expect((app as any).replyAnalysis.status).toBe("ready"));
+    expect(analyze.mock.calls[0]?.[0].body).toContain("Original question");
+    expect(analyze.mock.calls[0]?.[0].body).toContain("TAIL");
+    app.handleInput("e"); app.handleInput(" More detail."); app.handleInput("\u001b");
+    app.handleInput("r");
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    app.handleInput("e");
+    expect((app as any).editor.getText()).toBe("Thanks, I will check. More detail.");
+    expect((app as any).state.draft.comments).toEqual([]);
+    expect(done).not.toHaveBeenCalled();
+    app.dispose();
+  });
+
+  it("keeps the response cursor visible when the pane is shorter than the native editor", async () => {
+    const { app } = await createRepliesHarness({ ...makeRepliesSnapshot(1), conversation: conversationSnapshot() });
+    focusReplies(app); app.handleInput("\r"); app.handleInput("e");
+    (app as any).editor.setText(Array.from({ length: 40 }, (_, index) => `Response line ${index}`).join("\n"));
+    app.handleInput(" at the cursor");
+    const lines = (app as any).renderThread(30, 8) as string[];
+    expect(lines.some((line) => line.includes(CURSOR_MARKER))).toBe(true);
+    expect(lines.find((line) => line.includes(CURSOR_MARKER))).toContain("cursor");
+    expect((app as any).editor.getExpandedText()).toMatch(/ at the cursor$/);
+    app.dispose();
+  });
+
+  function remoteFile(path = "src/app.ts"): ReviewFile {
+    const file = makeFile(path);
+    return { ...file, inGitDiff: false, inAllFiles: true, hasWorkingTreeFile: false, gitDiff: null,
+      allFiles: { ...file.gitDiff!, originalRevision: "b".repeat(40), modifiedRevision: "a".repeat(40) } };
+  }
+
+  it.each(["valid", "deleted", "outdated", "unknown side", "different head", "unavailable", "unknown revision", "out of bounds", "unknown base"])("jumps only to a verifiable code anchor: %s", async (condition) => {
+    const conversation = conversationSnapshot();
+    const thread = conversation.threads[0]!;
+    if (condition === "outdated") thread.outdated = true;
+    if (condition === "unknown side") thread.side = undefined;
+    if (condition === "different head") thread.headRevision = "b".repeat(40);
+    if (condition === "out of bounds") thread.line = 200;
+    if (condition === "deleted" || condition === "unknown base") thread.side = "deleted";
+    if (condition === "deleted") thread.baseRevision = "b".repeat(40);
+    const file = remoteFile();
+    if (condition === "unknown revision") file.allFiles!.modifiedRevision = undefined;
+    const snapshot = { ...makeRepliesSnapshot(1), conversation };
+    const { app } = createHarness({ originalContent: "old\n", modifiedContent: "new\n", modifiedAvailable: condition !== "unavailable" }, [file], {
+      visibleScopes: ["all-files"], reviewHeader: { identity: "PR1", revision: "a".repeat(40) },
+      openUrl: async (url) => ({ status: "opened", url }),
+      repliesSource: { title: "Replies", loadingText: "Loading", load: async () => snapshot },
+    }, { columns: 200 });
+    app.render(200);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    focusReplies(app); app.handleInput("\r");
+    const selectedCode = structuredClone((app as any).state);
+    app.handleInput("v");
+    if (condition === "valid" || condition === "deleted") {
+      await vi.waitFor(() => expect((app as any).state.focus).toBe("diff"));
+      expect((app as any).state.selectedLineTargetByScopeFile[`all-files::${file.id}`]).toEqual({ side: thread.side, line: 1 });
+    } else {
+      await vi.waitFor(() => expect(String((app as any).message)).toMatch(/anchor|unavailable/i));
+      expect((app as any).state).toEqual(selectedCode);
+    }
+    app.dispose();
+  });
+
+  it("reveals an anchored unchanged line outside the initial diff hunks", async () => {
+    const conversation = conversationSnapshot();
+    conversation.threads[0]!.line = 90;
+    const originalContent = Array.from({ length: 100 }, (_, index) => `unchanged-${index + 1}`).join("\n") + "\n";
+    const { app } = createHarness({ originalContent, modifiedContent: originalContent.replace("unchanged-1\n", "changed-first\n") }, [remoteFile()], {
+      visibleScopes: ["all-files"], reviewHeader: { identity: "PR1", revision: "a".repeat(40) },
+      repliesSource: { title: "Replies", loadingText: "Loading", load: async () => ({ ...makeRepliesSnapshot(1), conversation }) },
+      openUrl: async (url) => ({ status: "opened", url }),
+    }, { columns: 200 });
+    app.render(200);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    focusReplies(app); app.handleInput("\r"); app.handleInput("v");
+    await vi.waitFor(() => expect((app as any).state.focus).toBe("diff"));
+    expect(app.render(200).join("\n")).toContain("unchanged-90");
+    app.handleInput("c");
+    expect((app as any).editTarget).toMatchObject({ startLine: 90, side: "added" });
+    app.dispose();
+  });
+
+  it.each(["stay", "close thread", "edit response"])("validates an unloaded file before moving code, respecting later interaction: %s", async (action) => {
+    const pending = deferred<ReviewFileContents>();
+    const contents = { originalContent: "old\n", modifiedContent: "new\n" };
+    const files = [remoteFile("src/aaa.ts"), remoteFile()];
+    const load = vi.fn(async (_root: string, file: ReviewFile) => file.path === "src/aaa.ts" ? contents : pending.promise);
+    const { app } = createHarness(contents, files, {
+      visibleScopes: ["all-files"], reviewHeader: { identity: "PR1", revision: "a".repeat(40) }, loadFileContents: load,
+      repliesSource: { title: "Replies", loadingText: "Loading", load: async () => ({ ...makeRepliesSnapshot(1), conversation: conversationSnapshot() }) },
+    }, { columns: 200 });
+    app.render(200);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    expect((app as any).state.activeFileId).toBe(files[0]!.id);
+    focusReplies(app); app.handleInput("\r"); app.handleInput("v");
+    expect(load).toHaveBeenCalledTimes(2);
+    if (action === "close thread") app.handleInput("\u001b");
+    if (action === "edit response") app.handleInput("e");
+    app.render(200);
+    pending.resolve(contents);
+    await load.mock.results[1]!.value;
+    await Promise.resolve();
+    expect((app as any).state.activeFileId).toBe(action === "stay" ? files[1]!.id : files[0]!.id);
+    app.dispose();
+  });
+
+  it("refreshes both sources once and preserves stable selection through reordering and late responses", async () => {
+    const first = conversationSnapshot();
+    const next = { ...first, generation: 2, fetchedAt: "2026-01-02T00:00:00.000Z", threads: [...first.threads].reverse() };
+    const oldRequest = deferred<ReviewRepliesSnapshot>();
+    const reader = { current: first, load: vi.fn(async () => first) };
+    const loadContext = vi.fn(async (_update?: (text: string) => void) => "Facts");
+    const load = vi.fn().mockResolvedValueOnce({ ...makeRepliesSnapshot(1), conversation: first }).mockReturnValueOnce(oldRequest.promise).mockResolvedValueOnce({ ...makeRepliesSnapshot(1), conversation: next });
+    const { app } = createHarness(undefined, undefined, {
+      reviewHeader: { identity: "PR1", revision: "a".repeat(40), openThreads: 0 },
+      openUrl: async (url) => ({ status: "opened", url }),
+      contextPanelSource: { title: "Context", loadingText: "Loading", conversation: reader, load: loadContext },
+      repliesSource: { title: "Replies", loadingText: "Loading", conversation: reader, load },
+    }, { columns: 240 });
+    app.render(240);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    (app as any).state.focus = "replies";
+    app.handleInput("t"); app.handleInput("j"); app.handleInput("\r");
+    const selectedCode = structuredClone((app as any).state);
+    app.handleInput("r"); app.handleInput("r");
+    expect(loadContext).toHaveBeenLastCalledWith(expect.any(Function), { refresh: true });
+    expect(load).toHaveBeenLastCalledWith({});
+    await vi.waitFor(() => expect((app as any).conversation?.generation).toBe(2));
+    oldRequest.resolve({ ...makeRepliesSnapshot(1), conversation: first });
+    await Promise.resolve();
+    expect(app.render(240).join("\n")).toContain("Thread without my participation");
+    expect((app as any).conversation.generation).toBe(2);
+    expect((app as any).state).toEqual(selectedCode);
+    app.dispose();
+  });
+
+  it("publishes the same generation and display totals when context finishes before reply identity", async () => {
+    const first = conversationSnapshot();
+    const reader = { current: first, load: vi.fn(async () => first) };
+    let update!: (text: string) => void;
+    const { app } = createHarness(undefined, undefined, {
+      contextPanelSource: { title: "Context", loadingText: "Loading", conversation: reader, load: async (onUpdate) => { update = onUpdate!; return "Facts"; } },
+      repliesSource: { title: "Replies", loadingText: "Loading", conversation: reader, load: async () => ({ ...makeRepliesSnapshot(1), conversation: first }) },
+    }, { columns: 240 });
+    app.render(240);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    reader.current = { ...first, generation: 2, fetchedAt: "2026-01-02T00:00:00.000Z", threads: [{ ...first.threads[0]!,
+      comments: [...first.threads[0]!.comments, ...Array.from({ length: 100 }, (_, index) => ({ id: `new-${index}`, author: "other", body: "Another reply" }))],
+    }] };
+    update("Current facts");
+    expect((app as any).repliesPanelState.snapshot.conversation.generation).toBe(2);
+    expect((app as any).repliesPanelState.snapshot.fetchedAt).toBe(reader.current.fetchedAt);
+    expect(app.render(240).join("\n")).toContain("Showing 100 of 101 fetched replies");
+    (app as any).state.focus = "replies";
+    app.handleInput("r");
+    await vi.waitFor(() => expect((app as any).repliesRefreshing).toBe(false));
+    expect((app as any).repliesPanelState.snapshot.conversation.generation).toBe(2);
+    app.dispose();
+  });
+
+  it("exposes load more using the same continuation for context and replies", async () => {
+    const conversation = { ...conversationSnapshot(), coverage: "partial" as const, continuation: { generation: 1 }, reasons: ["request budget"] };
+    const reader = { current: conversation, load: vi.fn(async () => conversation) };
+    const loadContext = vi.fn(async () => "Known facts");
+    const load = vi.fn(async () => ({ ...makeRepliesSnapshot(1), conversation }));
+    const { app } = createHarness(undefined, undefined, {
+      contextPanelSource: { title: "Context", loadingText: "Loading", conversation: reader, load: loadContext },
+      repliesSource: { title: "Replies", loadingText: "Loading", conversation: reader, load },
+    }, { columns: 240 });
+    app.render(240);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    (app as any).state.focus = "replies";
+    expect(app.render(240).join("\n")).toContain("m load more");
+    app.handleInput("m");
+    expect(loadContext).toHaveBeenLastCalledWith(expect.any(Function), { continuation: conversation.continuation });
+    expect(load).toHaveBeenLastCalledWith({ continuation: conversation.continuation });
+    app.dispose();
+  });
+
   it("loads only while visible and renders sanitized reply details", async () => {
     const load = vi.fn(async () => makeRepliesSnapshot(1, {
       author: "reviewer\x1b[31m",
@@ -1384,8 +1605,15 @@ describe("Replies pane", () => {
     const empty = await createRepliesHarness(makeRepliesSnapshot(0));
     const rendered = empty.app.render(200).join("\n");
     expect(rendered).toContain("0 replies");
-    expect(rendered).toContain("No replies to review.");
+    expect(rendered).toContain("coverage unknown");
     empty.app.dispose();
+  });
+
+  it.each(["complete", "partial", "unavailable"] as const)("qualifies an empty result using fetch coverage: %s", async (coverage) => {
+    const conversation = { ...conversationSnapshot(), threads: [], coverage };
+    const { app } = await createRepliesHarness({ ...makeRepliesSnapshot(0), conversation });
+    expect(app.render(200).join("\n")).toContain(coverage === "complete" ? "No replies to review." : "conversation incomplete.");
+    app.dispose();
   });
 
   it("selects, pages, and clamps replies with every supported navigation key", async () => {
@@ -1527,6 +1755,121 @@ describe("PR context pane", () => {
     app.handleInput("\t");
     app.handleInput("\t");
   }
+
+  it("renders real remote facts before model enrichment and preserves context scroll", async () => {
+    const model = deferred<{ code: number; stdout: string; stderr: string; killed: boolean }>();
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "gh" && args[0] === "pr" && args[1] === "view") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            url: prUrl,
+            isDraft: false,
+            mergeStateStatus: "UNKNOWN",
+            reviewDecision: "",
+            statusCheckRollup: [],
+            comments: [],
+            reviews: [],
+          }),
+          stderr: "",
+          killed: false,
+        };
+      }
+      if (command === "gh" && args[0] === "api") {
+        return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }), stderr: "", killed: false };
+      }
+      if (command === "pi") return model.promise;
+      return { code: 1, stdout: "", stderr: `unexpected ${command}`, killed: false };
+    });
+    const target: RemoteReviewTarget = {
+      gitRoot: "/repo",
+      baseRef: "origin/main",
+      headRef: "origin/feature",
+      remote: prUrl,
+      branch: "feature",
+      provider: "github" as never,
+      repo: "example/widgets",
+      pullRequest: {
+        number: "12",
+        repo: "example/widgets",
+        title: "Remove old checkout path",
+        body: "Remove the old path.",
+        additions: 3,
+        deletions: 9,
+        changedFiles: 2,
+        authorLogin: "alice",
+        state: "OPEN",
+        reviews: [],
+        headRefName: "feature",
+        headRefOid: "abc123",
+        baseRefName: "main",
+      },
+    };
+    const source = createRemotePullRequestSummarySource({ exec } as never, {} as never, target)!;
+    const { app, loadFileContents } = createHarness(undefined, undefined, { contextPanelSource: source }, { rows: 30, columns: 200 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    await vi.waitFor(() => expect((app as any).contextPanelState.status).toBe("ready"));
+
+    expect(app.render(200).join("\n")).toContain("Remove old checkout path");
+    expect((app as any).contextPanelState.text).toContain("No check runs reported.");
+    const selectedBefore = structuredClone((app as any).state.selectedLineTargetByScopeFile);
+    (app as any).contextScroll = 1;
+
+    model.resolve({ code: 0, stdout: "The change removes the deprecated checkout path.", stderr: "", killed: false });
+    await vi.waitFor(() => expect((app as any).contextPanelState.text).toContain("Generated explanation (optional):"));
+
+    expect((app as any).contextScroll).toBe(1);
+    expect((app as any).state.selectedLineTargetByScopeFile).toEqual(selectedBefore);
+    app.dispose();
+  });
+
+  it("ignores late context updates after disposal", async () => {
+    let update: ((text: string) => void) | undefined;
+    const source = {
+      title: "PR context",
+      loadingText: "Loading PR context",
+      load: async (onUpdate?: (text: string) => void) => {
+        update = onUpdate;
+        return "Title: initial facts";
+      },
+    };
+    const { app, loadFileContents } = createHarness(undefined, undefined, { contextPanelSource: source });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    await vi.waitFor(() => expect((app as any).contextPanelState.status).toBe("ready"));
+    const rendersBeforeDispose = (app as any).tui.requestRender.mock.calls.length;
+
+    app.dispose();
+    update?.("Title: stale enrichment");
+
+    expect((app as any).contextPanelState).toEqual({ status: "ready", text: "Title: initial facts" });
+    expect((app as any).tui.requestRender.mock.calls).toHaveLength(rendersBeforeDispose);
+  });
+
+  it("ignores a context update from a superseded load", async () => {
+    const updates: Array<(text: string) => void> = [];
+    const source = {
+      title: "PR context",
+      loadingText: "Loading PR context",
+      load: async (onUpdate?: (text: string) => void) => {
+        if (onUpdate != null) updates.push(onUpdate);
+        return "Title: initial facts";
+      },
+    };
+    const { app, loadFileContents } = createHarness(undefined, undefined, { contextPanelSource: source });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    await vi.waitFor(() => expect((app as any).contextPanelState.status).toBe("ready"));
+
+    (app as any).contextPanelState = { status: "idle" };
+    (app as any).ensureContextPanel();
+    await vi.waitFor(() => expect(updates).toHaveLength(2));
+    await vi.waitFor(() => expect((app as any).contextPanelState.status).toBe("ready"));
+
+    updates[0]!("Title: stale enrichment");
+    expect((app as any).contextPanelState).toEqual({ status: "ready", text: "Title: initial facts" });
+    updates[1]!("Title: current enrichment");
+    expect((app as any).contextPanelState).toEqual({ status: "ready", text: "Title: current enrichment" });
+    app.dispose();
+  });
 
   it("joins the Tab cycle and shows the focused border", async () => {
     const { app } = await createContextHarness();

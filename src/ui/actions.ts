@@ -1,4 +1,4 @@
-export type ReviewActionSection = "Core" | "Navigation" | "Diff actions" | "Comments" | "Editor";
+export type ReviewActionSection = "Core" | "Navigation" | "Diff actions" | "Comments" | "Conversation" | "Editor";
 
 export interface ReviewActionDefinition {
   id: string;
@@ -55,6 +55,10 @@ export const REVIEW_ACTIONS: ReviewActionDefinition[] = [
   { id: "commentDelete", section: "Comments", keys: "d/r", label: "delete selected comment", inputs: ["d", "r"] },
   { id: "commentCopy", section: "Comments", keys: "y", label: "copy selected comment" },
   { id: "globalComments", section: "Comments", keys: "A", label: "active-file/all-comments view", inputs: ["A"] },
+  { id: "threadOpen", section: "Conversation", keys: "Enter / Esc", label: "open fetched thread / return to replies" },
+  { id: "threadList", section: "Conversation", keys: "t / o", label: "personal replies or all threads / open browser link" },
+  { id: "threadRefresh", section: "Conversation", keys: "r / m", label: "refresh conversation / load more" },
+  { id: "threadActions", section: "Conversation", keys: "v / A / e", label: "jump to verified code / analyze / edit window-only response" },
   { id: "intent", section: "Editor", keys: "Tab", label: "toggle intent" },
   { id: "editorSave", section: "Editor", keys: "Enter", label: "save • Shift+Enter newline" },
   { id: "editorReplace", section: "Editor", keys: "MODIFY", label: "typing or paste replaces highlighted source" },
@@ -72,7 +76,7 @@ export function matchesReviewAction(id: string, input: string): boolean {
 }
 
 export function getReviewHelpSections(): Array<{ title: ReviewActionSection; lines: string[] }> {
-  const sections: ReviewActionSection[] = ["Core", "Navigation", "Diff actions", "Comments", "Editor"];
+  const sections: ReviewActionSection[] = ["Core", "Navigation", "Diff actions", "Comments", "Conversation", "Editor"];
   return sections.map((section) => ({
     title: section,
     lines: REVIEW_ACTIONS.filter((action) => action.section === section).map((action) => `${action.keys} ${action.label}`),

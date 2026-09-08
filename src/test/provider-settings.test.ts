@@ -113,6 +113,24 @@ describe("provider settings", () => {
     });
     expect(renderProviderOperation(settings.providers.github!, "pullRequest", { repo: "example/widgets", number: 18 }).args)
       .toEqual(expect.arrayContaining(["pr", "view", "18", "--repo", "example/widgets", "--json"]));
+    expect(renderProviderOperation(settings.providers.github!, "pullRequestDetails", { repo: "example/widgets", number: 18 }).args)
+      .toEqual(["pr", "view", "18", "--repo", "example/widgets", "--json", "url,isDraft,mergeStateStatus,reviewDecision,statusCheckRollup,comments,reviews,createdAt,updatedAt"]);
+    expect(settings.providers.github!.fields).toMatchObject({
+      pullRequestUrl: ["url"],
+      pullRequestDraft: ["isDraft"],
+      pullRequestMergeState: ["mergeStateStatus"],
+      pullRequestReviewDecision: ["reviewDecision"],
+      pullRequestChecks: ["statusCheckRollup"],
+      pullRequestComments: ["comments"],
+      pullRequestReviews: ["reviews"],
+      pullRequestCreatedAt: ["createdAt"],
+      pullRequestUpdatedAt: ["updatedAt"],
+      commentAuthor: ["author.login", "user.login"],
+      commentCreatedAt: ["createdAt", "created_at"],
+      commentSubmittedAt: ["submittedAt", "submitted_at"],
+      commentUrl: ["html_url", "url"],
+    });
+    expect(getProviderCapability(settings.providers.github!, "pullRequestChecks")).toBe(true);
   });
 
   it("renders configured operations without invoking a shell", () => {

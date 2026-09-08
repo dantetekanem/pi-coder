@@ -191,7 +191,7 @@ describe("review replies", () => {
   it("parses payloads defensively and fences isolated analysis", async () => {
     const configured = parsePiCodeDiffSettings(settings()).providers.secondary!;
     expect(parseGraphqlReplyThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: "bad" } } } } })).toEqual([]);
-    expect(groupFlatReviewComments([{ key: 1, actor: {}, message: "missing author" }, "bad"], configured)).toEqual([]);
+    expect(groupFlatReviewComments([{ key: 1, actor: {}, message: "missing author" }, "bad"], configured)).toEqual([expect.objectContaining({ resolved: null, comments: [expect.objectContaining({ author: "unknown", body: "missing author" })] })]);
 
     const reply = {
       id: "thread:comment",
@@ -215,7 +215,7 @@ describe("review replies", () => {
     });
     const result = await analyzeReviewReply({ exec } as never, {} as never, target("primary") as never, reply);
 
-    expect(result).toContain("Asks:");
+    expect(result).toContain("Asks:\nClarification.");
     expect(result).not.toContain("\u001b");
   });
 
