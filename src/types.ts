@@ -122,6 +122,26 @@ export interface DiffReviewComment {
   anchorStatus?: ReviewAnchorStatus;
 }
 
+/** Capture-time editor target; never replaced with a guessed current selection during recovery. */
+export type ReviewCompositionTarget =
+  | { kind: "line"; fileId: string; scope: ReviewScope; side: ReviewLineTarget["side"]; startLine: number; endLine: number; initialBody: string; intent: CommentIntent; originalText?: string; captureHash?: ReviewAnchorHash; anchorStatus?: ReviewAnchorStatus; existingComment?: DiffReviewComment }
+  | { kind: "file"; fileId: string; scope: ReviewScope; initialBody: string; intent: CommentIntent; fileTarget: FileCommentTarget; label?: string }
+  | { kind: "all"; initialBody: string; intent: CommentIntent };
+
+export interface ReviewComposition {
+  /** Fresh per editor opening, including when two processes recover the same record. */
+  id: string;
+  repoRoot: string;
+  path?: string;
+  selection?: ReviewLineTarget;
+  target: ReviewCompositionTarget;
+  /** Feedback at editor-open time, distinct from a MODIFY source prefill. */
+  baseBody: string;
+  text: string;
+  /** Zero-based logical line and UTF-16 column in text (no collapsed paste markers). */
+  cursor: { line: number; col: number };
+}
+
 export interface ReviewDraft {
   allComment: string;
   allIntent: CommentIntent;

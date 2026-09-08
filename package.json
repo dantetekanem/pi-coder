@@ -37,6 +37,8 @@
     "src/review-receipts.ts",
     "src/review-replies.ts",
     "src/review-session.ts",
+    "src/review-session-persistence.ts",
+    "src/review-composition.ts",
     "src/review-submit.ts",
     "src/sanitize.ts",
     "src/search.ts",
