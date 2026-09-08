@@ -1041,7 +1041,6 @@ export class WorkbenchComponent implements Component, Focusable {
     if (this.completed) return;
     if (this.bufferEditor != null) this.finishBufferEdit();
     if (this.loadingOperation != null) {
-      const cancellationAlreadyRequested = this.closeQueued;
       this.closeQueued = true;
       this.status = "Waiting for the current operation before closing safely.";
       this.tui.requestRender();

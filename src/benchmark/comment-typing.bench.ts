@@ -1,4 +1,4 @@
-import { bench, describe, vi } from "vitest";
+import { bench, describe } from "vitest";
 import type { ReviewFile } from "../types.js";
 import { ReviewApp, type DiffViewMode } from "../ui/review-app.js";
 
@@ -26,25 +26,29 @@ function makeFile(): ReviewFile {
   };
 }
 
-async function createApp(lineCount: number, diffViewMode: DiffViewMode): Promise<ReviewApp> {
-  const modifiedContent = Array.from({ length: lineCount }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
+async function createApp(lineCount: number, diffViewMode: DiffViewMode, mixed = false): Promise<ReviewApp> {
+  const sourceLines = Array.from({ length: lineCount }, (_, index) => mixed
+    ? `const value${index} = "${index % 7 === 0 ? "日本語 café 👩‍💻" : "source"}"; // ${"context ".repeat(index % 13)}`
+    : `line ${index + 1}`);
+  const originalContent = mixed ? sourceLines.join("\n") + "\n" : "";
+  const modifiedContent = sourceLines.map((line, index) => mixed && index % 9 === 0 ? line.replace("const", "let") : line).join("\n") + "\n";
   const tui = {
-    terminal: { write: vi.fn(), rows: 40, columns: 120 },
-    requestRender: vi.fn(),
-    getShowHardwareCursor: vi.fn(() => false),
-    setShowHardwareCursor: vi.fn(),
+    terminal: { write() {}, rows: 40, columns: 120 },
+    requestRender() {},
+    getShowHardwareCursor: () => false,
+    setShowHardwareCursor() {},
   };
   const theme = {
     fg: (_color: string, text: string) => text,
     bg: (_color: string, text: string) => text,
   };
-  const app = new ReviewApp(tui as never, theme as never, vi.fn(), {
+  const app = new ReviewApp(tui as never, theme as never, () => {}, {
     files: [makeFile()],
     repoRoot: "/repo",
-    loadFileContents: async () => ({ originalContent: "", modifiedContent }),
+    loadFileContents: async () => ({ originalContent, modifiedContent }),
     commentShortcuts: [],
     visibleScopes: ["git-diff"],
-    notify: vi.fn(),
+    notify() {},
   });
 
   (app as any).diffViewMode = diffViewMode;
@@ -52,6 +56,8 @@ async function createApp(lineCount: number, diffViewMode: DiffViewMode): Promise
     await Promise.resolve();
     if ((app as any).getEntry((app as any).state.activeFileId, "git-diff")?.status === "ready") break;
   }
+  const entry = (app as any).getEntry((app as any).state.activeFileId, "git-diff");
+  if (entry?.status !== "ready") throw new Error("Benchmark diff did not finish loading");
   app.render(120);
   app.handleInput("\r");
   return app;
@@ -72,6 +78,36 @@ const [smallUnifiedApp, largeUnifiedApp, smallSideBySideApp, largeSideBySideApp]
   createApp(200, "side-by-side"),
   createApp(20_000, "side-by-side"),
 ]);
+
+let renderedCells = 0;
+function consumeRender(app: ReviewApp, width: number): void {
+  const lines = app.render(width);
+  if (lines.length === 0) throw new Error("Empty benchmark render");
+  for (const line of lines) renderedCells = (renderedCells + line.length) | 0;
+}
+
+for (const mode of ["unified", "side-by-side"] as const) {
+  for (const count of [200, 20_000]) {
+    const app = await createApp(count, mode, true);
+    describe(`${mode} / ${count} lines / rendering`, () => {
+      bench("scroll selection down and back", () => {
+        for (let i = 0; i < 40; i++) {
+          app.handleInput("\u001b[B");
+          consumeRender(app, 120);
+        }
+        for (let i = 0; i < 40; i++) {
+          app.handleInput("\u001b[A");
+          consumeRender(app, 120);
+        }
+      });
+      bench("resize between stacked and wide layouts", () => {
+        consumeRender(app, 80);
+        consumeRender(app, 160);
+        consumeRender(app, 120);
+      });
+    });
+  }
+}
 
 describe("comment typing performance", () => {
   bench("unified / 200-line diff / 37 comment keystrokes", () => {
