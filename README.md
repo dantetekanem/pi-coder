@@ -64,6 +64,14 @@ The review UI supports line, file, and review-wide feedback. Feedback can be mar
 
 GitHub pull requests work by default through the authenticated [`gh`](https://cli.github.com/) CLI. Confirmed reviews receive a grammar-safety pass before submission, and saved drafts are revalidated when the reviewed revision changes.
 
+### Review submission and recovery
+
+GitHub reviews pin the reviewed commit for every verdict, including approvals without comments. An approval with inline feedback uses one atomic review. Submission reports `submitted`, `partial`, `unknown`, or `rejected`; a timeout is not proof that nothing was posted.
+
+Approved input is saved under an attempt ID before any write. Pass `attemptId` to reuse that decision. The UI resumes unfinished submissions or exact accepted feedback still awaiting cleanup. After a submission completes, remaining unsubmitted feedback can be reviewed or discussed. Confirmed steps are not reposted; uncertain steps require attributable provider evidence. Use `newIntent` only for an explicitly approved new review. A failed grammar pass keeps a separate, unconfirmed handoff until the final text is approved.
+
+UI and tool submissions share draft cleanup. Only confirmed items whose saved IDs and full fingerprints still match are consumed; edited and unsubmitted feedback remains. Local receipt, journal and draft failures are reported separately from remote acceptance. See [submission evidence and recovery limits](docs/remote-providers.md#submission-evidence).
+
 ### Drafts and interrupted typing
 
 A normal `/diff` opens a fresh review instance, even for a target with saved feedback. Use `/diff --resume` to pick an existing instance, or add `--resume <id>` after a local, range, or remote target. Picker labels include the instance ID; legacy drafts remain explicitly resumable. Discarded and fully consumed IDs cannot be reused.
