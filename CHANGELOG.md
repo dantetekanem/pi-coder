@@ -4,12 +4,16 @@
 
 ### Added
 
+- Persist approved PR submission intents and per-step outcomes. Resume confirmed decisions without repeating grammar dialogs or replaying uncertain writes; reconcile only attributable, complete provider evidence.
+- Keep failed grammar verification in a separate unconfirmed handoff, with trusted source bindings and explicit original comment indexes.
+- Share confirmed-scope draft cleanup between UI and tool submissions, preserving edited/unsubmitted feedback and reporting local failures separately from remote acceptance.
 - Give fresh reviews independent instance IDs, with explicit resume for existing and legacy drafts. Generation-checked saves reject stale overwrites; terminal tombstones prevent discarded or consumed instances from returning.
 - Recover picker membership from valid snapshots after interrupted index writes, and check the snapshot's current timestamp before 30-day expiry.
 - Save active editor compositions separately on a fixed two-second typing deadline. Explicit completion and editor parking flush before reporting success; failures keep the editor open. Recovery restores editable text and cursor, validates the original anchor, and requires an explicit decision before replacing conflicting feedback while preserving its current version as another recovery.
 
 ### Changed
 
+- Pin all built-in GitHub review verdicts to the reviewed commit and submit approvals with inline comments atomically. Return typed submitted/partial/unknown/rejected evidence and shared diagnostic receipts.
 - Keep completed COMMENT/DISCUSS pastes expanded for cursor recovery. Recovered buffers use the owned exact-text editor. Recovery storage has seven-day retention, 256 KiB per record and shared 64-record/16 MiB limits; capacity errors preserve existing text instead of truncating it.
 - Require manual orphan-lock recovery with all writers stopped. Draft persistence covers local process interruption, not `fsync` or power-loss durability.
 
