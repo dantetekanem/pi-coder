@@ -5,6 +5,7 @@
 ### Fixed
 
 - Show fetched PR facts before optional model explanations, without replacing facts or moving the context pane's scroll position.
+- Keep known PR facts visible when context sections fail, and label unavailable data instead of reporting an empty conversation.
 
 ## 0.6.2 - 2026-09-02
 

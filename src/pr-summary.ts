@@ -42,6 +42,7 @@ interface PullRequestCheck {
 }
 
 interface PullRequestDetails {
+  unavailable?: string[];
   url?: string;
   isDraft?: boolean;
   checksUnavailable?: boolean;
@@ -215,6 +216,7 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
   const mergeState = String(details.mergeStateStatus ?? "").toUpperCase();
   if (["BLOCKED", "DIRTY", "UNKNOWN", "UNSTABLE"].includes(mergeState)) return { status: "blocked", reason: `merge state ${mergeState.toLowerCase()}` };
 
+  if (details.unavailable?.length) return { status: "pending", reason: `${details.unavailable.join(", ")} unavailable` };
   if (String(details.reviewDecision ?? "").toUpperCase() === "APPROVED") return { status: "approved", reason: "review decision approved" };
 
   const pending = pendingChecks(details);
@@ -277,6 +279,9 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
   const comments = latestSubstantiveItems(details.comments, 3)
     .map((comment) => `${comment.author?.login ?? "unknown"}: ${compact(comment.body, 160)}`);
   const bodySignal = extractBodySignal(pr.body);
+  const missing = (details.unavailable ?? []).filter((section) => !["PR details", "checks"].includes(section));
+  const conversation = threads.length ? threads.join("; ") : reviews.length ? reviews.join("; ") : comments.join("; ");
+  const coverage = missing.length ? `Unavailable: ${missing.join(", ")}` : "";
 
   return [
     `Title: ${pr.title}`,
@@ -288,7 +293,7 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
     `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
     "Changes: Read the diff for implementation details.",
     `Validation: ${formatChecks(details, provider)}`,
-    `Open comments: ${threads.length > 0 ? threads.join("; ") : reviews.length > 0 ? reviews.join("; ") : comments.length > 0 ? comments.join("; ") : "None found."}`,
+    `Open comments: ${[conversation, coverage].filter(Boolean).join("; ") || "None found."}`,
     pr.stackParent != null ? `Stack: parent #${pr.stackParent.number} ${pr.stackParent.title}` : undefined,
   ].filter((line): line is string => line != null).join("\n");
 }
@@ -322,13 +327,13 @@ function formatSummaryInput(target: RemoteReviewTarget, details: PullRequestDeta
     compact(pr.body, 6000) || "No body.",
     "",
     "Open review comments:",
-    openThreads || "No unresolved review threads found.",
+    openThreads || (details.unavailable?.includes("review threads") ? "Review threads unavailable." : "No unresolved review threads found."),
     "",
     "Reviews:",
-    reviews || "No review bodies found.",
+    reviews || (details.unavailable?.includes("reviews") ? "Reviews unavailable." : "No review bodies found."),
     "",
     "PR conversation comments:",
-    comments || "No PR conversation comments found.",
+    comments || (details.unavailable?.includes("PR comments") ? "PR comments unavailable." : "No PR conversation comments found."),
   ].join("\n");
 }
 
@@ -429,13 +434,19 @@ function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
       };
     };
   };
-  return (parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).map((thread) => ({
-    isResolved: thread.isResolved,
-    isOutdated: thread.isOutdated,
-    path: thread.path,
-    line: thread.line,
-    comments: thread.comments?.nodes ?? [],
-  }));
+  const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(nodes)) throw new Error("Review threads unavailable.");
+  return nodes.map((thread) => {
+    const comments = thread.comments?.nodes;
+    if (!Array.isArray(comments)) throw new Error("Review threads unavailable.");
+    return {
+      isResolved: thread.isResolved,
+      isOutdated: thread.isOutdated,
+      path: thread.path,
+      line: thread.line,
+      comments,
+    };
+  });
 }
 
 async function fetchOpenReviewThreads(
@@ -456,8 +467,8 @@ async function fetchOpenReviewThreads(
         query: encodeProviderQuery(OPEN_REVIEW_THREADS_QUERY.replace(/\s+/g, " ").trim()),
       }, `PR #${number} review threads`);
       return parseGraphqlReviewThreads(payload);
-    } catch {
-      if (provider.operations.reviewComments == null) return [];
+    } catch (error) {
+      if (provider.operations.reviewComments == null) throw error;
     }
   }
 
@@ -482,18 +493,36 @@ async function fetchPullRequestDetails(
 ): Promise<PullRequestDetails> {
   const pr = target.pullRequest!;
   const repo = target.repo ?? pr.repo;
-  if (repo == null) throw new Error(`Could not fetch ${provider.label} PR #${pr.number} context without a repository.`);
-
-  const detailsPayload = await fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`);
+  if (repo == null) return {
+    unavailable: ["PR details", "checks", "PR comments", "reviews", "review threads"],
+    checksUnavailable: true,
+  };
+  const unavailable: string[] = [];
+  async function readSection<T>(name: string, read: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await read();
+    } catch {
+      unavailable.push(name);
+      return fallback;
+    }
+  }
+  const detailsPayload = await readSection("PR details", () => fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`), undefined);
   const separateContext = getProviderCapability(provider, "separatePullRequestContext");
-  const [commentsPayload, reviewsPayload, openReviewThreads] = await Promise.all([
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestComments", { repo, number: pr.number }, `PR #${pr.number} comments`)
-      : Promise.resolve(detailsPayload),
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestReviews", { repo, number: pr.number }, `PR #${pr.number} reviews`)
-      : Promise.resolve(detailsPayload),
-    fetchOpenReviewThreads(pi, target, provider, repo, pr.number),
+  const readComments = async (field: string) => {
+    const payload = separateContext
+      ? await fetchProviderOperation(pi, target, provider, field, { repo, number: pr.number }, `PR #${pr.number} ${field}`)
+      : detailsPayload;
+    if (payload == null) throw new Error("Context section unavailable.");
+    return providerRows(provider, field, payload, separateContext).map((row) => providerComment(provider, row));
+  };
+  const [comments, reviews, openReviewThreads, checks] = await Promise.all([
+    readSection("PR comments", () => readComments("pullRequestComments"), []),
+    readSection("reviews", () => readComments("pullRequestReviews"), []),
+    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), []),
+    readSection("checks", async () => {
+      if (detailsPayload == null) throw new Error("Check details unavailable.");
+      return providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
+    }, []),
   ]);
 
   const directDecision = providerString(provider, "pullRequestReviewDecision", detailsPayload);
@@ -501,18 +530,18 @@ async function fetchPullRequestDetails(
     ?? (providerBoolean(provider, "pullRequestChangesRequested", detailsPayload) === true
       ? "CHANGES_REQUESTED"
       : providerBoolean(provider, "pullRequestApproved", detailsPayload) === true ? "APPROVED" : undefined);
-  const checks = providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
 
   return {
+    unavailable: unavailable.sort(),
     url: providerString(provider, "pullRequestUrl", detailsPayload) ?? pullRequestUrl(target, provider),
     isDraft: providerBoolean(provider, "pullRequestDraft", detailsPayload),
     mergeStateStatus: providerString(provider, "pullRequestMergeState", detailsPayload)?.toUpperCase(),
     reviewDecision,
-    comments: providerRows(provider, "pullRequestComments", commentsPayload, separateContext).map((row) => providerComment(provider, row)),
-    reviews: providerRows(provider, "pullRequestReviews", reviewsPayload, separateContext).map((row) => providerComment(provider, row)),
+    comments,
+    reviews,
     openReviewThreads,
     statusCheckRollup: checks,
-    checksUnavailable: !getProviderCapability(provider, "pullRequestChecks"),
+    checksUnavailable: !getProviderCapability(provider, "pullRequestChecks") || unavailable.includes("checks"),
     createdAt: providerString(provider, "pullRequestCreatedAt", detailsPayload),
     updatedAt: providerString(provider, "pullRequestUpdatedAt", detailsPayload),
   };

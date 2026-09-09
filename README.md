@@ -83,6 +83,8 @@ Common review controls:
 
 The context pane shows fetched PR facts, including the reviewed head, before the optional generated explanation. The explanation appears below those facts without replacing them or resetting your scroll position.
 
+Failed context sections are labeled unavailable; successfully fetched facts remain visible.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:
