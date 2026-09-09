@@ -6,6 +6,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
+import * as piRender from "../pi-render.js";
+import { getSelectedLineTarget } from "../state.js";
 
 const STATUS_CELL_BOUND = 96;
 const STATUS_BYTE_BOUND = 256;
@@ -103,10 +105,99 @@ function createHarness(
     notify: vi.fn(),
     ...overrides,
   });
-  return { app, done, loadFileContents, terminalWrite };
+  return { app, done, loadFileContents, terminalWrite, theme };
 }
 
 describe("ReviewApp interaction", () => {
+  it("reuses the action hint at the same width and rebuilds it after resize or invalidation", async () => {
+    const { app, loadFileContents, theme } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    const foreground = vi.spyOn(theme, "fg");
+    const hintCalls = () => foreground.mock.calls.filter(([, text]) => text === "Enter/m").length;
+    try {
+      app.render(120);
+      expect(hintCalls()).toBe(1);
+      app.render(120);
+      expect(hintCalls()).toBe(1);
+      app.render(160);
+      expect(hintCalls()).toBe(2);
+      app.invalidate();
+      app.render(160);
+      expect(hintCalls()).toBe(3);
+    } finally {
+      foreground.mockRestore();
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("reuses %s navigation targets until the layout is invalidated", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    app.render(120);
+    app.handleInput("\r");
+    app.handleInput("\x1b[B");
+    const fileId = (app as any).state.activeFileId;
+    const layout = (app as any).getDiffLayout(fileId, "git-diff");
+    const rowsKey = mode === "unified" ? "unifiedRows" : "sideBySideRows";
+    layout[rowsKey] = new Proxy(layout[rowsKey], {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property) && Number(property) > 500) {
+          throw new Error("rescanned offscreen navigation rows");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    try {
+      app.handleInput("\x1b[B");
+      expect(getSelectedLineTarget((app as any).state, fileId, "git-diff")).toEqual({ side: "added", line: 3 });
+      app.invalidate();
+      app.handleInput("\x1b[A");
+      expect(getSelectedLineTarget((app as any).state, fileId, "git-diff")).toEqual({ side: "added", line: 2 });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("styles only visible wrapped %s rows when measuring a large diff", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `const item${i} = "日本語";`).join("\n");
+    const { app, loadFileContents, theme } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    (app as any).state.wrapLines = true;
+    const background = vi.spyOn(theme, "bg");
+    try {
+      const lines = app.render(120);
+      expect(lines.join("\n")).toContain("item0");
+      expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
+      expect(background.mock.calls.length).toBeLessThan(120);
+    } finally {
+      background.mockRestore();
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("limits unwrapped %s highlighting to the viewport on first render and resize", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `const item${i} = "日本語";`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    (app as any).state.wrapLines = false;
+    const highlight = vi.spyOn(piRender, "highlightCodeLineWithPi");
+    try {
+      for (const width of [120, 160]) {
+        const lines = app.render(width);
+        expect(lines.join("\n")).toContain("item0");
+        expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+        expect(highlight.mock.calls.length).toBeLessThan(120);
+      }
+    } finally {
+      highlight.mockRestore();
+      app.dispose();
+    }
+  });
+
   it("uses lowercase o for a writable local current-side bridge target and preserves editor isolation", async () => {
     const { app, done, loadFileContents } = createHarness(undefined, undefined, {
       reviewIdentity: "/repo|working|worktree|local",

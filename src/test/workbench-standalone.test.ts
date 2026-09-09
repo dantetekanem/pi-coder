@@ -40,7 +40,9 @@ describe("standalone workbench host boundary", () => {
       "src/adapters",
       "src/git-change-status.ts",
       "src/git-filter-policy.ts",
-      "scripts",
+      "scripts/build-workbench.mjs",
+      "scripts/build-workbench.d.mts",
+      "scripts/start-workbench.mjs",
       "docs/*.md",
       "tsconfig.workbench.json",
     ]));
