@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Show fetched PR facts before optional model explanations, without replacing facts or moving the context pane's scroll position.
+
 ## 0.6.2 - 2026-09-02
 
 ### Changed

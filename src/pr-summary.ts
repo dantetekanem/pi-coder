@@ -60,7 +60,7 @@ interface StatusSummary {
   reason: string;
 }
 
-const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
+const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Head", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
 
 const QUERY_OPEN_TOKEN = "__CODE_DIFF_QUERY_OPEN__";
 const QUERY_CLOSE_TOKEN = "__CODE_DIFF_QUERY_CLOSE__";
@@ -262,35 +262,10 @@ function formatReadableSummary(value: string): string {
   return readable.join("\n").trim();
 }
 
-function replaceSummaryField(summary: string, label: string, value: string): string {
-  const field = `${label}:`;
-  const cleanValue = stripMarkup(value);
-  const lines = summary.split("\n");
-  const index = lines.findIndex((line) => line.trim() === field);
-  if (index < 0) return `${field}\n${cleanValue}\n\n${summary}`.trim();
-
-  let end = index + 1;
-  while (end < lines.length && lines[end]!.trim().length === 0) end += 1;
-  if (end < lines.length) lines[end] = cleanValue;
-  else lines.push(cleanValue);
-  return lines.join("\n").trim();
-}
-
 function formatDiffStats(target: RemoteReviewTarget): string {
   const pr = target.pullRequest!;
   const fileLabel = pr.changedFiles === 1 ? "file" : "files";
   return `${pr.changedFiles} ${fileLabel} touched | +${pr.additions}/-${pr.deletions}`;
-}
-
-function enforceIdentityFields(summary: string, target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
-  const pr = target.pullRequest!;
-  const url = details.url ?? pullRequestUrl(target, provider);
-  return [
-    ["Diff", formatDiffStats(target)],
-    ["Author", pr.authorLogin],
-    ["URL", url],
-    ["Title", pr.title],
-  ].reduce((current, [label, value]) => replaceSummaryField(current, label, value), summary);
 }
 
 function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
@@ -307,10 +282,11 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
     `Title: ${pr.title}`,
     `URL: ${details.url ?? pullRequestUrl(target, provider)}`,
     `Author: ${pr.authorLogin}`,
+    `Head: ${pr.headRefName} @ ${pr.headRefOid}`,
     `Diff: ${formatDiffStats(target)}`,
     `Status: ${status.status} - ${status.reason}`,
     `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
-    "Changes: Not summarized by the model; read the diff for implementation details.",
+    "Changes: Read the diff for implementation details.",
     `Validation: ${formatChecks(details, provider)}`,
     `Open comments: ${threads.length > 0 ? threads.join("; ") : reviews.length > 0 ? reviews.join("; ") : comments.length > 0 ? comments.join("; ") : "None found."}`,
     pr.stackParent != null ? `Stack: parent #${pr.stackParent.number} ${pr.stackParent.title}` : undefined,
@@ -544,20 +520,12 @@ async function fetchPullRequestDetails(
 
 function buildAgentPrompt(summaryInput: string): string {
   return [
-    "Summarize this pull request for a reviewer already looking at the diff.",
+    "Write an optional reviewer-focused explanation for a pull request whose facts are shown separately.",
     "Output plain text only, no markdown table, no preamble, no emoji, ASCII only.",
-    "Do not mention these instructions or use phrases like 'what matters most'.",
-    "The reviewer needs only the important context, focused on the problem this PR solves.",
-    "Keep implementation details short unless they explain reviewer risk or the problem.",
-    "Required labels: Title, URL, Author, Diff, Status, Problem, Changes, Validation, Open comments. Add Stack only if relevant.",
-    "Title, URL, Author, and Diff must exactly match the input values.",
-    "Problem must explain the user, merchant, developer, or system pain being solved in one or two sentences.",
-    "Open comments must summarize unresolved review threads only. If none exist, write None found.",
-    "Use PR comments and reviews only when they affect review readiness, validation, blockers, or unresolved questions.",
-    "Put each label on its own line with the value on the following line.",
-    "Status must be exactly one of pending, blocked, approved, followed by a short reason using an ASCII hyphen separator.",
-    "Use readable section blocks separated by blank lines, not one dense paragraph.",
-    "Limit the whole response to roughly 180 words.",
+    "Do not restate title, URL, author, diff counts, status, checks, or other factual fields.",
+    "Focus on the problem this PR solves, the important implementation choice, and reviewer risk.",
+    "Use PR comments and reviews only when they affect review readiness, blockers, or unresolved questions.",
+    "Limit the response to roughly 120 words.",
     "",
     summaryInput,
   ].join("\n");
@@ -619,32 +587,26 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   };
 }
 
-async function loadRemotePullRequestSummary(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  target: RemoteReviewTarget,
-  provider: ProviderSettings,
-): Promise<string> {
-  const supplied = suppliedPullRequestDetails(target, provider);
-  const details = supplied ?? await fetchPullRequestDetails(pi, target, provider);
-  const suppliedSummary = target.handoff?.summary;
-  if (suppliedSummary != null) return enforceIdentityFields(formatReadableSummary(suppliedSummary), target, details, provider);
-  const fallback = fallbackSummary(target, details, provider);
-  try {
-    const generated = await summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
-    return enforceIdentityFields(formatReadableSummary(generated ?? fallback), target, details, provider);
-  } catch {
-    return enforceIdentityFields(formatReadableSummary(fallback), target, details, provider);
-  }
-}
-
 export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined): ReviewContextPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
+  let requestToken = 0;
   return {
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
-    load: () => loadRemotePullRequestSummary(pi, ctx, target, provider),
+    load: async (onUpdate) => {
+      const token = ++requestToken;
+      const details = suppliedPullRequestDetails(target, provider) ?? await fetchPullRequestDetails(pi, target, provider);
+      const facts = formatReadableSummary(fallbackSummary(target, details, provider));
+      const explanation = target.handoff?.summary != null
+        ? Promise.resolve(target.handoff.summary)
+        : summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
+      void explanation.then((text) => {
+        const clean = text == null ? "" : cleanAgentOutput(text);
+        if (token === requestToken && clean.length > 0) onUpdate?.(`${facts}\n\nGenerated explanation (optional):\n${clean}`);
+      }).catch(() => undefined);
+      return facts;
+    },
     url: pullRequestUrl(target, provider),
   };
 }

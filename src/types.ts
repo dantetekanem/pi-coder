@@ -57,7 +57,8 @@ export interface ReviewFileContents {
 export interface ReviewContextPanelSource {
   title: string;
   loadingText: string;
-  load: () => Promise<string>;
+  /** Returns usable context; optional later updates replace its text without resetting the pane. */
+  load: (onUpdate?: (text: string) => void) => Promise<string>;
   /** Canonical http(s) URL opened from the PR context pane. */
   url?: string;
 }
