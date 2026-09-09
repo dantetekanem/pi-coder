@@ -37,6 +37,15 @@ export class ExactTextEditor {
     return this.text;
   }
 
+  /** Public hydration seam: logical lines and UTF-16 columns, matching Pi Editor.getCursor(). */
+  restoreCursor(cursor: { line: number; col: number }): void {
+    const lines = this.text.split("\n");
+    const line = Math.max(0, Math.min(lines.length - 1, Math.floor(cursor.line)));
+    this.cursor = lines.slice(0, line).reduce((offset, text) => offset + text.length + 1, 0)
+      + Math.max(0, Math.min(lines[line]!.length, Math.floor(cursor.col)));
+    this.selectionArmed = false;
+  }
+
   isSelectionArmed(): boolean {
     return this.selectionArmed;
   }

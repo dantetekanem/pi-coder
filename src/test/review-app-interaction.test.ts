@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import type { DiffReviewComment, ReviewComposition, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import * as piRender from "../pi-render.js";
@@ -1115,6 +1115,221 @@ describe("ReviewApp interaction", () => {
       app.dispose();
       vi.useRealTimers();
     }
+  });
+
+  it("flushes composition at a fixed two-second deadline even throughout continuous typing", async () => {
+    const onSessionChange = vi.fn(() => true);
+    const onCompositionSave = vi.fn(() => true);
+    const { app, loadFileContents } = createHarness(undefined, undefined, { onSessionChange, onCompositionSave });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    vi.useFakeTimers();
+    try {
+      app.handleInput("\r");
+      app.handleInput("c");
+      const snapshotWrites = onSessionChange.mock.calls.length;
+      onCompositionSave.mockClear();
+      for (let i = 0; i < 20; i += 1) { app.handleInput("x"); vi.advanceTimersByTime(100); }
+      expect(onCompositionSave).toHaveBeenCalledTimes(1);
+      expect(onCompositionSave).toHaveBeenLastCalledWith(expect.objectContaining({ text: "x".repeat(20) }));
+      for (let i = 0; i < 20; i += 1) { app.handleInput("y"); vi.advanceTimersByTime(100); }
+      expect(onCompositionSave).toHaveBeenCalledTimes(2);
+      expect(onSessionChange).toHaveBeenCalledTimes(snapshotWrites);
+      app.handleInput("z");
+      app.handleInput("\u0003");
+      expect(onCompositionSave).toHaveBeenLastCalledWith(expect.objectContaining({ text: "x".repeat(20) + "y".repeat(20) + "z" }));
+    } finally { app.dispose(); vi.useRealTimers(); }
+  });
+
+  it("blocks safe editor exit on failed recovery flush, then parks without committing the buffer", async () => {
+    const onCompositionSave = vi.fn(() => false);
+    const { app, done, loadFileContents } = createHarness(undefined, undefined, { onCompositionSave, onSessionChange: () => true });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("\r"); app.handleInput("c"); app.handleInput("not committed"); app.handleInput("\u0003");
+    expect(done).not.toHaveBeenCalled();
+    expect((app as any).editTarget).not.toBeNull();
+    onCompositionSave.mockReturnValue(true);
+    app.handleInput("\u0003");
+    expect(done).toHaveBeenCalledWith({ type: "cancel", disposition: "park" });
+    expect((app as any).state.draft.comments).toEqual([]);
+    app.dispose();
+  });
+
+  it.each(["comment", "modify"] as const)("restores %s text and cursor into an editable independent recovery", async (intent) => {
+    let saved: ReviewComposition | undefined;
+    const { app, loadFileContents } = createHarness(undefined, undefined, { onCompositionSave: (value) => { saved = value; return true; } });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("\r"); app.handleInput(intent === "modify" ? "m" : "c");
+    const text = "first 😀\n" + "a".repeat(1500) + "\nlast";
+    app.handleInput("\u001b[20");
+    app.handleInput("0~" + text.slice(0, 50));
+    app.handleInput(text.slice(50) + "\u001b[20");
+    app.handleInput("1~");
+    app.handleInput("\u001b[D"); app.handleInput("\u001b[D"); app.handleInput("\u0003");
+    expect(saved?.text).toBe(text);
+    expect(saved?.cursor).toEqual({ line: 2, col: 2 });
+    const recovery = createHarness(undefined, undefined, { initialComposition: saved, onCompositionSave: () => true });
+    await vi.waitFor(() => expect((recovery.app as any).editTarget).not.toBeNull());
+    expect((recovery.app as any).state.draft.comments).toEqual([]);
+    recovery.app.handleInput("X");
+    expect((recovery.app as any).getEditText()).toBe(text.slice(0, -2) + "Xst");
+    app.dispose(); recovery.app.dispose();
+  });
+
+  it("keeps a recovered cursor visible inside long multiline text and edits at that exact position", async () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `line ${i}: ` + "x".repeat(200));
+    const record: ReviewComposition = { id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", target: { kind: "all", initialBody: "", intent: "comment" }, baseBody: "", text: lines.join("\n"), cursor: { line: 30, col: 150 } };
+    const { app } = createHarness(undefined, undefined, { initialComposition: record, onCompositionSave: () => true });
+    await vi.waitFor(() => expect((app as any).editTarget).not.toBeNull());
+    expect(app.render(120).join("\n")).toContain(CURSOR_MARKER);
+    app.handleInput("Y");
+    expect((app as any).getEditText().split("\n")[30]).toBe(lines[30]!.slice(0, 150) + "Y" + lines[30]!.slice(150));
+    app.dispose();
+  });
+
+  it("cancels a partial paste without leaking it into the next editor", async () => {
+    const { app, loadFileContents } = createHarness(undefined, undefined, { onCompositionSave: () => true, onCompositionRemove: () => true });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("\r"); app.handleInput("c");
+    app.handleInput("\u001b[200~unfinished paste");
+    app.handleInput("\r"); app.handleInput("\t");
+    expect((app as any).editTarget.intent).toBe("comment");
+    expect((app as any).state.draft.comments).toEqual([]);
+    app.handleInput("\u001b");
+    app.handleInput("c"); app.handleInput("new text"); app.handleInput("\r");
+    expect((app as any).state.draft.comments[0].body).toBe("new text");
+    app.dispose();
+  });
+
+  it.each(["changed", "renamed", "missing", "unavailable"])("retains %s source recovery without applying to a guessed range", async (condition) => {
+    const file = makeFile();
+    const record: ReviewComposition = {
+      id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", path: file.path,
+      target: { kind: "line", fileId: file.id, scope: "git-diff", side: "added", startLine: 1, endLine: 1,
+        intent: "modify", initialBody: "current", originalText: "current", captureHash: hashTargetSlice("current\n", { startLine: 1, endLine: 1 }), anchorStatus: "mapped" },
+      baseBody: "", text: "replacement", cursor: { line: 0, col: 4 },
+    };
+    const files = condition === "missing" ? [] : [condition === "renamed" ? makeFile("renamed.ts") : file];
+    const { app, done } = createHarness({ originalContent: "", modifiedContent: condition === "changed" ? "changed\n" : "current\n", modifiedAvailable: condition !== "unavailable" }, files, { initialComposition: record, onCompositionSave: () => true });
+    await vi.waitFor(() => expect((app as any).editTarget).not.toBeNull());
+    app.handleInput("X"); app.handleInput("\r");
+    expect(done).not.toHaveBeenCalled();
+    if (condition === "renamed" || condition === "missing") {
+      expect((app as any).editTarget).not.toBeNull();
+      expect((app as any).state.draft.comments).toEqual([]);
+      expect(app.render(120).join("\n")).toContain("replXacement");
+    } else {
+      expect((app as any).state.draft.comments[0]).toMatchObject({ body: "replXacement", anchorStatus: "stale", captureHash: record.target.kind === "line" ? record.target.captureHash : undefined });
+    }
+    app.dispose();
+  });
+
+  it("requires explicit replacement and preserves conflicting current note text as recovery", async () => {
+    const saved: ReviewComposition[] = [];
+    const base = createHarness();
+    const initialSession = (base.app as any).getSessionData();
+    base.app.dispose();
+    initialSession.state.draft.allComment = "current version";
+    const record: ReviewComposition = { id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", target: { kind: "all", initialBody: "old version", intent: "discuss" }, baseBody: "old version", text: "recovered version", cursor: { line: 0, col: 17 } };
+    const onCompositionRemove = vi.fn(() => true);
+    const { app } = createHarness(undefined, undefined, { initialSession, initialComposition: record, onCompositionSave: (value) => { saved.push(value); return true; }, onCompositionRemove, onSessionChange: () => true });
+    await vi.waitFor(() => expect((app as any).editTarget).not.toBeNull());
+    app.handleInput("\r");
+    expect((app as any).state.draft.allComment).toBe("current version");
+    expect(onCompositionRemove).not.toHaveBeenCalled();
+    app.handleInput("k");
+    expect((app as any).state.draft.allComment).toBe("recovered version");
+    expect(saved.some((item) => item.text === "current version" && item.id !== record.id)).toBe(true);
+    expect(saved.filter((item) => item.text === "recovered version").every((item) => item.id !== record.id)).toBe(true);
+    app.dispose();
+  });
+
+  it.each(["preservation", "snapshot"])("retains both versions and the editor when replacement %s fails", async (failure) => {
+    const base = createHarness();
+    const initialSession = (base.app as any).getSessionData();
+    base.app.dispose();
+    initialSession.state.draft.allComment = "current version";
+    initialSession.state.draft.allIntent = "comment";
+    const record: ReviewComposition = { id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", target: { kind: "all", initialBody: "old", intent: "discuss" }, baseBody: "old", text: "recovered", cursor: { line: 0, col: 9 } };
+    const onCompositionSave = vi.fn((value: ReviewComposition) => value.text !== "current version" || failure !== "preservation");
+    const onCompositionRemove = vi.fn(() => true);
+    const { app } = createHarness(undefined, undefined, { initialSession, initialComposition: record, onCompositionSave, onCompositionRemove, onSessionChange: () => failure !== "snapshot" });
+    await vi.waitFor(() => expect((app as any).editTarget).not.toBeNull());
+    app.handleInput("\r"); app.handleInput("k");
+    expect((app as any).state.draft.allComment).toBe("current version");
+    expect((app as any).getEditText()).toBe("recovered");
+    expect(onCompositionRemove).not.toHaveBeenCalled();
+    expect(onCompositionSave.mock.calls.find(([value]) => value.text === "current version")?.[0].target.intent).toBe("comment");
+    app.dispose();
+  });
+
+  it.each([
+    { positions: [3], failFlush: false },
+    { positions: [1, 3, 5], failFlush: false },
+    { positions: [3], failFlush: true },
+    { positions: [1, 3, 5], failFlush: true },
+    { positions: [6], failFlush: false },
+  ])("preserves current range feedback at $positions during recovery (flush failure: $failFlush)", async ({ positions, failFlush }) => {
+    const file = makeFile();
+    const source = "one\ntwo\nthree\nfour\nfive\nsix\n";
+    const current: DiffReviewComment[] = positions.map((line) => ({
+      id: `current-${line}`, fileId: file.id, scope: "git-diff", side: "added",
+      startLine: line, endLine: line, body: `Newer feedback on line ${line}`,
+      intent: line === 3 ? "discuss" : "comment", anchorStatus: "mapped",
+      captureHash: hashTargetSlice(source, { startLine: line, endLine: line }),
+    }));
+    const base = createHarness();
+    const initialSession = (base.app as any).getSessionData();
+    base.app.dispose();
+    initialSession.state.draft.comments = current;
+    const record: ReviewComposition = {
+      id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", path: file.path,
+      target: { kind: "line", fileId: file.id, scope: "git-diff", side: "added", startLine: 1, endLine: 5,
+        intent: "comment", initialBody: "", captureHash: hashTargetSlice(source, { startLine: 1, endLine: 5 }) },
+      baseBody: "", text: "Recovered range feedback", cursor: { line: 0, col: 24 },
+    };
+    const saved: ReviewComposition[] = [];
+    let savingFails = false;
+    const { app } = createHarness({ originalContent: "", modifiedContent: source }, [file], {
+      initialSession, initialComposition: record, onSessionChange: () => true,
+      onCompositionSave: (value) => { if (savingFails) return false; saved.push(structuredClone(value)); return true; },
+    });
+    try {
+      await vi.waitFor(() => expect(saved).toHaveLength(1));
+      savingFails = failFlush;
+      app.handleInput("!"); app.handleInput("\r");
+      if (positions.length > 1 && !failFlush) app.handleInput("k");
+      const comments: DiffReviewComment[] = (app as any).state.draft.comments;
+      expect(comments.filter((comment) => comment.id.startsWith("current-"))).toEqual(current);
+      if (positions[0]! <= 5) {
+        expect(comments).toEqual(current);
+        expect((app as any).getEditText()).toBe(record.text + "!" + (positions.length > 1 && !failFlush ? "k" : ""));
+        expect(saved.at(-1)?.text).toBe(record.text + (failFlush ? "" : "!"));
+        expect(app.render(120).join("\n")).toContain(failFlush ? "Recovery could not be saved" : "Merge manually");
+      } else {
+        expect(comments).toContainEqual(expect.objectContaining({ body: record.text + "!", startLine: 1, endLine: 5 }));
+      }
+    } finally { app.dispose(); }
+  });
+
+  it("keeps the editor and recovery open when committing feedback fails", async () => {
+    const onSessionChange = vi.fn(() => false);
+    const onCompositionSave = vi.fn(() => true);
+    const onCompositionRemove = vi.fn(() => true);
+    const { app, loadFileContents } = createHarness(undefined, undefined, { onSessionChange, onCompositionSave, onCompositionRemove });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("\r");
+    app.handleInput("c");
+    app.handleInput("keep every character");
+    app.handleInput("\r");
+    expect((app as any).editTarget).not.toBeNull();
+    expect((app as any).state.draft.comments).toEqual([]);
+    expect(onCompositionRemove).not.toHaveBeenCalled();
+    expect(onCompositionSave).toHaveBeenLastCalledWith(expect.objectContaining({ text: "keep every character" }));
+    onSessionChange.mockReturnValue(true);
+    app.handleInput("\r");
+    expect((app as any).editTarget).toBeNull();
+    expect((app as any).state.draft.comments[0].body).toBe("keep every character");
+    app.dispose();
   });
 
   it("removes only the selected comment with r from the comments panel", async () => {
