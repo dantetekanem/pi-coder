@@ -151,7 +151,7 @@ describe("remote pull request summary source", () => {
     expect(summary).toContain(expected);
   });
 
-  it("uses configured details and capability-gated thread operations", async () => {
+  it.each([false, undefined])("uses configured details and reported thread resolution: %s", async (resolved) => {
     const exec = vi.fn(async (command: string, args: string[]) => {
       if (command === "cli-one" && args[0] === "change") {
         return {
@@ -179,11 +179,12 @@ describe("remote pull request summary source", () => {
                 pullRequest: {
                   reviewThreads: {
                     nodes: [{
-                      isResolved: false,
+                      id: "thread-1",
+                      isResolved: resolved,
                       isOutdated: false,
                       path: "src/app.ts",
                       line: 42,
-                      comments: { nodes: [{ author: { login: "carol" }, body: "Can compatibility remain?", createdAt: "2026-06-25T10:02:00Z" }] },
+                      comments: { nodes: [{ id: "comment-1", author: { login: "carol" }, body: "Can compatibility remain?", createdAt: "2026-06-25T10:02:00Z" }] },
                     }],
                   },
                 },
@@ -216,7 +217,8 @@ describe("remote pull request summary source", () => {
     expect(summary).toContain("URL:\nhttps://primary.code.example/example/widgets/change/12");
     expect(summary).toContain("Author:\nalice");
     expect(summary).toContain("Diff:\n2 files touched | +3/-9");
-    expect(summary).toContain("Status:\npending - open review comments");
+    expect(summary).toContain(`Status:\npending - ${resolved === false ? "open review comments" : "review resolution unknown"}`);
+    expect(summary).toContain("Can compatibility remain?");
     expect(summary).toContain("Validation:\nNo failing checks found.");
     const prompt = exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1);
     expect(prompt).toContain("Looks good.");

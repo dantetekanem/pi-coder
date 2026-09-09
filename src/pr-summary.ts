@@ -10,6 +10,7 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
+import { parseGraphqlReplyThreads } from "./review-replies.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -29,7 +30,7 @@ interface PullRequestComment {
 interface PullRequestThread {
   path?: string;
   line?: number | null;
-  isResolved?: boolean;
+  isResolved: boolean | null;
   isOutdated?: boolean;
   comments?: PullRequestComment[];
 }
@@ -72,12 +73,15 @@ query PullRequestOpenThreads($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       reviewThreads(first: 50) {
         nodes {
+          id
           isResolved
           isOutdated
           path
           line
           comments(first: 20) {
             nodes {
+              id
+              databaseId
               author { login }
               body
               createdAt
@@ -171,7 +175,8 @@ function formatThreadLocation(thread: PullRequestThread, comment?: PullRequestCo
 function formatThreadSummary(thread: PullRequestThread, maxLength: number): string {
   const comment = latestThreadComment(thread);
   const author = comment?.author?.login ?? "unknown";
-  return `${author} at ${formatThreadLocation(thread, comment)}: ${compact(comment?.body, maxLength)}`;
+  const resolution = thread.isResolved == null ? " (resolution unknown)" : "";
+  return `${author} at ${formatThreadLocation(thread, comment)}${resolution}: ${compact(comment?.body, maxLength)}`;
 }
 
 function hasChangesRequested(details: PullRequestDetails): boolean {
@@ -210,7 +215,9 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
   const failed = failingChecks(details);
   if (failed.length > 0) return { status: "blocked", reason: `${failed.length} failing check${failed.length === 1 ? "" : "s"}` };
 
-  if (openReviewThreads(details, 1).length > 0) return { status: "pending", reason: "open review comments" };
+  const threads = openReviewThreads(details, Number.POSITIVE_INFINITY);
+  if (threads.some((thread) => thread.isResolved == null)) return { status: "pending", reason: "review resolution unknown" };
+  if (threads.length > 0) return { status: "pending", reason: "open review comments" };
   if (hasStackBlocker(details)) return { status: "blocked", reason: "stack or merge blocker called out in comments" };
 
   const mergeState = String(details.mergeStateStatus ?? "").toUpperCase();
@@ -423,11 +430,7 @@ function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
         pullRequest?: {
           reviewThreads?: {
             nodes?: Array<{
-              isResolved?: boolean;
-              isOutdated?: boolean;
-              path?: string;
-              line?: number | null;
-              comments?: { nodes?: PullRequestComment[] };
+              comments?: { nodes?: unknown[] };
             }>;
           };
         };
@@ -436,17 +439,20 @@ function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
   };
   const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes;
   if (!Array.isArray(nodes)) throw new Error("Review threads unavailable.");
-  return nodes.map((thread) => {
-    const comments = thread.comments?.nodes;
-    if (!Array.isArray(comments)) throw new Error("Review threads unavailable.");
-    return {
-      isResolved: thread.isResolved,
-      isOutdated: thread.isOutdated,
-      path: thread.path,
-      line: thread.line,
-      comments,
-    };
-  });
+  for (const thread of nodes) {
+    if (!Array.isArray(thread?.comments?.nodes)) throw new Error("Review threads unavailable.");
+  }
+  const threads = parseGraphqlReplyThreads(value);
+  if (threads.length !== nodes.length || threads.some((thread, index) => thread.comments.length !== nodes[index]!.comments!.nodes!.length)) {
+    throw new Error("Review threads unavailable.");
+  }
+  return threads.map((thread) => ({
+    isResolved: thread.resolved,
+    isOutdated: thread.outdated,
+    path: thread.path,
+    line: thread.line,
+    comments: thread.comments.map((comment) => ({ ...comment, author: { login: comment.author } })),
+  }));
 }
 
 async function fetchOpenReviewThreads(
@@ -479,7 +485,7 @@ async function fetchOpenReviewThreads(
     return {
       path: comment.path,
       line: comment.line,
-      isResolved: providerBoolean(provider, "commentResolved", row) === true,
+      isResolved: providerBoolean(provider, "commentResolved", row) ?? null,
       isOutdated: providerBoolean(provider, "commentOutdated", row) === true,
       comments: [comment],
     };
@@ -600,7 +606,7 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
     openReviewThreads: (handoff.threads ?? []).map((thread) => ({
       path: thread.path,
       line: thread.line ?? null,
-      isResolved: thread.resolved === true,
+      isResolved: thread.resolved ?? null,
       isOutdated: thread.outdated === true,
       comments: thread.comments.map((comment) => ({
         author: { login: comment.author },

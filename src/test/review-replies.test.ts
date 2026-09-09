@@ -188,10 +188,35 @@ describe("review replies", () => {
     expect(exec.mock.calls.some(([, args]) => args[0] === "query")).toBe(false);
   });
 
+  it.each([true, false, undefined])("preserves full anonymous replies and reported resolution: %s", (resolved) => {
+    const configured = parsePiCodeDiffSettings(settings()).providers.secondary!;
+    const body = `${"x".repeat(1400)}\nlast line`;
+    const flat = groupFlatReviewComments([
+      { key: 1, actor: { name: "reviewer" }, message: "Question", resolved },
+      { key: 2, parentKey: 1, message: body, resolved },
+      { key: 3, parentKey: 1, actor: { name: "other" }, message: "Follow-up", resolved },
+    ], configured);
+    const graphql = parseGraphqlReplyThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{
+      id: "thread", isResolved: resolved, comments: { nodes: [
+        { databaseId: 1, author: { login: "reviewer" }, body: "Question" },
+        { id: "comment", author: null, body },
+        { id: "next", author: { login: "other" }, body: "Follow-up" },
+      ] },
+    }] } } } } });
+    for (const [threads, commentId] of [[flat, "2"], [graphql, "comment"]] as const) {
+      expect(threads[0]?.resolved).toBe(resolved ?? null);
+      expect(threads[0]?.comments[1]).toMatchObject({ id: commentId, author: "unknown", body });
+      expect(collectRepliesToSelf(threads, "reviewer")[0]).toMatchObject({ commentId, author: "unknown", resolved: resolved ?? null });
+      expect(collectRepliesToSelf(threads, "unknown")).toEqual([]);
+    }
+  });
+
   it("parses payloads defensively and fences isolated analysis", async () => {
     const configured = parsePiCodeDiffSettings(settings()).providers.secondary!;
     expect(parseGraphqlReplyThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: "bad" } } } } })).toEqual([]);
-    expect(groupFlatReviewComments([{ key: 1, actor: {}, message: "missing author" }, "bad"], configured)).toEqual([]);
+    expect(groupFlatReviewComments([{ key: 1, actor: {}, message: "missing author" }, "bad"], configured)).toEqual([
+      expect.objectContaining({ resolved: null, comments: [expect.objectContaining({ id: "1", author: "unknown", body: "missing author" })] }),
+    ]);
 
     const reply = {
       id: "thread:comment",

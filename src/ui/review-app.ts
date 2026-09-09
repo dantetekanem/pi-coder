@@ -4576,7 +4576,7 @@ export class ReviewApp {
       const location = reply.path == null || reply.path.length === 0
         ? "Pull request"
         : `${sanitizeTerminalText(reply.path)}${reply.line == null ? "" : `:${reply.line}`}`;
-      const resolution = reply.resolved ? "resolved" : "unresolved";
+      const resolution = reply.resolved == null ? "resolution unknown" : reply.resolved ? "resolved" : "unresolved";
       pushWrappedText(block, this.theme, `${location} • ${resolution}`, contentWidth, "dim", "   ");
       block.push(...buildCommentPanelTextLines(this.theme, width, reply.body, "muted", "   ", 4));
 
