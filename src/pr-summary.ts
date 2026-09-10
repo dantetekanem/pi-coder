@@ -427,6 +427,7 @@ async function fetchPullRequestDetails(
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   onFacts: (details: PullRequestDetails) => void,
+  previous?: PullRequestDetails,
 ): Promise<PullRequestDetails> {
   const pi = read.pi;
   const pr = target.pullRequest!;
@@ -457,12 +458,12 @@ async function fetchPullRequestDetails(
     return providerRows(provider, field, payload, separateContext && !embedded).map((row) => providerComment(provider, row));
   };
   const [embeddedComments, embeddedReviews, checks] = await Promise.all([
-    readSection("PR comments", () => readComments("pullRequestComments", true), []),
-    readSection("reviews", () => readComments("pullRequestReviews", true), []),
+    readSection("PR comments", () => readComments("pullRequestComments", true), previous?.comments ?? []),
+    readSection("reviews", () => readComments("pullRequestReviews", true), previous?.reviews ?? []),
     readSection("checks", async () => {
       if (detailsPayload == null) throw new Error("Check details unavailable.");
       return providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
-    }, []),
+    }, previous?.statusCheckRollup ?? []),
   ]);
 
   const directDecision = providerString(provider, "pullRequestReviewDecision", detailsPayload);
@@ -471,28 +472,36 @@ async function fetchPullRequestDetails(
       ? "CHANGES_REQUESTED"
       : providerBoolean(provider, "pullRequestApproved", detailsPayload) === true ? "APPROVED" : undefined);
 
-  const details: PullRequestDetails = {
+  let details: PullRequestDetails = {
+    ...previous,
     unavailable: [...unavailable].sort(),
     pending: ["review threads", ...(separateContext ? ["PR comments", "reviews"] : [])],
     url: providerString(provider, "pullRequestUrl", detailsPayload) ?? pullRequestUrl(target, provider),
     isDraft: providerBoolean(provider, "pullRequestDraft", detailsPayload),
     mergeStateStatus: providerString(provider, "pullRequestMergeState", detailsPayload)?.toUpperCase(),
     reviewDecision,
-    comments: embeddedComments,
-    reviews: embeddedReviews,
+    comments: separateContext ? previous?.comments ?? embeddedComments : embeddedComments,
+    reviews: separateContext ? previous?.reviews ?? embeddedReviews : embeddedReviews,
     statusCheckRollup: checks,
     checksUnavailable: (!getProviderCapability(provider, "pullRequestChecks") && checks.length === 0) || unavailable.includes("checks"),
     createdAt: providerString(provider, "pullRequestCreatedAt", detailsPayload),
     updatedAt: providerString(provider, "pullRequestUpdatedAt", detailsPayload),
   };
+  if (detailsPayload == null && previous != null) details = { ...previous, unavailable: details.unavailable, pending: details.pending };
   onFacts(retain(details));
-  const [comments, reviews, threadRead] = await Promise.all([
-    separateContext ? readSection("PR comments", () => readComments("pullRequestComments"), embeddedComments) : embeddedComments,
-    separateContext ? readSection("reviews", () => readComments("pullRequestReviews"), embeddedReviews) : embeddedReviews,
-    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), { threads: [] }),
+  const update = (section: string, fields: Partial<PullRequestDetails>) => {
+    const next = { ...details, ...fields, pending: details.pending!.filter((name) => name !== section), unavailable: [...new Set(unavailable)].sort() };
+    onFacts(retain(next));
+    details = next;
+  };
+  await Promise.all([
+    separateContext && readSection("PR comments", () => readComments("pullRequestComments"), details.comments ?? []).then((comments) => update("PR comments", { comments })),
+    separateContext && readSection("reviews", () => readComments("pullRequestReviews"), details.reviews ?? []).then((reviews) => update("reviews", { reviews })),
+    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number),
+      { threads: previous?.openReviewThreads ?? [], coverage: previous?.threadCoverage, read: previous?.threadRead }).then((threadRead) => update("review threads",
+        { openReviewThreads: threadRead.threads, threadCoverage: threadRead.coverage, threadRead: threadRead.read })),
   ]);
-  return retain({ ...details, pending: undefined, unavailable: [...new Set(unavailable)].sort(), comments, reviews,
-    openReviewThreads: threadRead.threads, threadCoverage: threadRead.coverage, threadRead: threadRead.read });
+  return retain(details);
 }
 
 function buildAgentPrompt(summaryInput: string): string {
@@ -569,11 +578,17 @@ export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionC
   const provider = providerForTarget(target);
   const pr = target.pullRequest;
   const repo = target.repo ?? pr.repo;
-  const reader = createConversationReader(pi, target, async (read, onProgress) => {
+  const reader = createConversationReader(pi, target, async (read, onProgress, previous) => {
+    let known: Parameters<typeof onProgress>[0] = { ...previous };
+    const publish = (progress: typeof known) => {
+      known = { ...known, ...progress };
+      onProgress({ ...known, replies: known.details?.threadRead != null && known.selfLogin != null
+        ? collectRepliesToSelf(known.details.threadRead.threads, known.selfLogin) : undefined });
+    };
     const [details, selfLogin] = await Promise.all([
-      fetchPullRequestDetails(read, target, provider, (details) => onProgress({ details })),
-      repo == null ? null : getSelfLogin(read.pi, target, provider, repo, pr.number).then(read.retain).then((selfLogin) => {
-        onProgress({ selfLogin });
+      fetchPullRequestDetails(read, target, provider, (details) => publish({ details }), previous?.details),
+      repo == null ? null : previous?.selfLogin ?? getSelfLogin(read.pi, target, provider, repo, pr.number).then(read.retain).then((selfLogin) => {
+        publish({ selfLogin });
         return selfLogin;
       }).catch(() => null),
     ]);
@@ -593,8 +608,9 @@ export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: Exte
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
     load: async (onUpdate, options) => {
-      const token = ++requestToken;
+      if (reader == null && (options?.continuation != null || options?.budgets != null)) throw new Error("Continuation and budget options require a shared reader.");
       const shared = reader?.load(options);
+      const token = ++requestToken;
       if (options?.refresh) useHandoff = false;
       let metadata: ReviewConversationMetadata | undefined;
       let supplied = shared == null && useHandoff ? suppliedPullRequestDetails(target, provider) : undefined;

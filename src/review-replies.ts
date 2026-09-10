@@ -465,6 +465,7 @@ export function createRemoteReviewRepliesSource(
     title: `${provider.label} replies`,
     loadingText: `Reading ${provider.label} replies to your review comments...`,
     load: async (options) => {
+      if (reader == null && (options?.continuation != null || options?.budgets != null)) throw new Error("Continuation and budget options require a shared reader.");
       if (options?.refresh) live = true;
       if (reader == null) {
         if (!live) throw new Error("Supplied context has no authenticated viewer or stable thread IDs. Press r to refresh replies.");
@@ -477,7 +478,7 @@ export function createRemoteReviewRepliesSource(
       const threads = snapshot.details.threadRead;
       if (threads == null || snapshot.replies == null) throw new Error("Review threads unavailable. Press r to refresh replies.");
       return { replies: snapshot.replies, selfLogin: snapshot.selfLogin,
-        fetchedAt: snapshot.metadata.fetchedAt, threadCoverage: threads.coverage, conversation: snapshot.metadata };
+        fetchedAt: snapshot.metadata.fetchedAt, threadCoverage: snapshot.metadata.coverage.threads === "unavailable" ? "partial" : threads.coverage, conversation: snapshot.metadata };
     },
     analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
   };
