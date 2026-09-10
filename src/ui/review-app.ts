@@ -4555,13 +4555,15 @@ export class ReviewApp {
     }
 
     const replies = this.repliesPanelState.snapshot.replies;
+    const partial = this.repliesPanelState.snapshot.threadCoverage === "partial";
     this.selectedReplyIndex = Math.max(0, Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1)));
     lines.push(this.theme.fg("muted", `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`));
     lines.push(this.theme.fg("dim", "↑↓ select • Enter open • r refresh • A analyze"));
+    if (partial) pushWrappedText(lines, this.theme, "Thread read incomplete.", contentWidth, "dim");
     lines.push("");
 
     if (replies.length === 0) {
-      lines.push(this.theme.fg("dim", "No replies to review."));
+      lines.push(this.theme.fg("dim", partial ? "No replies in fetched threads." : "No replies to review."));
       this.repliesScroll = 0;
       this.repliesPageSize = 1;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);

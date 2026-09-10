@@ -7,6 +7,7 @@
 - Show fetched PR facts before optional model explanations, without replacing facts or moving the context pane's scroll position.
 - Keep known PR facts visible when context sections fail, and label unavailable data instead of reporting an empty conversation.
 - Preserve replies from unknown authors and distinguish unknown thread resolution from unresolved in PR context and Replies.
+- Use consistent thread reads in PR context and Replies, label incomplete coverage, and avoid REST fallback for valid empty GraphQL results.
 
 ## 0.6.2 - 2026-09-02
 

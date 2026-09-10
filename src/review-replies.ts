@@ -8,7 +8,7 @@ import {
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
 import { sanitizeTerminalText } from "./sanitize.js";
-import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot } from "./types.js";
+import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewThreadCoverage } from "./types.js";
 
 const MAX_REPLY_BODY_LENGTH = 1200;
 const MAX_REPLIES = 100;
@@ -40,11 +40,19 @@ export interface ReplyThread {
   comments: ReplyThreadComment[];
 }
 
+export interface ReviewThreadRead {
+  threads: ReplyThread[];
+  coverage: ReviewThreadCoverage;
+  /** REST rows preserve legacy context text that has no stable comment ID. */
+  contextRows?: unknown[];
+}
+
 const REPLY_THREADS_QUERY = `
 query PullRequestReplyThreads($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100) {
+        pageInfo { hasNextPage }
         nodes {
           id
           isResolved
@@ -52,6 +60,7 @@ query PullRequestReplyThreads($owner: String!, $name: String!, $number: Int!) {
           path
           line
           comments(first: 100) {
+            pageInfo { hasNextPage }
             nodes {
               id
               databaseId
@@ -207,13 +216,17 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
   return [...threads.values()];
 }
 
+function graphqlThreadConnection(payload: unknown): Record<string, unknown> | undefined {
+  let value = payload;
+  for (const key of ["data", "repository", "pullRequest", "reviewThreads"]) {
+    value = isRecord(value) ? value[key] : undefined;
+  }
+  return isRecord(value) ? value : undefined;
+}
+
 export function parseGraphqlReplyThreads(payload: unknown): ReplyThread[] {
-  if (!isRecord(payload)) return [];
-  const data = isRecord(payload.data) ? payload.data : null;
-  const repository = isRecord(data?.repository) ? data!.repository as Record<string, unknown> : null;
-  const pullRequest = isRecord(repository?.pullRequest) ? repository!.pullRequest as Record<string, unknown> : null;
-  const reviewThreads = isRecord(pullRequest?.reviewThreads) ? pullRequest!.reviewThreads as Record<string, unknown> : null;
-  const nodes = Array.isArray(reviewThreads?.nodes) ? reviewThreads!.nodes as unknown[] : [];
+  const connection = graphqlThreadConnection(payload);
+  const nodes = Array.isArray(connection?.nodes) ? connection.nodes : [];
 
   const threads: ReplyThread[] = [];
   for (const node of nodes) {
@@ -293,27 +306,49 @@ async function getSelfLogin(
   return providerString(provider, "identityLogin", parseJson(result.stdout.trim())) ?? null;
 }
 
-async function fetchThreads(
+function parseGraphqlThreadRead(payload: unknown): ReviewThreadRead {
+  const connection = graphqlThreadConnection(payload);
+  const nodes = connection?.nodes;
+  const errors = isRecord(payload) ? payload.errors : undefined;
+  if (!Array.isArray(nodes) || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
+    throw new Error("Review threads unavailable.");
+  }
+  const comments = nodes.map((node) => {
+    const nested = isRecord(node) && isRecord(node.comments) ? node.comments : undefined;
+    if (!Array.isArray(nested?.nodes)) throw new Error("Review threads unavailable.");
+    return { count: nested.nodes.length, complete: isRecord(nested.pageInfo) && nested.pageInfo.hasNextPage === false };
+  });
+  const threads = parseGraphqlReplyThreads(payload);
+  if (threads.length !== nodes.length || threads.some((thread, index) => thread.comments.length !== comments[index]!.count)) {
+    throw new Error("Review threads unavailable.");
+  }
+  const complete = isRecord(connection?.pageInfo) && connection.pageInfo.hasNextPage === false && comments.every((entry) => entry.complete);
+  return { threads, coverage: complete ? "complete" : "partial" };
+}
+
+export async function fetchReviewThreads(
   pi: ExtensionAPI,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   repo: string,
   number: string,
-): Promise<ReplyThread[]> {
+): Promise<ReviewThreadRead> {
   const parts = repo.split("/");
   const parsedNumber = Number.parseInt(number, 10);
   if (getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
-    const operation = renderProviderOperation(provider, "reviewThreads", {
-      owner: parts[0]!,
-      name: parts[1]!,
-      number: parsedNumber,
-      query: encodeProviderQuery(REPLY_THREADS_QUERY.replace(/\s+/g, " ").trim()),
-    });
-    const args = operation.args.map(decodeProviderQuery);
-    const result = await pi.exec(provider.executable, args, { cwd: target.gitRoot, timeout: PROVIDER_TIMEOUT_MS });
-    if (result.code === 0 && result.stdout.trim().length > 0) {
-      const threads = parseGraphqlReplyThreads(parseJson(result.stdout.trim()));
-      if (threads.length > 0) return threads;
+    try {
+      const operation = renderProviderOperation(provider, "reviewThreads", {
+        owner: parts[0]!,
+        name: parts[1]!,
+        number: parsedNumber,
+        query: encodeProviderQuery(REPLY_THREADS_QUERY.replace(/\s+/g, " ").trim()),
+      });
+      const args = operation.args.map(decodeProviderQuery);
+      const result = await pi.exec(provider.executable, args, { cwd: target.gitRoot, timeout: PROVIDER_TIMEOUT_MS });
+      if (result.code !== 0) throw new Error(result.stderr.trim() || "Review threads unavailable.");
+      return parseGraphqlThreadRead(parseJson(result.stdout.trim()));
+    } catch (error) {
+      if (provider.operations.reviewComments == null) throw error;
     }
   }
 
@@ -323,7 +358,8 @@ async function fetchThreads(
     throw new Error(result.stderr.trim() || result.stdout.trim() || `Could not read ${provider.label} PR #${number} review comments.`);
   }
   const parsed = parseJson(result.stdout.trim());
-  return groupFlatReviewComments(providerRows(provider, parsed), provider);
+  const contextRows = providerRows(provider, parsed);
+  return { threads: groupFlatReviewComments(contextRows, provider), coverage: "partial", contextRows };
 }
 
 async function fetchReviewRepliesForProvider(
@@ -335,12 +371,12 @@ async function fetchReviewRepliesForProvider(
   const repo = target.repo ?? pullRequest?.repo;
   if (pullRequest == null || repo == null) throw new Error("Replies need a remote pull request with a known repository.");
 
-  const [selfLogin, threads] = await Promise.all([
+  const [selfLogin, read] = await Promise.all([
     getSelfLogin(pi, target, provider, repo, pullRequest.number),
-    fetchThreads(pi, target, provider, repo, pullRequest.number),
+    fetchReviewThreads(pi, target, provider, repo, pullRequest.number),
   ]);
   if (selfLogin == null) throw new Error(`Could not resolve your ${provider.label} identity; replies need it to tell your threads apart.`);
-  return { replies: collectRepliesToSelf(threads, selfLogin), selfLogin, fetchedAt: new Date().toISOString() };
+  return { replies: collectRepliesToSelf(read.threads, selfLogin), selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: read.coverage };
 }
 
 export async function fetchReviewReplies(pi: ExtensionAPI, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {

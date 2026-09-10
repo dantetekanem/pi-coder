@@ -73,3 +73,7 @@ Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings 
 ```
 
 `pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`.
+
+## Thread coverage
+
+PR context and Replies request up to 100 GraphQL threads and 100 comments per thread, without automatic pagination. Coverage is complete only when the thread connection and every fetched comment connection report `pageInfo.hasNextPage: false`. More pages or missing pagination metadata are labeled incomplete. Failed or malformed reads use the configured REST fallback, or report the section unavailable. Legacy REST operations have unverified pagination and remain incomplete; their ID-less comments are still retained in PR context.

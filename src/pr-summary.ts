@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewContextPanelSource } from "./types.js";
+import type { ReviewContextPanelSource, ReviewThreadCoverage } from "./types.js";
 import { hasHandoffContext } from "./pr-handoff.js";
 import {
   getProviderCapability,
@@ -10,7 +10,7 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
-import { parseGraphqlReplyThreads } from "./review-replies.js";
+import { fetchReviewThreads } from "./review-replies.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -52,6 +52,7 @@ interface PullRequestDetails {
   comments?: PullRequestComment[];
   reviews?: PullRequestComment[];
   openReviewThreads?: PullRequestThread[];
+  threadCoverage?: ReviewThreadCoverage;
   statusCheckRollup?: PullRequestCheck[];
   createdAt?: string;
   updatedAt?: string;
@@ -63,38 +64,6 @@ interface StatusSummary {
 }
 
 const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Head", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
-
-const QUERY_OPEN_TOKEN = "__CODE_DIFF_QUERY_OPEN__";
-const QUERY_CLOSE_TOKEN = "__CODE_DIFF_QUERY_CLOSE__";
-
-const OPEN_REVIEW_THREADS_QUERY = `
-query PullRequestOpenThreads($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 50) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 20) {
-            nodes {
-              id
-              databaseId
-              author { login }
-              body
-              createdAt
-              url
-              path
-              line
-            }
-          }
-        }
-      }
-    }
-  }
-}`;
 
 function providerForTarget(target: RemoteReviewTarget): ProviderSettings {
   const providerId = target.provider ?? target.handoff?.provider;
@@ -224,6 +193,7 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
   if (["BLOCKED", "DIRTY", "UNKNOWN", "UNSTABLE"].includes(mergeState)) return { status: "blocked", reason: `merge state ${mergeState.toLowerCase()}` };
 
   if (details.unavailable?.length) return { status: "pending", reason: `${details.unavailable.join(", ")} unavailable` };
+  if (details.threadCoverage === "partial") return { status: "pending", reason: "thread read incomplete" };
   if (String(details.reviewDecision ?? "").toUpperCase() === "APPROVED") return { status: "approved", reason: "review decision approved" };
 
   const pending = pendingChecks(details);
@@ -288,7 +258,10 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
   const bodySignal = extractBodySignal(pr.body);
   const missing = (details.unavailable ?? []).filter((section) => !["PR details", "checks"].includes(section));
   const conversation = threads.length ? threads.join("; ") : reviews.length ? reviews.join("; ") : comments.join("; ");
-  const coverage = missing.length ? `Unavailable: ${missing.join(", ")}` : "";
+  const coverage = [
+    missing.length ? `Unavailable: ${missing.join(", ")}` : "",
+    details.threadCoverage === "partial" ? "Thread read incomplete." : "",
+  ].filter(Boolean).join("; ");
 
   return [
     `Title: ${pr.title}`,
@@ -334,6 +307,7 @@ function formatSummaryInput(target: RemoteReviewTarget, details: PullRequestDeta
     compact(pr.body, 6000) || "No body.",
     "",
     "Open review comments:",
+    details.threadCoverage === "partial" ? "Thread read incomplete; this is only fetched context." : "",
     openThreads || (details.unavailable?.includes("review threads") ? "Review threads unavailable." : "No unresolved review threads found."),
     "",
     "Reviews:",
@@ -390,14 +364,6 @@ function providerCheck(provider: ProviderSettings, value: unknown): PullRequestC
   };
 }
 
-function encodeProviderQuery(value: string): string {
-  return value.replaceAll("{", QUERY_OPEN_TOKEN).replaceAll("}", QUERY_CLOSE_TOKEN);
-}
-
-function decodeProviderQuery(value: string): string {
-  return value.replaceAll(QUERY_OPEN_TOKEN, "{").replaceAll(QUERY_CLOSE_TOKEN, "}");
-}
-
 function parseProviderJson(provider: ProviderSettings, value: string, label: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -415,44 +381,11 @@ async function fetchProviderOperation(
   label: string,
 ): Promise<unknown> {
   const rendered = renderProviderOperation(provider, operation, values);
-  const args = rendered.args.map(decodeProviderQuery);
-  const result = await pi.exec(provider.executable, args, { cwd: target.gitRoot, timeout: 45000 });
+  const result = await pi.exec(provider.executable, rendered.args, { cwd: target.gitRoot, timeout: 45000 });
   if (result.code !== 0 || result.stdout.trim().length === 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || `Could not fetch ${provider.label} ${label}.`);
   }
   return parseProviderJson(provider, result.stdout.trim(), label);
-}
-
-function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
-  const parsed = value as {
-    data?: {
-      repository?: {
-        pullRequest?: {
-          reviewThreads?: {
-            nodes?: Array<{
-              comments?: { nodes?: unknown[] };
-            }>;
-          };
-        };
-      };
-    };
-  };
-  const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes;
-  if (!Array.isArray(nodes)) throw new Error("Review threads unavailable.");
-  for (const thread of nodes) {
-    if (!Array.isArray(thread?.comments?.nodes)) throw new Error("Review threads unavailable.");
-  }
-  const threads = parseGraphqlReplyThreads(value);
-  if (threads.length !== nodes.length || threads.some((thread, index) => thread.comments.length !== nodes[index]!.comments!.nodes!.length)) {
-    throw new Error("Review threads unavailable.");
-  }
-  return threads.map((thread) => ({
-    isResolved: thread.resolved,
-    isOutdated: thread.outdated,
-    path: thread.path,
-    line: thread.line,
-    comments: thread.comments.map((comment) => ({ ...comment, author: { login: comment.author } })),
-  }));
 }
 
 async function fetchOpenReviewThreads(
@@ -461,35 +394,27 @@ async function fetchOpenReviewThreads(
   provider: ProviderSettings,
   repo: string,
   number: string,
-): Promise<PullRequestThread[]> {
-  const parts = repo.split("/");
-  const parsedNumber = Number.parseInt(number, 10);
-  if (getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
-    try {
-      const payload = await fetchProviderOperation(pi, target, provider, "reviewThreads", {
-        owner: parts[0]!,
-        name: parts[1]!,
-        number: parsedNumber,
-        query: encodeProviderQuery(OPEN_REVIEW_THREADS_QUERY.replace(/\s+/g, " ").trim()),
-      }, `PR #${number} review threads`);
-      return parseGraphqlReviewThreads(payload);
-    } catch (error) {
-      if (provider.operations.reviewComments == null) throw error;
-    }
-  }
-
-  const payload = await fetchProviderOperation(pi, target, provider, "reviewComments", { repo, number }, `PR #${number} review comments`);
-  const rows = providerRows(provider, "pullRequestReviewComments", payload, true);
-  return rows.map((row) => {
-    const comment = providerComment(provider, row);
-    return {
-      path: comment.path,
-      line: comment.line,
-      isResolved: providerBoolean(provider, "commentResolved", row) ?? null,
-      isOutdated: providerBoolean(provider, "commentOutdated", row) === true,
-      comments: [comment],
-    };
-  });
+): Promise<{ threads: PullRequestThread[]; coverage?: ReviewThreadCoverage }> {
+  const read = await fetchReviewThreads(pi, target, provider, repo, number);
+  const threads = read.contextRows == null
+    ? read.threads.map((thread) => ({
+      isResolved: thread.resolved,
+      isOutdated: thread.outdated,
+      path: thread.path,
+      line: thread.line,
+      comments: thread.comments.map((comment) => ({ ...comment, author: { login: comment.author } })),
+    }))
+    : read.contextRows.map((row) => {
+      const comment = providerComment(provider, row);
+      return {
+        path: comment.path,
+        line: comment.line,
+        isResolved: providerBoolean(provider, "commentResolved", row) ?? null,
+        isOutdated: providerBoolean(provider, "commentOutdated", row) === true,
+        comments: [comment],
+      };
+    });
+  return { threads, coverage: read.coverage };
 }
 
 async function fetchPullRequestDetails(
@@ -521,10 +446,10 @@ async function fetchPullRequestDetails(
     if (payload == null) throw new Error("Context section unavailable.");
     return providerRows(provider, field, payload, separateContext).map((row) => providerComment(provider, row));
   };
-  const [comments, reviews, openReviewThreads, checks] = await Promise.all([
+  const [comments, reviews, threadRead, checks] = await Promise.all([
     readSection("PR comments", () => readComments("pullRequestComments"), []),
     readSection("reviews", () => readComments("pullRequestReviews"), []),
-    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), []),
+    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), { threads: [] }),
     readSection("checks", async () => {
       if (detailsPayload == null) throw new Error("Check details unavailable.");
       return providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
@@ -545,7 +470,8 @@ async function fetchPullRequestDetails(
     reviewDecision,
     comments,
     reviews,
-    openReviewThreads,
+    openReviewThreads: threadRead.threads,
+    threadCoverage: threadRead.coverage,
     statusCheckRollup: checks,
     checksUnavailable: !getProviderCapability(provider, "pullRequestChecks") || unavailable.includes("checks"),
     createdAt: providerString(provider, "pullRequestCreatedAt", detailsPayload),

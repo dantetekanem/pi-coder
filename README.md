@@ -87,6 +87,8 @@ Failed context sections are labeled unavailable; successfully fetched facts rema
 
 PR context and Replies distinguish missing resolution from an unresolved thread. Replies from deleted or unavailable authors remain visible as `unknown`.
 
+Both panes label incomplete thread reads. An empty partial result means no replies were found in the fetched threads, not that the whole PR conversation is empty.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:
