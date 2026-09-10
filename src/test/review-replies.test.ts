@@ -9,6 +9,7 @@ import {
   buildReplyAnalysisPrompt,
   collectRepliesToSelf,
   fetchReviewReplies,
+  fetchReviewThreads,
   groupFlatReviewComments,
   parseGraphqlReplyThreads,
 } from "../review-replies.js";
@@ -165,19 +166,51 @@ describe("review replies", () => {
     expect(exec.mock.calls.some(([, args]) => args[0] === "threads")).toBe(false);
   });
 
-  it("accepts a complete empty GraphQL connection without a REST fallback", async () => {
+  it.each([false, undefined])("distinguishes empty from unknown GraphQL pagination without a REST fallback: %s", async (hasNextPage) => {
     const exec = vi.fn(async (_command: string, args: string[]) => ({
       code: args[0] === "threads" ? 1 : 0, stderr: "unexpected fallback", killed: false,
       stdout: JSON.stringify(args[0] === "identity" ? { actor: { name: "reviewer" } }
-        : { data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } } } } } }),
+        : { data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage } } } } } }),
     }));
     const snapshot = await fetchReviewReplies({ exec } as never, target("primary") as never);
-    expect(snapshot).toMatchObject({ replies: [], threadCoverage: "complete" });
+    expect(snapshot).toMatchObject({ replies: [], threadCoverage: hasNextPage === false ? "complete" : "partial" });
     expect(exec).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["errors", "missing connection", "missing comment id", "command failure", "malformed JSON"])("uses REST instead of accepting an invalid thread query: %s", async (failure) => {
-    const payload = { errors: failure === "errors" ? [{ message: "denied" }] : undefined,
+  it("deduplicates outer pages, keeps full anonymous bodies, and stops a repeated cursor", async () => {
+    const configured = parsePiCodeDiffSettings(settings()).providers.primary!;
+    const payload = { data: { repository: { pullRequest: { reviewThreads: {
+      pageInfo: { hasNextPage: true, endCursor: "same" }, nodes: Array.from({ length: 100 }, (_, index) => ({ id: `thread-${index}`, comments: {
+        pageInfo: { hasNextPage: false }, nodes: [{ id: "body", author: null, body: "é".repeat(2000) }],
+      } })),
+    } } } } };
+    let calls = 0;
+    const exec = vi.fn(async () => {
+      const data = structuredClone(payload);
+      const connection = data.data.repository.pullRequest.reviewThreads;
+      if (++calls === 2) connection.nodes = [connection.nodes[0]!, { ...connection.nodes[0]!, id: "last" }];
+      return { code: 0, stderr: "", killed: false, stdout: JSON.stringify(data) };
+    });
+    const read = createConversationRead({ exec } as never);
+    const pages: Awaited<ReturnType<typeof fetchReviewThreads>>[] = [];
+    try {
+      const result = await fetchReviewThreads(read.pi, target("primary") as never, configured, "example/widgets", "12",
+        { onPage: (page) => { pages.push(read.retain(page)); } });
+      expect(exec).toHaveBeenCalledTimes(2);
+      expect(result.coverage).toBe("partial");
+      expect(result.threads).toHaveLength(101);
+      expect(pages[0]?.threads).toHaveLength(100);
+      expect(result.threads[0]?.resolved).toBeNull();
+      expect(result.threads[0]?.comments).toEqual([expect.objectContaining({ id: "body", authorUnknown: true, body: "é".repeat(2000) })]);
+      expect(pages[0]?.threads[0]?.comments).toHaveLength(1);
+    } finally {
+      read.close();
+    }
+  });
+
+  it.each(["errors", "exit errors", "missing connection", "missing comment id", "command failure", "malformed JSON"])("keeps usable fragments and falls back only for unusable queries: %s", async (failure) => {
+    const errors = failure.includes("errors");
+    const payload = { errors: errors ? [{ message: "denied" }] : undefined,
       data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: "thread",
         comments: failure === "missing connection" ? undefined : { nodes: [
           { databaseId: failure === "missing comment id" ? undefined : 1, author: { login: "reviewer" }, body: "Question" },
@@ -191,11 +224,17 @@ describe("review replies", () => {
         { key: 1, actor: { name: "reviewer" }, message: "Question" },
         { key: 2, parentKey: 1, actor: { name: "other" }, message: "Known REST reply" },
       ] };
-      return { code: 0, stderr: "", killed: false,
+      return { code: args[0] === "query" && failure === "exit errors" ? 1 : 0, stderr: "", killed: false,
         stdout: args[0] === "query" && failure === "malformed JSON" ? "not-json" : JSON.stringify(data) };
     });
     const snapshot = await fetchReviewReplies({ exec } as never, target("primary") as never);
-    expect(snapshot).toMatchObject({ threadCoverage: "partial", replies: [expect.objectContaining({ body: "Known REST reply" })] });
+    expect(snapshot.threadCoverage).toBe("partial");
+    const partial = errors || ["missing connection", "missing comment id"].includes(failure);
+    expect(snapshot.replies.map((reply) => reply.body)).toEqual(errors ? ["Unreliable partial data"]
+      : partial ? [] : ["Known REST reply"]);
+    const raw = await fetchReviewThreads({ exec } as never, target("primary") as never,
+      parsePiCodeDiffSettings(settings()).providers.primary!, "example/widgets", "12");
+    expect(raw.threads[0]?.id).toBe(partial ? "thread" : "1");
   });
 
   it("groups configured flat comment fields when thread queries are disabled", async () => {

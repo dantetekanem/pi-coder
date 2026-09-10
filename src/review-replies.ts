@@ -45,6 +45,7 @@ export interface ReplyThread {
 export interface ReviewThreadRead {
   threads: ReplyThread[];
   coverage: ReviewThreadCoverage;
+  pagination?: { cursor?: string; seen: string[]; partial: boolean; done: boolean };
   /** REST rows preserve legacy context text that has no stable comment ID. */
   contextRows?: unknown[];
 }
@@ -54,7 +55,7 @@ query PullRequestReplyThreads($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100) {
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
@@ -274,6 +275,11 @@ function decodeProviderQuery(value: string): string {
   return value.replaceAll(QUERY_OPEN_TOKEN, "{").replaceAll(QUERY_CLOSE_TOKEN, "}");
 }
 
+// Preserve opaque text through provider-template tokens and query whitespace normalization.
+function graphqlCursor(value: string): string {
+  return JSON.stringify(value).replace(/[_{}\s]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 function parseJson(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -308,24 +314,24 @@ export async function getSelfLogin(
   return providerString(provider, "identityLogin", parseJson(result.stdout.trim())) ?? null;
 }
 
-function parseGraphqlThreadRead(payload: unknown): ReviewThreadRead {
+function parseGraphqlThreadRead(payload: unknown, succeeded: boolean): ReviewThreadRead {
   const connection = graphqlThreadConnection(payload);
   const nodes = connection?.nodes;
   const errors = isRecord(payload) ? payload.errors : undefined;
-  if (!Array.isArray(nodes) || (errors != null && (!Array.isArray(errors) || errors.length > 0))) {
-    throw new Error("Review threads unavailable.");
-  }
+  if (!Array.isArray(nodes)) throw new Error("Review threads unavailable.");
   const comments = nodes.map((node) => {
     const nested = isRecord(node) && isRecord(node.comments) ? node.comments : undefined;
-    if (!Array.isArray(nested?.nodes)) throw new Error("Review threads unavailable.");
-    return { count: nested.nodes.length, complete: isRecord(nested.pageInfo) && nested.pageInfo.hasNextPage === false };
+    return { count: Array.isArray(nested?.nodes) ? nested.nodes.length : -1,
+      complete: isRecord(nested?.pageInfo) && nested.pageInfo.hasNextPage === false };
   });
   const threads = parseGraphqlReplyThreads(payload);
-  if (threads.length !== nodes.length || threads.some((thread, index) => thread.comments.length !== comments[index]!.count)) {
-    throw new Error("Review threads unavailable.");
-  }
-  const complete = isRecord(connection?.pageInfo) && connection.pageInfo.hasNextPage === false && comments.every((entry) => entry.complete);
-  return { threads, coverage: complete ? "complete" : "partial" };
+  if (nodes.length > 0 && threads.length === 0) throw new Error("Review threads unavailable.");
+  const intact = threads.length === nodes.length && threads.every((thread, index) => thread.comments.length === comments[index]!.count);
+  const reliable = succeeded && threads.length === nodes.length && (errors == null || (Array.isArray(errors) && errors.length === 0));
+  const info = isRecord(connection?.pageInfo) ? connection.pageInfo : undefined;
+  const pagination = { cursor: reliable && info?.hasNextPage === true ? readString(info.endCursor) : undefined,
+    seen: [], done: reliable && info?.hasNextPage === false, partial: !intact || comments.some((entry) => !entry.complete) };
+  return { threads, coverage: pagination.done && !pagination.partial ? "complete" : "partial", pagination };
 }
 
 export async function fetchReviewThreads(
@@ -334,22 +340,52 @@ export async function fetchReviewThreads(
   provider: ProviderSettings,
   repo: string,
   number: string,
+  options?: { previous?: ReviewThreadRead; onPage: (page: ReviewThreadRead) => void },
 ): Promise<ReviewThreadRead> {
   const parts = repo.split("/");
   const parsedNumber = Number.parseInt(number, 10);
+  let accepted = options?.previous?.pagination == null ? undefined : options.previous;
+  if (accepted?.pagination?.done) return accepted;
   if (getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
-    try {
+    const request = async (cursor?: string) => {
+      const query = cursor == null ? REPLY_THREADS_QUERY : REPLY_THREADS_QUERY.replace("reviewThreads(first: 100)",
+        () => `reviewThreads(first: 100, after: ${graphqlCursor(cursor)})`);
       const operation = renderProviderOperation(provider, "reviewThreads", {
         owner: parts[0]!,
         name: parts[1]!,
         number: parsedNumber,
-        query: encodeProviderQuery(REPLY_THREADS_QUERY.replace(/\s+/g, " ").trim()),
+        query: encodeProviderQuery(query.replace(/\s+/g, " ").trim()),
       });
       const args = operation.args.map(decodeProviderQuery);
       const result = await pi.exec(provider.executable, args, { cwd: target.gitRoot, timeout: PROVIDER_TIMEOUT_MS });
-      if (result.code !== 0) throw new Error(result.stderr.trim() || "Review threads unavailable.");
-      return parseGraphqlThreadRead(parseJson(result.stdout.trim()));
+      return parseGraphqlThreadRead(parseJson(result.stdout.trim()), result.code === 0);
+    };
+    try {
+      for (;;) {
+        const cursor = accepted?.pagination?.cursor;
+        const page = await request(cursor);
+        const state = page.pagination!;
+        const seen = [...new Set([...(accepted?.pagination?.seen ?? []), cursor ?? ""])];
+        const repeated = state.cursor != null && seen.includes(state.cursor);
+        const threads = new Map(accepted?.threads.map((thread) => [thread.id, thread] as const));
+        for (const thread of page.threads) {
+          const comments = threads.get(thread.id)?.comments ?? [];
+          const fresh = new Map(thread.comments.map((comment) => [comment.id, comment]));
+          const match = comments.findIndex((comment) => fresh.has(comment.id));
+          const at = match < 0 ? comments.length : match;
+          threads.set(thread.id, { ...thread, comments: [...comments.slice(0, at), ...fresh.values(),
+            ...comments.slice(at).filter((comment) => !fresh.has(comment.id))] });
+        }
+        const pagination = { cursor: state.cursor ?? cursor, seen, done: state.done || repeated,
+          partial: state.partial || accepted?.pagination?.partial === true || repeated };
+        const candidate: ReviewThreadRead = { threads: [...threads.values()], pagination,
+          coverage: pagination.done && !pagination.partial ? "complete" : "partial" };
+        options?.onPage(candidate);
+        accepted = candidate;
+        if (options == null || pagination.done || state.cursor == null) return accepted;
+      }
     } catch (error) {
+      if (accepted != null) return accepted;
       if (provider.operations.reviewComments == null) throw error;
     }
   }
