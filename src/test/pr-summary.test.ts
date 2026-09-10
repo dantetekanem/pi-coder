@@ -554,13 +554,18 @@ describe("shared pull request sources", () => {
     }
   });
 
-  it.each(["request", "bytes", "retained", "time", "provider"])("keeps admitted outer pages through %s failure and retries the same cursor", async (failure) => {
+  it.each(["outer", "nested"].flatMap((scope) => ["request", "bytes", "retained", "time", "provider"].map((failure) => [scope, failure])))("keeps admitted %s pages through %s failure and retries the same cursor", async (scope, failure) => {
     const cursor = 'two  "pages" {x} __CODE_DIFF_QUERY_OPEN__ $&';
     const firstPage = graph("First reply");
-    Object.assign(firstPage.data.repository.pullRequest.reviewThreads.pageInfo, { hasNextPage: true, endCursor: cursor });
+    const firstThread = firstPage.data.repository.pullRequest.reviewThreads.nodes[0]!;
+    firstThread.id = 'thread  "{__CODE_DIFF_QUERY_CLOSE__}" $&';
+    const connection = scope === "nested" ? firstThread.comments : firstPage.data.repository.pullRequest.reviewThreads;
+    Object.assign(connection.pageInfo, { hasNextPage: true, endCursor: cursor });
     const lastPage = graph("é".repeat(2000));
-    Object.assign(lastPage.data.repository.pullRequest.reviewThreads.nodes[0]!, { id: "last", isResolved: null });
-    Object.assign(lastPage.data.repository.pullRequest.reviewThreads.nodes[0]!.comments.nodes[1]!, { author: null });
+    const lastThread = lastPage.data.repository.pullRequest.reviewThreads.nodes[0]!;
+    Object.assign(lastThread, { id: scope === "nested" ? firstThread.id : "last", isResolved: null });
+    Object.assign(lastThread.comments.nodes[1]!, { id: "later", author: null });
+    if (scope === "nested") lastThread.comments.nodes[0] = firstThread.comments.nodes[1]!;
     let failing = true;
     let now = 0;
     const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -569,7 +574,7 @@ describe("shared pull request sources", () => {
       if (args[0] !== "query" || !args.at(-1)!.includes("after:")) return normal(command, args);
       if (failure === "provider" && failing) throw new Error("rate limited");
       if (failure === "time") now += 2000;
-      return { code: 0, stderr: "", killed: false, stdout: JSON.stringify(lastPage) };
+      return { code: 0, stderr: "", killed: false, stdout: JSON.stringify(scope === "nested" ? { data: { node: lastThread } } : lastPage) };
     });
     const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
     const update = vi.fn();
@@ -589,17 +594,41 @@ describe("shared pull request sources", () => {
       expect(last.conversation?.generation).toBe(first.conversation?.generation);
       expect(last.conversation?.coverage.threads).toBe("complete");
       expect(last.conversation?.continuation).toBeUndefined();
-      expect(last.replies.find((reply) => reply.threadId === "last")).toMatchObject({ author: "unknown", resolved: null });
+      expect(last.replies.find((reply) => reply.commentId === "later")).toMatchObject({ author: "unknown", resolved: null });
       expect(JSON.stringify(first)).toBe(original);
       const requested = exec.mock.calls.filter(([, args]) => args[0] === "query").map(([, args]) =>
         args.at(-1)!.match(/after:\s*("(?:\\.|[^"\\])*")/)?.[1]).filter((value) => value != null).map((value) => JSON.parse(value!));
       expect(requested.length).toBeGreaterThan(0);
       expect(requested.every((value) => value === cursor)).toBe(true);
+      if (scope === "nested") {
+        const query = exec.mock.calls.filter(([, args]) => args.at(-1)?.includes("node(id:")).at(-1)![1].at(-1)!;
+        expect(JSON.parse(query.match(/node\(id:\s*("(?:\\.|[^"\\])*")/)![1]!)).toBe(firstThread.id);
+      }
       expect(exec.mock.calls.filter(([, args]) => args[0] === "identity")).toHaveLength(1);
       expect(exec.mock.calls.some(([, args]) => args[0] === "threads")).toBe(false);
     } finally {
       clock.mockRestore();
     }
+  });
+
+  it("retries a missing nested connection by thread ID without inventing a cursor", async () => {
+    const partial = graph();
+    Object.assign(partial.data.repository.pullRequest.reviewThreads.nodes[0]!, { comments: undefined });
+    const normal = executor(async () => partial);
+    const exec = vi.fn(async (command: string, args: string[]) => args.at(-1)?.includes("node(id:")
+      ? { code: 0, stderr: "", killed: false, stdout: JSON.stringify({ data: { node: graph().data.repository.pullRequest.reviewThreads.nodes[0] } }) }
+      : normal(command, args));
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const first = await sources.repliesSource!.load({ budgets: { maxRequests: 3 } });
+    expect(first).toMatchObject({ replies: [], conversation: { coverage: { threads: "partial" } } });
+    expect(first.conversation?.continuation).toBeDefined();
+    const last = await sources.repliesSource!.load({ continuation: first.conversation!.continuation, budgets: { maxRequests: 1 } });
+    expect(last.replies[0]?.body).toBe("Current reply");
+    expect(last.conversation).toMatchObject({ generation: first.conversation!.generation, coverage: { threads: "complete" } });
+    const query = exec.mock.calls.at(-1)![1].at(-1)!;
+    expect(query).toContain('node(id: "thread")');
+    expect(query).toContain("comments(first: 100)");
+    expect(query).not.toContain("after:");
   });
 
   it("retries a wholly unavailable GraphQL read without fallback and rejects its consumed token", async () => {
