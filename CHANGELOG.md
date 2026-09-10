@@ -8,6 +8,7 @@
 - Keep known PR facts visible when context sections fail, and label unavailable data instead of reporting an empty conversation.
 - Preserve replies from unknown authors and distinguish unknown thread resolution from unresolved in PR context and Replies.
 - Use consistent thread reads in PR context and Replies, label incomplete coverage, and avoid REST fallback for valid empty GraphQL results.
+- Bound provider reads and show known PR facts while conversation sections are pending, preserving useful facts when limits or errors stop a read.
 
 ## 0.6.2 - 2026-09-02
 
