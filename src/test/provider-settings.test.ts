@@ -113,6 +113,15 @@ describe("provider settings", () => {
     });
     expect(renderProviderOperation(settings.providers.github!, "pullRequest", { repo: "example/widgets", number: 18 }).args)
       .toEqual(expect.arrayContaining(["pr", "view", "18", "--repo", "example/widgets", "--json"]));
+    expect(renderProviderOperation(settings.providers.github!, "pullRequestDetails", { repo: "example/widgets", number: 18 }).args.at(-1)).toContain("createdAt,updatedAt");
+    expect(readConfiguredField(settings.providers.github!, "pullRequestCreatedAt", { createdAt: "created" })).toBe("created");
+    expect(readConfiguredField(settings.providers.github!, "pullRequestUpdatedAt", { updatedAt: "updated" })).toBe("updated");
+  });
+
+  it.each([["reviewComments", "pulls", "comments"], ["pullRequestComments", "issues", "comments"], ["pullRequestReviews", "pulls", "reviews"]])("renders bounded %s pages against the configured repository", (operation, resource, collection) => {
+    const provider = loadPiCodeDiffSettings().providers.github!;
+    expect(renderProviderOperation(provider, `${operation}Page`, { repo: "example/widgets", number: 18, page: 2 }).args)
+      .toEqual(["api", "--include", `repos/example/widgets/${resource}/18/${collection}?per_page=100&page=2`]);
   });
 
   it("renders configured operations without invoking a shell", () => {

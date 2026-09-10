@@ -29,6 +29,7 @@
     "src/path-policy.ts",
     "src/prompt.ts",
     "src/provider-settings.ts",
+    "src/provider-rest-pages.ts",
     "src/pr-handoff.ts",
     "src/pr-summary.ts",
     "src/preferences.ts",
