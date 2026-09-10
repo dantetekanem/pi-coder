@@ -62,6 +62,7 @@ export interface ReviewConversationMetadata {
   attempt?: number;
   continuation?: object;
   fetchedAt: string | null;
+  threadCounts?: { open: number; unknown: number };
   coverage: Record<"details" | "comments" | "reviews" | "threads" | "checks" | "identity", "pending" | "complete" | "partial" | "unavailable">;
 }
 
@@ -72,6 +73,7 @@ export interface ReviewConversationLoadOptions {
 }
 
 export interface ReviewContextPanelSource {
+  conversation?: object;
   title: string;
   loadingText: string;
   /** Returns usable context; optional later updates replace its text without resetting the pane. */
@@ -99,6 +101,8 @@ export type ReviewThreadCoverage = "complete" | "partial";
 
 export interface ReviewRepliesSnapshot {
   replies: ReviewReplyItem[];
+  totalReplies?: number;
+  previewLimit?: number;
   selfLogin: string;
   fetchedAt: string;
   threadCoverage?: ReviewThreadCoverage;
@@ -106,6 +110,8 @@ export interface ReviewRepliesSnapshot {
 }
 
 export interface ReviewRepliesPanelSource {
+  conversation?: object;
+  readonly current?: ReviewRepliesSnapshot;
   title: string;
   loadingText: string;
   /** Reads only the current pull request; the pane never queues a second one. */

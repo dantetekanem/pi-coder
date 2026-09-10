@@ -8,6 +8,7 @@ import {
   analyzeReviewReply,
   buildReplyAnalysisPrompt,
   collectRepliesToSelf,
+  prepareRepliesToSelf,
   fetchReviewReplies,
   fetchReviewThreads,
   groupFlatReviewComments,
@@ -85,6 +86,14 @@ afterEach(() => {
 });
 
 describe("review replies", () => {
+  it("counts fetched replies separately from capped previews", () => {
+    const comments = [{ id: "self", author: "self", body: "Question" }, ...Array.from({ length: 101 }, (_, index) => ({ id: `${index}`, author: "other", body: "x".repeat(1400) }))];
+    const result = prepareRepliesToSelf([{ id: "thread", resolved: null, comments }], "self");
+    expect(result.totalReplies).toBe(101);
+    expect(result.replies).toHaveLength(100);
+    expect(result.replies.every((reply) => reply.body.length <= 1200)).toBe(true);
+  });
+
   it("collects only bounded, sanitized replies after the reviewer's newest comment", () => {
     const replies = collectRepliesToSelf([{
       id: "thread-1",
