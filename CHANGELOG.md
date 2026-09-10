@@ -9,6 +9,7 @@
 - Preserve replies from unknown authors and distinguish unknown thread resolution from unresolved in PR context and Replies.
 - Use consistent thread reads in PR context and Replies, label incomplete coverage, and avoid REST fallback for valid empty GraphQL results.
 - Bound provider reads and show known PR facts while conversation sections are pending, preserving useful facts when limits or errors stop a read.
+- Share pending PR context and Replies reads, preserve supplied context without provider calls, and let explicit refresh start a new conversation generation.
 
 ## 0.6.2 - 2026-09-02
 

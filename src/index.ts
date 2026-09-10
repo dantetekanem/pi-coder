@@ -9,12 +9,11 @@ import { getReviewWindowData, getReviewWindowDataForRevisionRange, loadReviewFil
 import { RepositoryChangeStatusController } from "./git-change-status.js";
 import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
-import { createRemotePullRequestSummarySource } from "./pr-summary.js";
+import { createRemotePullRequestSources } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
 import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { saveReviewReceipt } from "./review-receipts.js";
-import { createRemoteReviewRepliesSource } from "./review-replies.js";
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
 import { buildReviewFileSignatures, createReviewSessionId, deleteReviewSession, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
 import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscussContinuation, type RemoteReviewTarget } from "./remote.js";
@@ -992,8 +991,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           allowEmptySubmit: remoteTarget == null || remoteTarget.pullRequest != null,
           visibleScopes,
           seedComments: firstReview ? partitionedSeed.applicable : [],
-          contextPanelSource: createRemotePullRequestSummarySource(pi, ctx, remoteTarget),
-          repliesSource: createRemoteReviewRepliesSource(pi, ctx, remoteTarget),
+          ...createRemotePullRequestSources(pi, ctx, remoteTarget),
           orderSignals: buildReviewOrderSignals(handoff),
           reviewHeader,
           initialSession: initialSession ?? undefined,

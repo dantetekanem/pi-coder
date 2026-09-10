@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { PullRequestDetails } from "./pr-summary.js";
+import type { RemoteReviewTarget } from "./remote.js";
+import type { ReviewConversationMetadata, ReviewConversationLoadOptions, ReviewReplyItem } from "./types.js";
 
 const DEFAULT_LIMITS = { maxRequests: 12, maxMs: 30_000, maxBytes: 2_000_000, maxRetainedBytes: 8_000_000 };
 
@@ -55,6 +58,94 @@ export function createConversationRead(pi: ExtensionAPI, limits: Partial<typeof 
     close: () => {
       clearTimeout(timer);
       stop("closed");
+    },
+  };
+}
+
+interface ConversationData {
+  details: PullRequestDetails;
+  selfLogin: string | null;
+  replies?: ReviewReplyItem[];
+}
+interface ConversationSnapshot extends ConversationData {
+  metadata: ReviewConversationMetadata;
+  supplied: boolean;
+}
+interface ConversationLoad {
+  facts: Promise<PullRequestDetails>;
+  snapshot: Promise<ConversationSnapshot>;
+}
+interface PendingRead extends ConversationLoad {
+  settled: boolean;
+  close: () => void;
+  resolveFacts: (details: PullRequestDetails) => void;
+}
+
+export function createConversationReader(
+  pi: ExtensionAPI, target: RemoteReviewTarget,
+  acquire: (read: ReturnType<typeof createConversationRead>, onProgress: (data: Partial<ConversationData>) => void) => Promise<ConversationData>,
+  supplied?: PullRequestDetails,
+) {
+  const identity = JSON.stringify([target.provider ?? target.handoff?.provider, target.repo ?? target.pullRequest?.repo, target.pullRequest?.number, target.pullRequest?.headRefOid]);
+  let generation = 0;
+  let live = supplied == null;
+  let current: PendingRead | undefined;
+  return {
+    isCurrent: (metadata: ReviewConversationMetadata) => metadata.identity === identity && metadata.generation === generation,
+    load: (options?: ReviewConversationLoadOptions): ConversationLoad => {
+      if (!options?.refresh && current != null && (!current.settled || !live)) return current;
+      if (options?.refresh) live = true;
+      const previous = current;
+      const id = ++generation;
+      const fromHandoff = !live;
+      const read = live ? createConversationRead(pi) : undefined;
+      let known: PullRequestDetails = { checksUnavailable: true, pending: ["PR details", "checks", "PR comments", "reviews", "review threads"] };
+      let resolveFacts!: (details: PullRequestDetails) => void;
+      const facts = new Promise<PullRequestDetails>((resolve) => { resolveFacts = resolve; });
+      let selfLogin: string | null = null;
+      const failed = (): ConversationData => ({ selfLogin, details: { ...known, pending: undefined,
+        unavailable: [...(known.unavailable ?? []), ...(known.pending ?? [])] } });
+      const finish = ({ details, selfLogin, replies }: ConversationData): ConversationSnapshot => {
+        const coverage = (label: string, success: "complete" | "partial") => details.unavailable?.includes(label) ? "unavailable" : success;
+        return {
+          details, selfLogin, replies, supplied: fromHandoff,
+          metadata: {
+            identity, generation: id, fetchedAt: fromHandoff ? null : new Date().toISOString(),
+            coverage: {
+              details: coverage("PR details", fromHandoff ? "partial" : "complete"),
+              comments: coverage("PR comments", "partial"), reviews: coverage("reviews", "partial"),
+              checks: details.checksUnavailable ? "unavailable" : fromHandoff ? "partial" : "complete",
+              threads: details.threadRead?.coverage ?? (fromHandoff ? "partial" : "unavailable"),
+              identity: selfLogin == null ? "unavailable" : "complete",
+            },
+          },
+        };
+      };
+      const snapshot: Promise<ConversationSnapshot> = Promise.resolve().then(() => read == null
+        ? { details: supplied!, selfLogin: null } : acquire(read, (progress) => {
+          if (current !== entry) return;
+          if (progress.selfLogin !== undefined) selfLogin = progress.selfLogin;
+          if (progress.details != null) {
+            known = progress.details;
+            resolveFacts(known);
+          }
+        }))
+        .catch(failed).then((data) => {
+          if (current !== entry) return current!.snapshot;
+          try {
+            return read?.retain(finish(data)) ?? finish(data);
+          } catch {
+            return finish(failed());
+          }
+        }).then((value) => { resolveFacts(value.details); return value; })
+        .finally(() => { read?.close(); entry.settled = true; });
+      const entry: PendingRead = { facts, snapshot, resolveFacts, settled: false, close: () => read?.close() };
+      current = entry;
+      if (previous != null) {
+        void facts.then(previous.resolveFacts);
+        previous.close();
+      }
+      return entry;
     },
   };
 }

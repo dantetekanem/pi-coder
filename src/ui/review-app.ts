@@ -1695,7 +1695,7 @@ export class ReviewApp {
    * Reads only the current pull request. The race token means a stale response from an earlier
    * refresh is dropped instead of replacing newer data.
    */
-  private loadReplies(): void {
+  private loadReplies(refresh = false): void {
     const source = this.options.repliesSource;
     if (source == null) return;
 
@@ -1703,7 +1703,7 @@ export class ReviewApp {
     const token = this.repliesRequestToken;
     this.repliesPanelState = { status: "loading" };
     this.requestRender();
-    void source.load().then((snapshot) => {
+    void (refresh ? source.load({ refresh: true }) : source.load()).then((snapshot) => {
       if (token !== this.repliesRequestToken) return;
       this.repliesPanelState = { status: "ready", snapshot };
       this.repliesScroll = 0;
@@ -1726,7 +1726,7 @@ export class ReviewApp {
     }
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
-    this.loadReplies();
+    this.loadReplies(true);
     this.setMessage("Refreshing replies for this PR...");
   }
 
