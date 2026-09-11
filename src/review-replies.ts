@@ -38,6 +38,9 @@ export interface ReplyThread {
   id: string;
   resolved: boolean | null;
   outdated?: boolean;
+  side?: "added" | "deleted";
+  headRevision?: string;
+  baseRevision?: string;
   path?: string;
   line?: number | null;
   comments: ReplyThreadComment[];
@@ -62,6 +65,8 @@ const REPLY_THREAD_FIELDS = `
           id
           isResolved
           isOutdated
+          diffSide
+          pullRequest { headRefOid baseRefOid }
           path
           line
           comments(first: 100) {
@@ -175,6 +180,12 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function readSide(value: unknown): ReplyThread["side"] {
+  if (value === "RIGHT" || value === "added") return "added";
+  if (value === "LEFT" || value === "deleted") return "deleted";
+  return undefined;
+}
+
 function readIdentifier(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return readString(value);
@@ -224,7 +235,9 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
       line,
     };
     if (existing == null) {
-      threads.set(threadId, { id: threadId, resolved, ...(path == null ? {} : { path }), line, comments: [comment] });
+      threads.set(threadId, { id: threadId, resolved, ...(path == null ? {} : { path }), line, comments: [comment],
+        side: readSide(readConfiguredField(provider, "commentSide", row)),
+        headRevision: providerString(provider, "commentCommitId", row) });
       continue;
     }
     existing.comments.push(comment);
@@ -277,6 +290,9 @@ export function parseGraphqlReplyThreads(payload: unknown): ReplyThread[] {
       id: threadId,
       resolved: typeof node.isResolved === "boolean" ? node.isResolved : null,
       outdated: typeof node.isOutdated === "boolean" ? node.isOutdated : undefined,
+      side: readSide(node.diffSide),
+      headRevision: isRecord(node.pullRequest) ? readString(node.pullRequest.headRefOid) : undefined,
+      baseRevision: isRecord(node.pullRequest) ? readString(node.pullRequest.baseRefOid) : undefined,
       ...(readString(node.path) == null ? {} : { path: readString(node.path)! }),
       line: typeof node.line === "number" ? node.line : null,
       comments,

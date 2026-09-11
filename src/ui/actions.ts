@@ -27,6 +27,7 @@ export const REVIEW_ACTIONS: ReviewActionDefinition[] = [
   { id: "fullPage", section: "Navigation", keys: "Ctrl+f/b • PageDown/PageUp", label: "full page" },
   { id: "boundary", section: "Navigation", keys: "gg/G", label: "top/bottom" },
   { id: "replyThreads", section: "Navigation", keys: "Replies: t / Enter / o / A", label: "personal/all threads • inspect • browser • read-only analysis" },
+  { id: "threadCode", section: "Navigation", keys: "Thread: v", label: "jump to verified code location" },
   { id: "tree", section: "Navigation", keys: "T", label: "tree/flat files", inputs: ["T"] },
   { id: "order", section: "Navigation", keys: "O", label: "risk/alphabetical file order", inputs: ["O"] },
   { id: "locales", section: "Navigation", keys: "L", label: "show/hide other locales", inputs: ["L"] },

@@ -1528,6 +1528,7 @@ export class ReviewApp {
   private threadRows?: ReviewReplyItem[];
   private openedThread?: ReplyThread;
   private threadScroll = 0;
+  private inputEpoch = 0;
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
   private contextLineCount = 0;
@@ -1860,6 +1861,80 @@ export class ReviewApp {
       return;
     }
     this.openUrlInBrowser(url, "reply");
+  }
+
+  private async jumpThreadToCode(): Promise<void> {
+    const thread = this.openedThread;
+    const data = this.threadData;
+    const metadata = data?.conversation;
+    const scope = this.visibleScopes().includes("all-files") ? "all-files" : this.state.activeScope;
+    const comparisonFor = (file: ReviewFile) => scope === "all-files" ? file.allFiles : scope === "last-commit" ? file.lastCommit : file.gitDiff;
+    const side = thread?.side;
+    const line = thread?.line;
+    const pathFor = (file: ReviewFile) => {
+      const comparison = comparisonFor(file);
+      const path = side === "deleted" ? comparison?.oldPath : comparison?.newPath;
+      return path == null ? undefined : joinReviewPath(file.pathPrefix, path);
+    };
+    const file = this.files.find((candidate) => thread?.path != null && pathFor(candidate) === thread.path);
+    const comparison = file == null ? null : comparisonFor(file);
+    const unavailable = () => {
+      this.setMessage("Thread anchor is not verified in this review.");
+      this.requestRender();
+    };
+    if (thread == null || data == null || file == null || comparison == null
+      || (side !== "added" && side !== "deleted") || line == null || !Number.isSafeInteger(line) || line < 1) return unavailable();
+    const { headRevision, baseRevision, path } = thread;
+    const threads = data.threads;
+    const anchor = () => JSON.stringify([thread.id, thread.side, thread.path, thread.line,
+      thread.headRevision, thread.baseRevision, thread.outdated]);
+    const initialAnchor = anchor();
+    const oid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+    const position = () => JSON.stringify([this.state.activeFileId, this.state.activeScope, this.state.focus,
+      getSelectedLineTarget(this.state, this.state.activeFileId, this.state.activeScope)]);
+    const initialPosition = position();
+    const epoch = this.inputEpoch;
+    const isCurrent = () => {
+      if (this.disposed || this.inputEpoch !== epoch || position() !== initialPosition || anchor() !== initialAnchor) return false;
+      const current = this.options.repliesSource?.threadData;
+      return this.repoRoot === this.options.repoRoot && this.files.includes(file) && this.openedThread === thread
+        && this.threadData === data && this.conversation === metadata && data.threads === threads && threads.includes(thread)
+        && current?.threads === threads && current?.conversation === metadata
+        && thread.outdated !== true && oid.test(headRevision ?? "") && headRevision === this.options.reviewHeader?.revision
+        && comparisonFor(file) === comparison && comparison.modifiedRevision === headRevision && pathFor(file) === path
+        && (side !== "deleted" || (oid.test(baseRevision ?? "") && comparison.originalRevision === baseRevision));
+    };
+    if (!isCurrent()) return unavailable();
+    try {
+      const key = this.cacheKey(file.id, scope);
+      const cached = this.cache.get(key);
+      const contents = cached?.status === "ready" ? cached.contents : await this.options.loadFileContents(this.repoRoot, file, scope);
+      if (!isCurrent()) return;
+      const text = side === "added" ? contents.modifiedContent : contents.originalContent;
+      const available = side === "added" ? contents.modifiedAvailable : contents.originalAvailable;
+      if (available === false || line > logicalLineCount(text)) return unavailable();
+      const baseDiff = cached?.status === "ready" ? cached.baseDiff : buildStructuredDiff(contents.originalContent, contents.modifiedContent, DEFAULT_CONTEXT_LINES);
+      const row = baseDiff.rows.findIndex((item) => side === "added" ? item.newLineNumber === line : item.oldLineNumber === line);
+      if (row < 0) return unavailable();
+      const expanded = new Set(this.expandedContextRows.get(key) ?? []);
+      for (let index = Math.max(0, row - DEFAULT_CONTEXT_LINES); index <= Math.min(baseDiff.rows.length - 1, row + DEFAULT_CONTEXT_LINES); index += 1) expanded.add(index);
+      setBoundedMapEntry(this.cache, key, { status: "ready", contents, baseDiff }, MAX_LOADED_FILE_ENTRIES);
+      this.expandedContextRows.set(key, expanded);
+      this.diffLayoutCache.clear();
+      this.contextLineNavigation = true;
+      if (side === "deleted" && baseDiff.rows[row]!.newLineNumber != null) this.diffViewMode = "side-by-side";
+      this.state = setSelectedLineTarget({ ...this.state, activeScope: scope, activeFileId: file.id, focus: "diff", searchQuery: "", hideUnchanged: false }, file.id, scope, { side, line });
+      this.relatedFilterAnchorFileId = null;
+      this.relatedFilterReturnFileId = null;
+      this.showAllLocales = true;
+      this.paneVisibility = { ...this.paneVisibility, diff: true };
+      this.diffScroll = 0;
+      this.message = null;
+    } catch (error) {
+      if (isCurrent()) this.setMessage(`Could not load thread code: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.requestRender();
+    }
   }
 
   /** Read-only, explicitly requested, and never posts anything back to the provider. */
@@ -3795,6 +3870,7 @@ export class ReviewApp {
   }
 
   handleInput(data: string): void {
+    this.inputEpoch += 1;
     if (this.reanchorTarget != null) {
       this.handleReanchorInput(data);
       return;
@@ -3907,6 +3983,7 @@ export class ReviewApp {
         return this.moveReplySelection(-Number.MAX_SAFE_INTEGER);
       }
       if (data === "o") { this.openReplyUrl(); return; }
+      if (data === "v" && this.openedThread != null) { void this.jumpThreadToCode(); return; }
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveReplySelection(1);
         return;
@@ -4646,7 +4723,7 @@ export class ReviewApp {
       pushWrappedText(heading, this.theme, "Thread absent from latest fetched data; showing the previous copy.", contentWidth);
     }
     pushWrappedText(heading, this.theme, this.conversationStatus(this.threadData?.conversation), contentWidth, "dim");
-    pushWrappedText(heading, this.theme, `↑↓/PgUp/PgDn scroll • gg/G ends • Esc back • o browser • A analyze • r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`, contentWidth, "dim");
+    pushWrappedText(heading, this.theme, `↑↓/PgUp/PgDn scroll • gg/G ends • Esc back • v code • o browser • A analyze • r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`, contentWidth, "dim");
     heading.length = Math.min(heading.length, Math.max(0, height - 3));
     if (this.threadBodyCache?.thread !== thread || this.threadBodyCache.width !== contentWidth) {
       this.threadBodyCache = { thread, width: contentWidth, lines: thread.comments.flatMap((comment) => [

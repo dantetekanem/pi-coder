@@ -16,6 +16,7 @@
 - Page through REST comments and reviews within shared read limits, honoring HTTP status and retaining interrupted progress without following supplied Link hosts.
 - Refresh or resume PR conversation from either pane without losing review position, retaining usable data on failure and separating fetched coverage from preview limits.
 - Inspect all fetched thread text beyond reply previews, retain missing refreshed threads with a warning, and analyze full threads read-only with safe multiline text.
+- Navigate from a PR thread only to a verified current-revision code location, revealing unchanged lines and cancelling delayed jumps after later interaction.
 
 ## 0.6.2 - 2026-09-02
 
