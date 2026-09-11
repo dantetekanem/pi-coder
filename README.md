@@ -79,6 +79,7 @@ Common review controls:
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
 | Replies: `t` / `Enter` / `o` / `A` | Switch personal/all fetched threads; inspect full text; open browser; analyze read-only. PgUp/PgDn and gg/G scroll; Esc returns. |
+| Opened thread: `e` | Edit a response buffer for this review window only |
 
 ### Current PR context
 
@@ -91,6 +92,8 @@ PR context and Replies distinguish missing resolution from an unresolved thread.
 Both panes label incomplete thread reads. An empty partial result means no replies were found in the fetched threads, not that the whole PR conversation is empty.
 
 PR context and Replies share pending reads within a review window. Supplied context stays read-free until refresh; it has no authenticated viewer or stable thread IDs. In either pane, press `r` for a fresh generation, even at the same head, or `m` to resume a ready continuation. The header shows the latest read's generation, time, coverage, and known open/unknown-resolution counts. Failed refreshes retain usable panes with their original metadata. Reply selection and context scroll are preserved. Replies shows fetched totals separately from the 100-reply and 1,200-character preview limits.
+
+From an opened thread, `e` restores its response buffer or starts from that thread's analyzed suggestion. `Enter`, `Esc`, or `Ctrl+C` keeps the buffer; `Shift+Enter` inserts a newline. Buffers survive thread changes and refreshes within this window. They never become review feedback, go to the provider, or survive closing the window, including when parking a review.
 
 ## Browse and edit code
 

@@ -28,6 +28,7 @@ export const REVIEW_ACTIONS: ReviewActionDefinition[] = [
   { id: "boundary", section: "Navigation", keys: "gg/G", label: "top/bottom" },
   { id: "replyThreads", section: "Navigation", keys: "Replies: t / Enter / o / A", label: "personal/all threads • inspect • browser • read-only analysis" },
   { id: "threadCode", section: "Navigation", keys: "Thread: v", label: "jump to verified code location" },
+  { id: "threadResponse", section: "Navigation", keys: "Thread: e", label: "edit window-only response" },
   { id: "tree", section: "Navigation", keys: "T", label: "tree/flat files", inputs: ["T"] },
   { id: "order", section: "Navigation", keys: "O", label: "risk/alphabetical file order", inputs: ["O"] },
   { id: "locales", section: "Navigation", keys: "L", label: "show/hide other locales", inputs: ["L"] },

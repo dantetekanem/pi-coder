@@ -17,6 +17,7 @@
 - Refresh or resume PR conversation from either pane without losing review position, retaining usable data on failure and separating fetched coverage from preview limits.
 - Inspect all fetched thread text beyond reply previews, retain missing refreshed threads with a warning, and analyze full threads read-only with safe multiline text.
 - Navigate from a PR thread only to a verified current-revision code location, revealing unchanged lines and cancelling delayed jumps after later interaction.
+- Edit per-thread response buffers within the open review window without submitting feedback, sending replies, or saving responses across close.
 
 ## 0.6.2 - 2026-09-02
 

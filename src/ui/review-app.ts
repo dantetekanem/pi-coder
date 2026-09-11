@@ -1529,6 +1529,8 @@ export class ReviewApp {
   private openedThread?: ReplyThread;
   private threadScroll = 0;
   private inputEpoch = 0;
+  private readonly responseDrafts = new Map<string, string>();
+  private editingResponse: string | null = null;
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
   private contextLineCount = 0;
@@ -1628,10 +1630,11 @@ export class ReviewApp {
   }
 
   private syncCursorMode(): void {
+    const responseEditing = this.editingResponse != null;
     if (typeof this.tui.setShowHardwareCursor === "function") {
-      this.tui.setShowHardwareCursor(this.editTarget != null || this.previousHardwareCursor);
+      this.tui.setShowHardwareCursor(this.editTarget != null || responseEditing || this.previousHardwareCursor);
     }
-    (this.editor as unknown as { focused?: boolean }).focused = this.editTarget != null && this.editTarget.intent !== "modify";
+    this.editor.focused = responseEditing || (this.editTarget != null && this.editTarget.intent !== "modify");
   }
 
   private getSessionData(): ReviewSessionData {
@@ -1657,7 +1660,7 @@ export class ReviewApp {
     if (this.disposed) return;
     if (typeof this.tui.requestRender === "function") this.tui.requestRender();
     if (this.options.onSessionChange == null) return;
-    if (this.editTarget != null) {
+    if (this.editTarget != null || this.editingResponse != null) {
       if (this.sessionSaveTimer != null) clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
       return;
@@ -1861,6 +1864,18 @@ export class ReviewApp {
       return;
     }
     this.openUrlInBrowser(url, "reply");
+  }
+
+  private openResponseDraft(): void {
+    const thread = this.openedThread;
+    if (thread == null) return;
+    const analysis = this.replyAnalysis;
+    const suggestion = analysis.status === "ready" && analysis.replyId === `thread:${thread.id}`
+      ? analysis.text.match(/Suggested response[:.]?\s*\n?([\s\S]*)$/i)?.[1]?.trim() ?? "" : "";
+    this.editingResponse = thread.id;
+    this.editor.setText(this.responseDrafts.get(thread.id) ?? suggestion);
+    this.syncCursorMode();
+    this.requestRender();
   }
 
   private async jumpThreadToCode(): Promise<void> {
@@ -3871,6 +3886,16 @@ export class ReviewApp {
 
   handleInput(data: string): void {
     this.inputEpoch += 1;
+    if (this.editingResponse != null) {
+      const id = this.editingResponse;
+      if (matchesKey(data, Key.shift("enter"))) this.editor.handleInput("\n");
+      else if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.editingResponse = null;
+      else this.editor.handleInput(data);
+      this.responseDrafts.set(id, this.editor.getExpandedText());
+      this.syncCursorMode();
+      this.requestRender();
+      return;
+    }
     if (this.reanchorTarget != null) {
       this.handleReanchorInput(data);
       return;
@@ -3984,6 +4009,7 @@ export class ReviewApp {
       }
       if (data === "o") { this.openReplyUrl(); return; }
       if (data === "v" && this.openedThread != null) { void this.jumpThreadToCode(); return; }
+      if (data === "e" && this.openedThread != null) { this.openResponseDraft(); return; }
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveReplySelection(1);
         return;
@@ -4718,12 +4744,21 @@ export class ReviewApp {
   private renderThread(width: number, height: number): string[] {
     const thread = this.openedThread!;
     const contentWidth = Math.max(1, width - 2);
+    if (this.editingResponse != null) {
+      const heading = ["Window only; never sent or saved on close.", "Enter/Esc/Ctrl+C keep • Shift+Enter newline"]
+        .slice(0, Math.max(0, height - 3)).map((line) => this.theme.fg("dim", line));
+      const lines = this.editor.render(contentWidth);
+      const available = Math.max(1, height - 2 - heading.length);
+      const cursor = lines.findIndex((line) => line.includes(CURSOR_MARKER));
+      const start = Math.max(0, cursor - available + 1);
+      return renderBox("Response draft", width, height, this.theme, [...heading, ...lines.slice(start, start + available)], true);
+    }
     const heading: string[] = [];
     if (!this.threadData?.threads.some((item) => item.id === thread.id)) {
       pushWrappedText(heading, this.theme, "Thread absent from latest fetched data; showing the previous copy.", contentWidth);
     }
     pushWrappedText(heading, this.theme, this.conversationStatus(this.threadData?.conversation), contentWidth, "dim");
-    pushWrappedText(heading, this.theme, `↑↓/PgUp/PgDn scroll • gg/G ends • Esc back • v code • o browser • A analyze • r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`, contentWidth, "dim");
+    pushWrappedText(heading, this.theme, `↑↓/PgUp/PgDn scroll • gg/G ends • Esc back • v code • o browser • A analyze • e response • r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`, contentWidth, "dim");
     heading.length = Math.min(heading.length, Math.max(0, height - 3));
     if (this.threadBodyCache?.thread !== thread || this.threadBodyCache.width !== contentWidth) {
       this.threadBodyCache = { thread, width: contentWidth, lines: thread.comments.flatMap((comment) => [
@@ -5018,6 +5053,8 @@ export class ReviewApp {
         ? "Help open • ? toggle • Esc close"
         : allPanesHiddenStatus ?? this.message ?? (this.searchMode
           ? `Search ${formatFocusStatus(this.searchPane).replace("Focus: ", "")}: ${this.searchBuffer}`
+          : this.editingResponse != null
+            ? "Editing response • Enter/Esc keep in this window • Shift+Enter newline"
           : this.editTarget != null
             ? `Editing ${formatIntentLabel(this.editTarget.intent).toLowerCase()} comment`
             : `${formatFocusStatus(this.state.focus)} • ${layoutStatus}Tab/←/→ focus • / search • t templates • v diff view • ? help • ${scopeHint}1/2/3/4/5 panes • o open in /code • e open in $EDITOR • s submit${this.frameStack.length > 0 ? " • b parent" : ""} • Esc exit • Ctrl+C exit`));

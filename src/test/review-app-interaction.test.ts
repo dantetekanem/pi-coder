@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot, ReviewRepliesPanelSource } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
@@ -1536,6 +1536,89 @@ describe("Replies pane", () => {
     return { ...harness, data, file, contents, load };
   }
 
+  it.each(["\r", "\u001b", "\u0003"])("keeps window-local thread responses after %j without sending or saving them", async (closeKey) => {
+    const { app, data, done } = await createAnchoredThread();
+    const view = app as any;
+    view.options.repliesSource.analyze = vi.fn(async () => "Suggested response:\nThanks.\nNext.");
+    const load = vi.spyOn(view.options.repliesSource, "load");
+    const save = vi.fn();
+    view.options.onSessionChange = save;
+    const before = structuredClone(view.state);
+    if (closeKey === "\r") app.handleInput("\u001b");
+    app.handleInput("A");
+    await vi.waitFor(() => expect(view.replyAnalysis.status).toBe("ready"));
+    if (closeKey === "\r") app.handleInput("\r");
+    app.handleInput("e");
+    expect(view.editor.getExpandedText()).toBe("Thanks.\nNext.");
+    expect(view.tui.setShowHardwareCursor).toHaveBeenLastCalledWith(true);
+    for (const key of "rAv5") app.handleInput(key);
+    app.handleInput("\u001b[13;2u");
+    app.handleInput("Window text");
+    const expected = "Thanks.\nNext.rAv5\nWindow text";
+    expect(view.editor.getExpandedText()).toBe(expected);
+    expect(load).not.toHaveBeenCalled();
+    app.handleInput(closeKey);
+    expect(view.editingResponse).toBeNull();
+    expect(view.tui.setShowHardwareCursor).toHaveBeenLastCalledWith(false);
+    app.handleInput("\u001b");
+    app.handleInput("t");
+    app.handleInput("j");
+    app.handleInput("\r");
+    app.handleInput("e");
+    expect(view.editor.getExpandedText()).toBe("");
+    app.handleInput(closeKey);
+    app.handleInput("A");
+    await vi.waitFor(() => expect(view.replyAnalysis).toMatchObject({ status: "ready", replyId: "thread:other-0" }));
+    app.handleInput("e");
+    expect(view.editor.getExpandedText()).toBe("");
+    const other = "Other response\n".repeat(12);
+    app.handleInput(`\u001b[200~${other}\u001b[201~`);
+    app.handleInput(closeKey);
+    app.handleInput("e");
+    expect(view.editor.getExpandedText()).toBe(other);
+    app.handleInput(closeKey);
+    app.handleInput("\u001b");
+    app.handleInput("g");
+    app.handleInput("g");
+    app.handleInput("\r");
+    app.handleInput("e");
+    expect(view.editor.getExpandedText()).toBe(expected);
+    app.handleInput(closeKey);
+    data.conversation = conversation(2);
+    data.threads = data.threads.map((thread) => ({ ...thread }));
+    app.handleInput("r");
+    expect(view.repliesRefreshing).toBe(true);
+    app.handleInput("e");
+    app.handleInput(" during refresh");
+    await vi.waitFor(() => expect(view.repliesRefreshing).toBe(false));
+    expect(view.editor.getExpandedText()).toBe(`${expected} during refresh`);
+    app.handleInput(closeKey);
+    expect(view.state).toEqual(before);
+    expect(done).not.toHaveBeenCalled();
+    app.dispose();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ state: before }));
+    expect(JSON.stringify(save.mock.calls)).not.toMatch(/Window text|Other response/);
+    const reopened = await createAnchoredThread();
+    reopened.app.handleInput("e");
+    expect((reopened.app as any).editor.getExpandedText()).toBe("");
+    reopened.app.dispose();
+  });
+
+  it("keeps the native response cursor visible in short panes", async () => {
+    const { app } = await createAnchoredThread();
+    app.handleInput("e");
+    (app as any).editor.setText(Array.from({ length: 40 }, (_, index) => `line-${index}`).join("\n"));
+    app.handleInput("cursor");
+    for (const height of [3, 8]) {
+      const lines: string[] = (app as any).renderThread(30, height);
+      expect(lines).toHaveLength(height);
+      expect(lines.find((line) => line.includes(CURSOR_MARKER))).toContain("cursor");
+      expect(lines.every((line) => visibleWidth(line) <= 30)).toBe(true);
+    }
+    expect((app as any).editor.getExpandedText()).toContain("line-39cursor");
+    app.dispose();
+  });
+
   it.each([
     "valid", "deleted", "prefix", "all-files", "deleted all-files", "outdated", "unknown side", "unknown head", "different head", "comparison",
     "unknown base", "different base", "mutable base", "unavailable", "deleted unavailable", "path", "fractional", "zero", "bounds", "missing line",
@@ -1593,6 +1676,7 @@ describe("Replies pane", () => {
 
   it.each([
     "stay", "close", "close reject", "scroll", "dispose", "refresh", "snapshot", "comparison", "reject", "empty",
+    "edit response", "edit response reject",
     ...["threads", "id", "side", "path", "line", "headRevision", "baseRevision", "outdated"].flatMap((field) => [field, `${field} reject`]),
   ])("validates unloaded thread destinations before navigation: %s", async (action) => {
     const pending = deferred<ReviewFileContents>();
@@ -1608,6 +1692,12 @@ describe("Replies pane", () => {
     if (field === "threads") data.threads = [...data.threads];
     if (Object.hasOwn(mutations, field)) Object.assign(data.threads[0]!, { [field]: mutations[field as keyof typeof mutations] });
     if (action.startsWith("close")) app.handleInput("\u001b");
+    if (action.startsWith("edit response")) {
+      app.handleInput("e");
+      app.handleInput("Pending response");
+      expect((app as any).editingResponse).toBe(data.threads[0]!.id);
+      expect((app as any).editor.getExpandedText()).toBe("Pending response");
+    }
     if (action === "scroll") app.handleInput("j");
     if (action === "dispose") app.dispose();
     if (action === "refresh" || action === "snapshot") data.conversation = conversation(2);
