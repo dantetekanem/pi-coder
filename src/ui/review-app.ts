@@ -38,7 +38,8 @@ import type { ReviewSessionData } from "../review-session.js";
 import { applyResolvedSeedComments, type ResolvedSeedComment } from "../seed-comments.js";
 import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from "../shortcuts.js";
 import { filterFilesBySearch } from "../search.js";
-import { sanitizeTerminalText } from "../sanitize.js";
+import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
+import type { ReplyThread } from "../review-replies.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
 import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
@@ -1523,6 +1524,11 @@ export class ReviewApp {
   private repliesScroll = 0;
   private repliesPageSize = 1;
   private selectedReplyIndex = 0;
+  private threadData: ReviewRepliesPanelSource["threadData"];
+  private threadRows?: ReviewReplyItem[];
+  private openedThread?: ReplyThread;
+  private threadScroll = 0;
+  private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
   private contextLineCount = 0;
   private navigatorPageSize = 1;
@@ -1727,6 +1733,7 @@ export class ReviewApp {
       if (!this.disposed && token === this.repliesRequestToken) this.applyReplies(snapshot);
     }).catch((error: unknown) => {
       if (this.disposed || token !== this.repliesRequestToken) return;
+      this.acceptConversation(source.threadData?.conversation);
       const message = error instanceof Error ? error.message : String(error);
       if (this.repliesPanelState.status !== "ready") this.repliesPanelState = { status: "error", error: sanitizeTerminalText(message) };
       else this.setMessage(`Could not refresh replies: ${message}`);
@@ -1757,6 +1764,18 @@ export class ReviewApp {
     if (metadata != null && previous != null && (metadata.identity !== previous.identity || metadata.generation < previous.generation
       || (metadata.generation === previous.generation && (metadata.attempt ?? 0) < (previous.attempt ?? 0)))) return false;
     if (metadata != null) this.conversation = metadata;
+    const data = this.options.repliesSource?.threadData;
+    if (data != null && data.conversation === metadata && metadata !== this.threadData?.conversation) {
+      const selected = this.selectedReply()?.threadId;
+      this.threadData = data;
+      if (this.threadRows) {
+        this.threadRows = data.threads.map((thread) => this.threadReply(thread));
+        this.selectedReplyIndex = Math.max(0, data.threads.findIndex((thread) => thread.id === selected));
+      }
+      this.openedThread = data.threads.find((thread) => thread.id === this.openedThread?.id) ?? this.openedThread;
+      this.replyAnalysis = { status: "idle" };
+      this.analysisRequestToken += 1;
+    }
     return true;
   }
 
@@ -1765,9 +1784,10 @@ export class ReviewApp {
     const old = this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot : undefined;
     if (snapshot.conversation != null && old?.conversation === snapshot.conversation && old.replies === snapshot.replies) return;
     const selected = this.selectedReply()?.id;
-    const index = snapshot.replies.findIndex((reply) => reply.id === selected);
     this.repliesPanelState = { status: "ready", snapshot };
-    this.selectedReplyIndex = index >= 0 ? index : Math.min(this.selectedReplyIndex, Math.max(0, snapshot.replies.length - 1));
+    const replies = this.getReplies();
+    const index = replies.findIndex((reply) => reply.id === selected);
+    this.selectedReplyIndex = index >= 0 ? index : Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1));
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
   }
@@ -1780,7 +1800,15 @@ export class ReviewApp {
     return sanitizeTerminalText(`${this.repliesRefreshing ? "Reading • " : ""}Generation ${metadata.generation}.${metadata.attempt ?? 1} • ${metadata.fetchedAt ?? "fetch time unknown"} • ${status.join(", ")}`);
   }
 
+  private threadReply(thread: ReplyThread): ReviewReplyItem {
+    const first = thread.comments[0];
+    return { id: `thread:${thread.id}`, threadId: thread.id, commentId: first?.id ?? thread.id,
+      author: first?.author ?? "unknown", body: (first?.body ?? "").slice(0, 1200),
+      path: thread.path, line: thread.line ?? null, resolved: thread.resolved, url: thread.comments.find((comment) => comment.url)?.url };
+  }
+
   private getReplies(): ReviewReplyItem[] {
+    if (this.threadRows) return this.threadRows;
     return this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot.replies : [];
   }
 
@@ -1791,6 +1819,11 @@ export class ReviewApp {
   }
 
   private moveReplySelection(delta: number): void {
+    if (this.openedThread != null) {
+      this.threadScroll = Math.max(0, this.threadScroll + delta);
+      this.requestRender();
+      return;
+    }
     const replies = this.getReplies();
     if (replies.length === 0) {
       this.requestRender();
@@ -1806,7 +1839,15 @@ export class ReviewApp {
   }
 
   private openSelectedReply(): void {
-    const reply = this.selectedReply();
+    const thread = this.threadData?.threads.find((item) => item.id === this.selectedReply()?.threadId);
+    if (thread == null) return this.openReplyUrl();
+    this.openedThread = thread;
+    this.threadScroll = 0;
+    this.requestRender();
+  }
+
+  private openReplyUrl(): void {
+    const reply = this.openedThread == null ? this.selectedReply() : this.threadReply(this.openedThread);
     if (reply == null) {
       this.setMessage("No reply is selected.");
       this.requestRender();
@@ -1824,7 +1865,9 @@ export class ReviewApp {
   /** Read-only, explicitly requested, and never posts anything back to the provider. */
   private analyzeSelectedReply(): void {
     const source = this.options.repliesSource;
-    const reply = this.selectedReply();
+    const thread = this.openedThread ?? this.threadData?.threads.find((item) => item.id === this.selectedReply()?.threadId);
+    const reply = thread == null ? this.selectedReply() : { ...this.threadReply(thread),
+      body: thread.comments.map((comment) => `${sanitizeTerminalText(comment.author)}:\n${sanitizeTerminalMultilineText(comment.body)}`).join("\n\n").slice(0, 24000) };
     if (source?.analyze == null) {
       this.setMessage("Reply analysis is not available in this review.");
       this.requestRender();
@@ -1846,11 +1889,11 @@ export class ReviewApp {
     this.replyAnalysis = { status: "loading", replyId: reply.id };
     this.requestRender();
     void source.analyze(reply).then((text) => {
-      if (token !== this.analysisRequestToken) return;
-      this.replyAnalysis = { status: "ready", replyId: reply.id, text: sanitizeTerminalText(text) };
+      if (this.disposed || token !== this.analysisRequestToken) return;
+      this.replyAnalysis = { status: "ready", replyId: reply.id, text: sanitizeTerminalMultilineText(text) };
       this.requestRender();
     }).catch((error: unknown) => {
-      if (token !== this.analysisRequestToken) return;
+      if (this.disposed || token !== this.analysisRequestToken) return;
       const message = error instanceof Error ? error.message : String(error);
       this.replyAnalysis = { status: "error", replyId: reply.id, error: sanitizeTerminalText(message) };
       this.requestRender();
@@ -3628,6 +3671,7 @@ export class ReviewApp {
     }
 
     if (this.state.focus === "replies") {
+      if (this.openedThread != null) return this.moveReplySelection(direction === "start" ? -Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER);
       const replies = this.getReplies();
       if (replies.length === 0) return;
       this.selectedReplyIndex = direction === "start" ? 0 : replies.length - 1;
@@ -3842,6 +3886,11 @@ export class ReviewApp {
     if (data === "/") { this.openSearch(); return; }
     if (matchesKey(data, Key.ctrl("f"))) { this.moveFocusedSelection(this.focusedPageSize()); return; }
     if (matchesKey(data, Key.ctrl("b"))) { this.moveFocusedSelection(-this.focusedPageSize()); return; }
+    if (this.state.focus === "replies" && this.openedThread != null && (matchesKey(data, Key.escape) || matchesKey(data, Key.enter))) {
+      this.openedThread = undefined;
+      this.requestRender();
+      return;
+    }
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.requestCancel(); return; }
 
     if ((this.state.focus === "context" || this.state.focus === "replies") && (data === "r" || data === "m")) {
@@ -3852,6 +3901,12 @@ export class ReviewApp {
       return;
     }
     if (this.state.focus === "replies") {
+      if (data === "t" && this.threadData != null) {
+        this.threadRows = this.threadRows ? undefined : this.threadData.threads.map((thread) => this.threadReply(thread));
+        this.openedThread = undefined;
+        return this.moveReplySelection(-Number.MAX_SAFE_INTEGER);
+      }
+      if (data === "o") { this.openReplyUrl(); return; }
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveReplySelection(1);
         return;
@@ -4583,7 +4638,34 @@ export class ReviewApp {
     return renderBox(source.title, width, height, this.theme, [...header, ...lines.slice(this.contextScroll, this.contextScroll + bodyHeight)], focused);
   }
 
+  private renderThread(width: number, height: number): string[] {
+    const thread = this.openedThread!;
+    const contentWidth = Math.max(1, width - 2);
+    const heading: string[] = [];
+    if (!this.threadData?.threads.some((item) => item.id === thread.id)) {
+      pushWrappedText(heading, this.theme, "Thread absent from latest fetched data; showing the previous copy.", contentWidth);
+    }
+    pushWrappedText(heading, this.theme, this.conversationStatus(this.threadData?.conversation), contentWidth, "dim");
+    pushWrappedText(heading, this.theme, `↑↓/PgUp/PgDn scroll • gg/G ends • Esc back • o browser • A analyze • r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`, contentWidth, "dim");
+    heading.length = Math.min(heading.length, Math.max(0, height - 3));
+    if (this.threadBodyCache?.thread !== thread || this.threadBodyCache.width !== contentWidth) {
+      this.threadBodyCache = { thread, width: contentWidth, lines: thread.comments.flatMap((comment) => [
+        sanitizeTerminalText([comment.author, comment.createdAt].filter(Boolean).join(" • ")),
+        ...wrapTextWithAnsi(sanitizeTerminalMultilineText(comment.body), contentWidth), "",
+      ]) };
+    }
+    const analysis = this.replyAnalysis;
+    const text = analysis.status === "idle" || analysis.replyId !== `thread:${thread.id}` ? ""
+      : analysis.status === "loading" ? "Analyzing thread…" : analysis.status === "error" ? `Analysis failed: ${analysis.error}` : analysis.text;
+    const body = this.threadBodyCache.lines.concat(wrapTextWithAnsi(text, contentWidth));
+    this.repliesPageSize = Math.max(1, height - 2 - heading.length);
+    this.threadScroll = Math.max(0, Math.min(this.threadScroll, body.length - this.repliesPageSize));
+    return renderBox("Thread", width, height, this.theme,
+      [...heading, ...body.slice(this.threadScroll, this.threadScroll + this.repliesPageSize)], this.state.focus === "replies");
+  }
+
   private renderRepliesPanel(width: number, height: number): string[] {
+    if (this.openedThread != null) return this.renderThread(width, height);
     const source = this.options.repliesSource;
     const focused = this.state.focus === "replies";
     const lines: string[] = [];
@@ -4596,35 +4678,38 @@ export class ReviewApp {
       return renderBox("Replies", width, height, this.theme, lines, false);
     }
 
-    if (this.repliesPanelState.status === "idle" || this.repliesPanelState.status === "loading") {
+    if (!this.threadRows && (this.repliesPanelState.status === "idle" || this.repliesPanelState.status === "loading")) {
       pushWrappedText(lines, this.theme, source.loadingText, contentWidth);
       this.repliesScroll = 0;
       this.repliesPageSize = bodyHeight;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
     }
 
-    if (this.repliesPanelState.status === "error") {
+    if (!this.threadRows && this.repliesPanelState.status === "error") {
       lines.push(this.theme.fg("error", "Could not load replies."));
+      if (this.threadData != null) pushWrappedText(lines, this.theme, "t all fetched threads", contentWidth);
       pushWrappedText(lines, this.theme, this.repliesPanelState.error, contentWidth, "muted");
       this.repliesScroll = 0;
       this.repliesPageSize = bodyHeight;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
     }
 
-    const snapshot = this.repliesPanelState.snapshot;
-    const replies = snapshot.replies;
-    const partial = (snapshot.conversation?.coverage.threads ?? snapshot.threadCoverage) !== "complete" || snapshot.conversation?.fetchedAt === null;
+    const snapshot = this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot : undefined;
+    const replies = this.getReplies();
+    const metadata = this.threadRows ? this.threadData?.conversation : snapshot?.conversation;
+    const partial = (metadata?.coverage.threads ?? snapshot?.threadCoverage) !== "complete" || metadata?.fetchedAt === null;
     this.selectedReplyIndex = Math.max(0, Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1)));
-    pushWrappedText(lines, this.theme, snapshot.totalReplies == null ? `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`
+    pushWrappedText(lines, this.theme, this.threadRows ? `${replies.length} fetched threads` : snapshot?.totalReplies == null ? `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`
       : `Showing ${replies.length} of ${snapshot.totalReplies} fetched replies`, contentWidth);
-    pushWrappedText(lines, this.theme, this.conversationStatus(snapshot.conversation), contentWidth, "dim");
-    lines.push(this.theme.fg("dim", `↑↓ select • Enter open • r refresh${snapshot.conversation?.continuation == null ? "" : " • m load more"} • A analyze`));
-    if (snapshot.previewLimit != null) pushWrappedText(lines, this.theme, `Previews limited to ${snapshot.previewLimit} characters.`, contentWidth, "dim");
+    pushWrappedText(lines, this.theme, this.conversationStatus(metadata), contentWidth, "dim");
+    lines.push(this.theme.fg("dim", `↑↓ select • Enter open • r refresh${metadata?.continuation == null ? "" : " • m load more"} • A analyze`));
+    if (this.threadData != null) pushWrappedText(lines, this.theme, `t ${this.threadRows ? "personal replies" : "all fetched threads"} • o browser`, contentWidth, "dim");
+    if (!this.threadRows && snapshot?.previewLimit != null) pushWrappedText(lines, this.theme, `Previews limited to ${snapshot.previewLimit} characters.`, contentWidth, "dim");
     if (partial) pushWrappedText(lines, this.theme, "Thread read incomplete.", contentWidth, "dim");
     lines.push("");
 
     if (replies.length === 0) {
-      lines.push(this.theme.fg("dim", partial ? "No replies in fetched threads." : "No replies to review."));
+      lines.push(this.theme.fg("dim", this.threadRows ? "No threads in fetched data." : partial ? "No replies in fetched threads." : "No replies to review."));
       this.repliesScroll = 0;
       this.repliesPageSize = 1;
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
@@ -4644,13 +4729,14 @@ export class ReviewApp {
       block.push(...buildCommentPanelTextLines(this.theme, width, reply.body, "muted", "   ", 4));
 
       const analysis = this.replyAnalysis;
-      if (selected && analysis.status !== "idle" && analysis.replyId === reply.id) {
+      if (selected && analysis.status !== "idle" && (analysis.replyId === reply.id || analysis.replyId === `thread:${reply.threadId}`)) {
         if (analysis.status === "loading") {
           pushWrappedText(block, this.theme, "Analyzing reply…", contentWidth, "dim", "   ");
         } else if (analysis.status === "error") {
           block.push(...buildCommentPanelTextLines(this.theme, width, `Analysis failed: ${analysis.error}`, "muted", "   ", 5));
         } else {
-          block.push(...buildCommentPanelTextLines(this.theme, width, `Analysis: ${analysis.text}`, "muted", "   ", 5));
+          block.push(...`Analysis: ${analysis.text}`.split("\n")
+            .flatMap((line) => buildCommentPanelTextLines(this.theme, width, line, "muted", "   ", 5)).slice(0, 5));
         }
       }
       block.push("");

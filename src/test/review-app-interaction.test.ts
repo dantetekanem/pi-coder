@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
+import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot, ReviewRepliesPanelSource } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import * as piRender from "../pi-render.js";
@@ -1502,6 +1502,85 @@ describe("Replies pane", () => {
     pending.resolve(makeRepliesSnapshot(1));
     await pending.promise;
     expect((app as any).repliesPanelState.snapshot).toBe(retained);
+    app.dispose();
+  });
+
+  function fetchedThreads(): NonNullable<ReviewRepliesPanelSource["threadData"]> {
+    return { conversation: { ...conversation(), threadCounts: { open: 1, unknown: 101 } }, threads: [{ id: "thread-0", resolved: false, path: "src/app.ts", line: 1,
+      comments: [{ id: "self", author: "author", body: "Original question" },
+        { id: "comment-0", author: "unknown", body: `Full reply ${"x".repeat(1800)}\nTAIL\n${"z".repeat(30000)}\nFINAL\\x07\u0007`, url: makeReply(0).url }] },
+      ...Array.from({ length: 101 }, (_, index) => ({ id: `other-${index}`, resolved: null,
+        comments: [{ id: `other-comment-${index}`, author: "other", body: `Unrelated thread ${index}` }] }))] };
+  }
+
+  it.each([false, true])("inspects all full fetched text without requiring viewer identity: %s", async (unknownViewer) => {
+    const data = fetchedThreads();
+    if (unknownViewer) data.conversation.coverage.identity = "unavailable";
+    const openUrl = vi.fn(async (url: string) => ({ status: "opened" as const, url }));
+    const analyze = vi.fn(async (_reply: ReviewReplyItem) => "Asks:\nClarify.\nSuggested response:\nThanks.\u001b[31m");
+    const { app, done, loadFileContents } = createHarness(undefined, undefined, { openUrl, repliesSource: {
+      title: "Replies", loadingText: "Loading", threadData: data, analyze, load: async () => {
+        if (unknownViewer) throw new Error("Viewer identity unavailable");
+        return { ...makeRepliesSnapshot(1), conversation: data.conversation };
+      },
+    } }, { rows: 30, columns: 220 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.render(220);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe(unknownViewer ? "error" : "ready"));
+    focusReplies(app);
+    if (unknownViewer) app.handleInput("t");
+    const code = structuredClone((app as any).state);
+    app.handleInput("A");
+    await vi.waitFor(() => expect((app as any).replyAnalysis.status).toBe("ready"));
+    expect(analyze.mock.calls[0]?.[0].body).toContain("Original question");
+    expect(analyze.mock.calls[0]?.[0].body).toContain("TAIL");
+    expect(analyze.mock.calls[0]?.[0].body).toHaveLength(24000);
+    expect((app as any).replyAnalysis.text).toContain("Asks:\nClarify.");
+    app.handleInput("\r");
+    expect(app.render(220).join("\n")).toContain("Original question");
+    app.handleInput("G");
+    expect(app.render(220).join("\n")).toContain("FINAL\\x07\\x07");
+    const bottom = (app as any).threadScroll;
+    app.handleInput("\u0015");
+    expect((app as any).threadScroll).toBeLessThan(bottom);
+    app.handleInput("g");
+    app.handleInput("g");
+    app.handleInput("\u001b[6~");
+    expect((app as any).threadScroll).toBeGreaterThan(0);
+    app.handleInput("o");
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalledWith(makeReply(0).url));
+    app.handleInput("G");
+    expect(app.render(220).join("\n")).toContain("Thanks.\\x1b[31m");
+    app.handleInput("\u001b");
+    if (!unknownViewer) app.handleInput("t");
+    app.handleInput("G");
+    app.handleInput("\r");
+    expect(app.render(220).join("\n")).toContain("Unrelated thread 100");
+    expect((app as any).state).toEqual(code);
+    expect(done).not.toHaveBeenCalled();
+    app.dispose();
+  });
+
+  it("updates an open thread on refresh and retains a missing thread with a warning", async () => {
+    let data = fetchedThreads();
+    const { app } = createHarness(undefined, undefined, {
+      openUrl: async (url) => ({ status: "opened", url }), repliesSource: {
+      title: "Replies", loadingText: "Loading", get threadData() { return data; },
+      load: async () => ({ ...makeRepliesSnapshot(1), conversation: data.conversation }),
+    } }, { rows: 30, columns: 220 });
+    app.render(220);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    focusReplies(app);
+    app.handleInput("\r");
+    data = { conversation: conversation(2), threads: [{ ...data.threads[0]!, comments: [{ id: "new", author: "other", body: "Refreshed full text" }] }] };
+    app.handleInput("r");
+    await vi.waitFor(() => expect((app as any).repliesRefreshing).toBe(false));
+    expect(app.render(220).join("\n")).toContain("Refreshed full text");
+    data = { conversation: conversation(3), threads: [] };
+    app.handleInput("r");
+    await vi.waitFor(() => expect((app as any).repliesRefreshing).toBe(false));
+    expect(app.render(220).join("\n")).toContain("Thread absent from latest fetched data;");
+    expect(app.render(220).join("\n")).toContain("Refreshed full text");
     app.dispose();
   });
 
