@@ -112,6 +112,7 @@ export interface ReviewRepliesSnapshot {
 export interface ReviewRepliesPanelSource {
   conversation?: object;
   readonly current?: ReviewRepliesSnapshot;
+  readonly threadData?: { threads: import("./review-replies.js").ReplyThread[]; conversation: ReviewConversationMetadata };
   title: string;
   loadingText: string;
   /** Reads only the current pull request; the pane never queues a second one. */

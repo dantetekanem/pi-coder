@@ -760,6 +760,20 @@ describe("shared pull request sources", () => {
     }
   });
 
+  it("exposes full admitted threads without a viewer or additional reads", async () => {
+    const body = "x".repeat(2000);
+    const normal = executor(async () => graph(body));
+    const exec = vi.fn(async (command: string, args: string[]) => args[0] === "identity"
+      ? { code: 1, stdout: "", stderr: "offline", killed: false } : normal(command, args));
+    const source = createRemotePullRequestSources({ exec } as never, {} as never, target()).repliesSource!;
+    expect(source.threadData).toBeUndefined();
+    expect(exec).not.toHaveBeenCalled();
+    await expect(source.load()).rejects.toThrow("identity");
+    expect(source.threadData?.threads[0]?.comments.at(-1)?.body).toBe(body);
+    expect(source.threadData?.conversation.coverage).toMatchObject({ threads: "complete", identity: "unavailable" });
+    expect(exec).toHaveBeenCalledTimes(3);
+  });
+
   it("preserves known identity and facts when the shared output budget rejects threads", async () => {
     const exec = executor(async () => graph("x".repeat(2_000_000)));
     const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());

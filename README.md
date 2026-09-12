@@ -78,6 +78,7 @@ Common review controls:
 | `v` | Toggle unified and side-by-side views |
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
+| Replies: `t` / `Enter` / `o` / `A` | Switch personal/all fetched threads; inspect full text; open browser; analyze read-only. PgUp/PgDn and gg/G scroll; Esc returns. |
 
 ### Current PR context
 
