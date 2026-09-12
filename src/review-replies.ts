@@ -123,7 +123,7 @@ function samePrincipal(comment: ReplyThreadComment, self: string): boolean {
  * A reply is a comment by somebody else, in a thread the reviewer participated in, posted after
  * the reviewer's own newest comment in that thread. Threads the reviewer never wrote in are noise.
  */
-export function collectRepliesToSelf(threads: ReplyThread[], selfLogin: string | null): ReviewReplyItem[] {
+export function collectRepliesToSelf(threads: ReplyThread[], selfLogin: string | null, limit = MAX_REPLIES): ReviewReplyItem[] {
   if (selfLogin == null || selfLogin.trim().length === 0) return [];
   const replies: ReviewReplyItem[] = [];
 
@@ -159,7 +159,12 @@ export function collectRepliesToSelf(threads: ReplyThread[], selfLogin: string |
       if (!Number.isNaN(left) && !Number.isNaN(right) && left !== right) return right - left;
       return a.id.localeCompare(b.id);
     })
-    .slice(0, MAX_REPLIES);
+    .slice(0, limit);
+}
+
+export function prepareRepliesToSelf(threads: ReplyThread[], selfLogin: string | null) {
+  const replies = collectRepliesToSelf(threads, selfLogin, Infinity);
+  return { replies: replies.slice(0, MAX_REPLIES), totalReplies: replies.length };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -457,7 +462,7 @@ async function fetchReviewRepliesForProvider(
     fetchReviewThreads(pi, target, provider, repo, pullRequest.number).then(read.retain),
   ]);
   if (selfLogin == null) throw new Error(`Could not resolve your ${provider.label} identity; replies need it to tell your threads apart.`);
-  return read.retain({ replies: collectRepliesToSelf(threads.threads, selfLogin), selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: threads.coverage });
+  return read.retain({ ...prepareRepliesToSelf(threads.threads, selfLogin), previewLimit: MAX_REPLY_BODY_LENGTH, selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: threads.coverage });
 }
 
 function fetchBoundedReplies(pi: ExtensionAPI, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
@@ -539,7 +544,16 @@ export function createRemoteReviewRepliesSource(
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
   let live = !hasHandoffContext(target.handoff);
+  const project = (snapshot: ReturnType<typeof createConversationReader>["current"]): ReviewRepliesSnapshot | undefined => {
+    if (snapshot == null || !reader?.isCurrent(snapshot.metadata) || snapshot.supplied || snapshot.metadata.fetchedAt == null
+      || snapshot.selfLogin == null || snapshot.replies == null || snapshot.details.threadRead == null) return undefined;
+    return { replies: snapshot.replies, totalReplies: snapshot.totalReplies, previewLimit: MAX_REPLY_BODY_LENGTH, selfLogin: snapshot.selfLogin,
+      fetchedAt: snapshot.metadata.fetchedAt, conversation: snapshot.metadata,
+      threadCoverage: snapshot.metadata.coverage.threads === "unavailable" ? "partial" : snapshot.details.threadRead.coverage };
+  };
   return {
+    conversation: reader,
+    get current() { return project(reader?.current); },
     title: `${provider.label} replies`,
     loadingText: `Reading ${provider.label} replies to your review comments...`,
     load: async (options) => {
@@ -555,8 +569,7 @@ export function createRemoteReviewRepliesSource(
       if (snapshot.selfLogin == null) throw new Error(`Could not resolve your ${provider.label} identity; replies need it to tell your threads apart.`);
       const threads = snapshot.details.threadRead;
       if (threads == null || snapshot.replies == null) throw new Error("Review threads unavailable. Press r to refresh replies.");
-      return { replies: snapshot.replies, selfLogin: snapshot.selfLogin,
-        fetchedAt: snapshot.metadata.fetchedAt, threadCoverage: snapshot.metadata.coverage.threads === "unavailable" ? "partial" : threads.coverage, conversation: snapshot.metadata };
+      return project(snapshot)!;
     },
     analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
   };

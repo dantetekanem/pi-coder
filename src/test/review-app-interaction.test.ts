@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
+import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import * as piRender from "../pi-render.js";
@@ -1428,6 +1428,83 @@ describe("Replies pane", () => {
     return { ...harness, load, analyze };
   }
 
+  function conversation(generation = 1): ReviewConversationMetadata {
+    return { identity: "current-pr", generation, attempt: 1, fetchedAt: `2026-01-0${generation}T00:00:00.000Z`, threadCounts: { open: 50, unknown: 1 },
+      coverage: { details: "complete", comments: "complete", reviews: "complete", threads: "complete", checks: "complete", identity: "complete" } };
+  }
+
+  it.each(["r", "m"])("coordinates %s across shared panes without moving review selection", async (key) => {
+    const shared = {};
+    const token = {};
+    let current = { ...makeRepliesSnapshot(100), conversation: { ...conversation(), continuation: token }, totalReplies: 101, previewLimit: 1200 };
+    const next = { ...current, replies: [...current.replies].reverse(), conversation: { ...conversation(2), generation: key === "r" ? 2 : 1, attempt: 2, continuation: token } };
+    let update: Parameters<ReviewContextPanelSource["load"]>[0];
+    const text = "Known facts\n".repeat(40);
+    const loadContext = vi.fn<ReviewContextPanelSource["load"]>(async (onUpdate, options) => {
+      update = onUpdate;
+      if (options != null) current = next;
+      onUpdate?.(text, current.conversation);
+      return text;
+    });
+    const load = vi.fn(async () => current);
+    const { app, loadFileContents } = createHarness(undefined, undefined, {
+      reviewHeader: { identity: "PR1", openThreads: 9999 },
+      contextPanelSource: { title: "Context", loadingText: "Loading", conversation: shared, load: loadContext },
+      repliesSource: { title: "Replies", loadingText: "Loading", conversation: shared, get current() { return current; }, load },
+    }, { columns: 360, rows: 60 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.render(360);
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    (app as any).state.focus = "diff";
+    app.handleInput("j");
+    (app as any).state.focus = key === "r" ? "context" : "replies";
+    (app as any).selectedReplyIndex = 1;
+    (app as any).contextScroll = 2;
+    const code = structuredClone((app as any).state);
+    const selected = current.replies[1]!.id;
+    app.handleInput(key);
+    expect(loadContext.mock.calls.at(-1)?.[1]?.[key === "r" ? "refresh" : "continuation"]).toBe(key === "r" ? true : token);
+    expect(load).toHaveBeenLastCalledWith();
+    await vi.waitFor(() => expect((app as any).repliesRefreshing).toBe(false));
+    expect((app as any).repliesPanelState.snapshot.replies[(app as any).selectedReplyIndex].id).toBe(selected);
+    expect((app as any).state).toEqual(code);
+    expect((app as any).contextScroll).toBe(2);
+    current = { ...next, totalReplies: 102, conversation: { ...conversation(3), continuation: token } };
+    update?.(text, current.conversation);
+    expect((app as any).conversation).toEqual(current.conversation);
+    expect((app as any).repliesPanelState.snapshot.conversation).toEqual(current.conversation);
+    expect(app.render(360).join("\n")).toContain("Showing 100 of 102 fetched replies");
+    expect(app.render(360).join("\n")).toContain(current.conversation.fetchedAt);
+    expect(app.render(360).join("\n")).toContain("50 known open, 1 resolution unknown");
+    expect(app.render(360).join("\n")).not.toContain("9999 open threads");
+    update?.("Outdated facts", next.conversation);
+    expect((app as any).contextPanelState.text).toBe(text);
+    update?.("Facts unavailable", { ...conversation(4), coverage: { details: "unavailable", comments: "unavailable", reviews: "unavailable", threads: "unavailable", checks: "unavailable", identity: "complete" } });
+    expect((app as any).contextPanelState.text).toBe(text);
+    app.handleInput("m");
+    expect(loadContext).toHaveBeenCalledTimes(2);
+    app.dispose();
+  });
+
+  it.each([false, true])("rejects late replies after supersession or disposal: %s", async (dispose) => {
+    const { app, load } = await createRepliesHarness(makeRepliesSnapshot(2));
+    const pending = deferred<ReviewRepliesSnapshot>();
+    load.mockReturnValueOnce(pending.promise);
+    focusReplies(app);
+    const retained = (app as any).repliesPanelState.snapshot;
+    app.handleInput("r");
+    if (dispose) app.dispose();
+    else {
+      load.mockRejectedValueOnce(new Error("offline"));
+      app.handleInput("r");
+      await vi.waitFor(() => expect((app as any).message).toContain("offline"));
+    }
+    pending.resolve(makeRepliesSnapshot(1));
+    await pending.promise;
+    expect((app as any).repliesPanelState.snapshot).toBe(retained);
+    app.dispose();
+  });
+
   it("loads only while visible and renders sanitized reply details", async () => {
     const load = vi.fn(async () => makeRepliesSnapshot(1, {
       author: "reviewer\x1b[31m",
@@ -1484,17 +1561,20 @@ describe("Replies pane", () => {
     const empty = await createRepliesHarness(makeRepliesSnapshot(0));
     const rendered = empty.app.render(200).join("\n");
     expect(rendered).toContain("0 replies");
-    expect(rendered).toContain("No replies to review.");
+    expect(rendered).toContain("coverage unknown");
     empty.app.dispose();
   });
 
-  it("qualifies empty replies when the thread read is partial", async () => {
-    const snapshot = { ...makeRepliesSnapshot(0), threadCoverage: "partial" as const };
+  it.each(["complete", "partial", "unavailable", "supplied"] as const)("qualifies empty replies using fetched coverage: %s", async (coverage) => {
+    const metadata = conversation();
+    metadata.coverage.threads = coverage === "supplied" ? "partial" : coverage;
+    if (coverage === "supplied") metadata.fetchedAt = null;
+    const snapshot = { ...makeRepliesSnapshot(0), conversation: metadata };
     const { app } = await createRepliesHarness(snapshot);
     try {
       const rendered = app.render(200).join("\n");
-      expect(rendered).toContain("Thread read incomplete.");
-      expect(rendered).toContain("No replies in fetched threads.");
+      expect(rendered).toContain(coverage === "complete" ? "No replies to review." : "No replies in fetched threads.");
+      if (coverage === "supplied") expect(rendered).toContain("fetch time unknown");
     } finally {
       app.dispose();
     }

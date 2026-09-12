@@ -14,6 +14,7 @@
 - Page through PR review threads within read limits, resume admitted outer cursors, and keep usable GraphQL fragments when later data is unavailable.
 - Read additional comment pages within review threads and resume each thread from admitted progress.
 - Page through REST comments and reviews within shared read limits, honoring HTTP status and retaining interrupted progress without following supplied Link hosts.
+- Refresh or resume PR conversation from either pane without losing review position, retaining usable data on failure and separating fetched coverage from preview limits.
 
 ## 0.6.2 - 2026-09-02
 

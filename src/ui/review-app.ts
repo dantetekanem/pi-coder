@@ -40,7 +40,7 @@ import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from
 import { filterFilesBySearch } from "../search.js";
 import { sanitizeTerminalText } from "../sanitize.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
-import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewContextPanelSource, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
+import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
 import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
@@ -1511,6 +1511,9 @@ export class ReviewApp {
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
   private contextRequestToken = 0;
+  private contextConversation?: ReviewConversationMetadata;
+  private conversation?: ReviewConversationMetadata;
+  private repliesRefreshing = false;
   private disposed = false;
   private repliesPanelState: RepliesPanelState = { status: "idle" };
   private replyAnalysis: ReplyAnalysisState = { status: "idle" };
@@ -1659,28 +1662,42 @@ export class ReviewApp {
     }, 100);
   }
 
-  private ensureContextPanel(): void {
+  private ensureContextPanel(options?: ReviewConversationLoadOptions): void {
     const source = this.options.contextPanelSource;
-    if (source == null || !this.paneVisibility.context || this.contextPanelState.status !== "idle") return;
+    if (source == null || (options == null && (!this.paneVisibility.context || this.contextPanelState.status !== "idle"))) return;
 
     const token = ++this.contextRequestToken;
     const isCurrent = () => !this.disposed && token === this.contextRequestToken;
     let receivedUpdate = false;
-    const applyUpdate = (text: string) => {
+    const applyUpdate = (text: string, metadata?: ReviewConversationMetadata) => {
       if (!isCurrent()) return;
       receivedUpdate = true;
+      if (!this.acceptConversation(metadata)) return;
+      if (metadata != null && this.contextPanelState.status === "ready" && Object.entries(metadata.coverage)
+        .every(([section, status]) => section === "identity" || status === "pending" || status === "unavailable")) {
+        this.setMessage("Conversation read unavailable; keeping previous PR facts.");
+        this.requestRender();
+        return;
+      }
+      this.contextConversation = metadata ?? this.contextConversation;
       this.contextPanelState = { status: "ready", text };
+      const replies = this.options.repliesSource;
+      const snapshot = source.conversation != null && source.conversation === replies?.conversation ? replies.current : undefined;
+      if (metadata != null && snapshot?.conversation === metadata) this.applyReplies(snapshot);
       this.requestRender();
     };
-    this.contextPanelState = { status: "loading" };
-    this.contextScroll = 0;
+    if (this.contextPanelState.status !== "ready") {
+      this.contextPanelState = { status: "loading" };
+      this.contextScroll = 0;
+    }
     this.requestRender();
-    void source.load(applyUpdate).then((text) => {
-      if (!receivedUpdate) applyUpdate(text);
+    void (options == null ? source.load(applyUpdate) : source.load(applyUpdate, options)).then((text) => {
+      if (!receivedUpdate && (options == null || source.conversation == null || this.contextPanelState.status !== "ready")) applyUpdate(text);
     }).catch((error: unknown) => {
       if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
-      this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
+      if (this.contextPanelState.status !== "ready") this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
+      else this.setMessage(`Could not refresh PR context: ${message}`);
       this.requestRender();
     });
   }
@@ -1688,46 +1705,79 @@ export class ReviewApp {
   private ensureRepliesPanel(): void {
     if (this.options.repliesSource == null || !this.paneVisibility.replies) return;
     if (this.repliesPanelState.status !== "idle") return;
-    this.loadReplies();
+    const current = this.options.repliesSource.current;
+    if (current != null) this.applyReplies(current);
+    else this.loadReplies();
   }
 
   /**
    * Reads only the current pull request. The race token means a stale response from an earlier
    * refresh is dropped instead of replacing newer data.
    */
-  private loadReplies(refresh = false): void {
+  private loadReplies(options?: ReviewConversationLoadOptions): void {
     const source = this.options.repliesSource;
     if (source == null) return;
 
     this.repliesRequestToken += 1;
     const token = this.repliesRequestToken;
-    this.repliesPanelState = { status: "loading" };
+    this.repliesRefreshing = true;
+    if (this.repliesPanelState.status !== "ready") this.repliesPanelState = { status: "loading" };
     this.requestRender();
-    void (refresh ? source.load({ refresh: true }) : source.load()).then((snapshot) => {
-      if (token !== this.repliesRequestToken) return;
-      this.repliesPanelState = { status: "ready", snapshot };
-      this.repliesScroll = 0;
-      this.selectedReplyIndex = Math.min(this.selectedReplyIndex, Math.max(0, snapshot.replies.length - 1));
-      this.requestRender();
+    void (options == null ? source.load() : source.load(options)).then((snapshot) => {
+      if (!this.disposed && token === this.repliesRequestToken) this.applyReplies(snapshot);
     }).catch((error: unknown) => {
-      if (token !== this.repliesRequestToken) return;
+      if (this.disposed || token !== this.repliesRequestToken) return;
       const message = error instanceof Error ? error.message : String(error);
-      this.repliesPanelState = { status: "error", error: sanitizeTerminalText(message) };
-      this.repliesScroll = 0;
+      if (this.repliesPanelState.status !== "ready") this.repliesPanelState = { status: "error", error: sanitizeTerminalText(message) };
+      else this.setMessage(`Could not refresh replies: ${message}`);
+    }).finally(() => {
+      if (this.disposed || token !== this.repliesRequestToken) return;
+      this.repliesRefreshing = false;
       this.requestRender();
     });
   }
 
-  private refreshReplies(): void {
-    if (this.options.repliesSource == null) {
-      this.setMessage("Replies are not available in this review.");
+  private refreshConversation(options: ReviewConversationLoadOptions): void {
+    const context = this.options.contextPanelSource;
+    const replies = this.options.repliesSource;
+    if (context == null && replies == null) {
+      this.setMessage("Conversation is not available in this review.");
       this.requestRender();
       return;
     }
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
-    this.loadReplies(true);
-    this.setMessage("Refreshing replies for this PR...");
+    if (context != null) this.ensureContextPanel(options);
+    const shared = context?.conversation != null && context.conversation === replies?.conversation;
+    if (replies != null) this.loadReplies(shared ? undefined : options);
+  }
+
+  private acceptConversation(metadata?: ReviewConversationMetadata): boolean {
+    const previous = this.conversation;
+    if (metadata != null && previous != null && (metadata.identity !== previous.identity || metadata.generation < previous.generation
+      || (metadata.generation === previous.generation && (metadata.attempt ?? 0) < (previous.attempt ?? 0)))) return false;
+    if (metadata != null) this.conversation = metadata;
+    return true;
+  }
+
+  private applyReplies(snapshot: ReviewRepliesSnapshot): void {
+    if (this.disposed || !this.acceptConversation(snapshot.conversation)) return;
+    const old = this.repliesPanelState.status === "ready" ? this.repliesPanelState.snapshot : undefined;
+    if (snapshot.conversation != null && old?.conversation === snapshot.conversation && old.replies === snapshot.replies) return;
+    const selected = this.selectedReply()?.id;
+    const index = snapshot.replies.findIndex((reply) => reply.id === selected);
+    this.repliesPanelState = { status: "ready", snapshot };
+    this.selectedReplyIndex = index >= 0 ? index : Math.min(this.selectedReplyIndex, Math.max(0, snapshot.replies.length - 1));
+    this.replyAnalysis = { status: "idle" };
+    this.analysisRequestToken += 1;
+  }
+
+  private conversationStatus(metadata?: ReviewConversationMetadata): string {
+    if (metadata == null) return this.repliesRefreshing ? "Reading conversation; coverage unknown" : "Conversation coverage unknown";
+    const status = Object.entries(metadata.coverage).filter(([, state]) => state !== "complete").map(([section, state]) => `${section} ${state}`);
+    if (!status.length) status.push("coverage complete");
+    if (metadata.threadCounts != null) status.push(`${metadata.threadCounts.open} known open, ${metadata.threadCounts.unknown} resolution unknown`);
+    return sanitizeTerminalText(`${this.repliesRefreshing ? "Reading • " : ""}Generation ${metadata.generation}.${metadata.attempt ?? 1} • ${metadata.fetchedAt ?? "fetch time unknown"} • ${status.join(", ")}`);
   }
 
   private getReplies(): ReviewReplyItem[] {
@@ -3794,6 +3844,13 @@ export class ReviewApp {
     if (matchesKey(data, Key.ctrl("b"))) { this.moveFocusedSelection(-this.focusedPageSize()); return; }
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.requestCancel(); return; }
 
+    if ((this.state.focus === "context" || this.state.focus === "replies") && (data === "r" || data === "m")) {
+      if (data === "r") this.refreshConversation({ refresh: true });
+      else if (this.repliesRefreshing || this.conversation?.continuation == null) this.setMessage("No continuation is ready. Press r to refresh.");
+      else this.refreshConversation({ continuation: this.conversation.continuation });
+      this.requestRender();
+      return;
+    }
     if (this.state.focus === "replies") {
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveReplySelection(1);
@@ -3821,10 +3878,6 @@ export class ReviewApp {
       }
       if (matchesKey(data, Key.enter)) {
         this.openSelectedReply();
-        return;
-      }
-      if (data === "r") {
-        this.refreshReplies();
         return;
       }
       if (data === "A") {
@@ -4519,11 +4572,15 @@ export class ReviewApp {
       lines.push(...buildContextPanelLines(this.theme, width, this.contextPanelState.text));
     }
 
-    const bodyHeight = Math.max(1, Math.floor(height) - 2);
+    const header: string[] = [];
+    pushWrappedText(header, this.theme, this.conversationStatus(this.contextConversation), Math.max(1, width - 2), "dim");
+    header.push(this.theme.fg("dim", `r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`));
+    header.length = Math.min(header.length, Math.max(0, Math.floor(height) - 3));
+    const bodyHeight = Math.max(1, Math.floor(height) - 2 - header.length);
     this.contextLineCount = lines.length;
     this.contextPageSize = bodyHeight;
     this.contextScroll = Math.max(0, Math.min(this.contextScroll, this.maxContextScroll()));
-    return renderBox(source.title, width, height, this.theme, lines.slice(this.contextScroll, this.contextScroll + bodyHeight), focused);
+    return renderBox(source.title, width, height, this.theme, [...header, ...lines.slice(this.contextScroll, this.contextScroll + bodyHeight)], focused);
   }
 
   private renderRepliesPanel(width: number, height: number): string[] {
@@ -4554,11 +4611,15 @@ export class ReviewApp {
       return renderBox(sanitizeTerminalText(source.title), width, height, this.theme, lines, focused);
     }
 
-    const replies = this.repliesPanelState.snapshot.replies;
-    const partial = this.repliesPanelState.snapshot.threadCoverage === "partial";
+    const snapshot = this.repliesPanelState.snapshot;
+    const replies = snapshot.replies;
+    const partial = (snapshot.conversation?.coverage.threads ?? snapshot.threadCoverage) !== "complete" || snapshot.conversation?.fetchedAt === null;
     this.selectedReplyIndex = Math.max(0, Math.min(this.selectedReplyIndex, Math.max(0, replies.length - 1)));
-    lines.push(this.theme.fg("muted", `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`));
-    lines.push(this.theme.fg("dim", "↑↓ select • Enter open • r refresh • A analyze"));
+    pushWrappedText(lines, this.theme, snapshot.totalReplies == null ? `${replies.length} repl${replies.length === 1 ? "y" : "ies"}`
+      : `Showing ${replies.length} of ${snapshot.totalReplies} fetched replies`, contentWidth);
+    pushWrappedText(lines, this.theme, this.conversationStatus(snapshot.conversation), contentWidth, "dim");
+    lines.push(this.theme.fg("dim", `↑↓ select • Enter open • r refresh${snapshot.conversation?.continuation == null ? "" : " • m load more"} • A analyze`));
+    if (snapshot.previewLimit != null) pushWrappedText(lines, this.theme, `Previews limited to ${snapshot.previewLimit} characters.`, contentWidth, "dim");
     if (partial) pushWrappedText(lines, this.theme, "Thread read incomplete.", contentWidth, "dim");
     lines.push("");
 
@@ -4768,12 +4829,14 @@ export class ReviewApp {
     const headerLines: string[] = [];
     if (this.options.reviewHeader != null) {
       const scopedFiles = getScopedFiles(this.files, this.state.activeScope);
-      headerLines.push(buildReviewHeaderLine(this.theme, frameInnerWidth, this.options.reviewHeader, {
+      const info = this.options.contextPanelSource || this.options.repliesSource ? { ...this.options.reviewHeader, openThreads: undefined } : this.options.reviewHeader;
+      headerLines.push(buildReviewHeaderLine(this.theme, frameInnerWidth, info, {
         files: scopedFiles.length,
         reviewed: scopedFiles.filter((file) => this.reviewedFileIds.has(file.id)).length,
         comments: getDraftCommentCount(this.state),
       }));
     }
+    if (this.conversation != null) headerLines.push(truncateToWidth(this.conversationStatus(this.conversation), frameInnerWidth, "", false));
     if (visibleScopes.length > 1) {
       headerLines.push(truncateToWidth(visibleScopes.map((scope, index) => {
         const active = this.state.activeScope === scope;

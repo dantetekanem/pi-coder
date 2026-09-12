@@ -527,6 +527,10 @@ describe("shared pull request sources", () => {
       return { code: 0, stdout: command === "pi" ? "" : stdout, stderr: "", killed: false };
     });
     const sources = createRemotePullRequestSources({ exec } as never, {} as never, target("github"));
+    expect(sources.repliesSource?.current).toBeUndefined();
+    expect(exec).not.toHaveBeenCalled();
+    expect(sources.contextPanelSource?.conversation).toBeDefined();
+    expect(sources.repliesSource?.conversation).toBe(sources.contextPanelSource?.conversation);
     const loading = sources.repliesSource!.load({ budgets: { maxRequests: mode.startsWith("request") ? 7 : 12 } });
     await sources.contextPanelSource!.load();
     let snapshot = await loading;
@@ -540,6 +544,8 @@ describe("shared pull request sources", () => {
       expect(snapshot.conversation?.generation).toBe(first.conversation?.generation);
       expect(JSON.stringify(first)).toBe(original);
     }
+    expect(sources.repliesSource?.current?.conversation).toBe(snapshot.conversation);
+    expect(snapshot.conversation?.threadCounts).toEqual({ open: 0, unknown: mode === "ID-less" ? 0 : 1 });
     expect(snapshot.replies).toEqual(mode === "ID-less" ? [] : [expect.objectContaining({ commentId: "2", author: "unknown", body: "Answer", resolved: null })]);
     const comments = ["HTTP 403", "missing headers"].includes(mode) ? "unavailable" : mode === "invalid Link" ? "partial" : "complete";
     expect(snapshot.conversation?.coverage).toMatchObject({ comments, reviews: "complete", threads: mode === "ID-less" ? "partial" : "complete" });

@@ -66,6 +66,7 @@ interface ConversationData {
   details: PullRequestDetails;
   selfLogin: string | null;
   replies?: ReviewReplyItem[];
+  totalReplies?: number;
 }
 interface ConversationSnapshot extends ConversationData {
   metadata: ReviewConversationMetadata;
@@ -96,6 +97,7 @@ export function createConversationReader(
   let live = supplied == null;
   let current: PendingRead | undefined;
   return {
+    get current() { return checkpoint; },
     isCurrent: (metadata: ReviewConversationMetadata) => metadata.identity === identity && metadata.generation === generation && metadata.attempt === attempt,
     load: (options?: ReviewConversationLoadOptions): ConversationLoad => {
       const continuing = options?.continuation != null;
@@ -115,13 +117,15 @@ export function createConversationReader(
         checksUnavailable: true, pending: ["PR details", "checks", "PR comments", "reviews", "review threads"] } };
       let resolveFacts!: (details: PullRequestDetails) => void;
       const facts = new Promise<PullRequestDetails>((resolve) => { resolveFacts = resolve; });
-      const finish = ({ details, selfLogin, replies }: ConversationData): ConversationSnapshot => {
+      const finish = ({ details, selfLogin, replies, totalReplies }: ConversationData): ConversationSnapshot => {
         details = { ...details, pending: undefined, unavailable: [...(details.unavailable ?? []), ...(details.pending ?? [])] };
+        const threads = details.threadRead?.threads;
         const coverage = (label: string, success: "complete" | "partial") => details.unavailable?.includes(label) ? "unavailable" : success;
         return {
-          details, selfLogin, replies, supplied: fromHandoff,
+          details, selfLogin, replies, totalReplies, supplied: fromHandoff,
           metadata: {
             identity, generation: id, attempt: revision, fetchedAt: fromHandoff ? null : new Date().toISOString(),
+            threadCounts: threads == null ? undefined : { open: threads.filter((t) => t.resolved === false).length, unknown: threads.filter((t) => t.resolved == null).length },
             continuation: !fromHandoff && (selfLogin == null || details.unavailable!.length > 0 || details.threadRead?.pagination?.done === false
               || Object.values(details.pages ?? {}).some((page) => page?.nextPage != null)) ? retry : undefined,
             coverage: {
