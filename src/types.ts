@@ -75,7 +75,7 @@ export interface ReviewReplyItem {
   url?: string;
   path?: string;
   line: number | null;
-  resolved: boolean;
+  resolved: boolean | null;
 }
 
 export interface ReviewRepliesSnapshot {

@@ -1458,6 +1458,15 @@ describe("Replies pane", () => {
     app.dispose();
   });
 
+  it("distinguishes an unknown reply resolution from unresolved", async () => {
+    const { app } = await createRepliesHarness(makeRepliesSnapshot(1, { resolved: null }));
+    try {
+      expect(app.render(200).join("\n")).toContain("resolution unknown");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("renders load errors and the empty state", async () => {
     const failing = createHarness(undefined, undefined, {
       repliesSource: {

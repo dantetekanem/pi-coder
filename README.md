@@ -85,6 +85,8 @@ The context pane shows fetched PR facts, including the reviewed head, before the
 
 Failed context sections are labeled unavailable; successfully fetched facts remain visible.
 
+PR context and Replies distinguish missing resolution from an unresolved thread. Replies from deleted or unavailable authors remain visible as `unknown`.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:
