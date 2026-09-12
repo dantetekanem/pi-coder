@@ -1619,6 +1619,67 @@ describe("PR context pane", () => {
     app.handleInput("\t");
   }
 
+  it("applies context enrichment without moving scroll or code selection", async () => {
+    let update: ((text: string) => void) | undefined;
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (onUpdate?: typeof update) => {
+        update = onUpdate;
+        return contextText;
+      },
+    } });
+    try {
+      focusContext(app);
+      app.handleInput("j");
+      const before = structuredClone((app as any).state);
+      expect(update).toBeTypeOf("function");
+      update!(`${contextText}\nGenerated explanation`);
+      expect((app as any).contextPanelState.text).toContain("Generated explanation");
+      expect((app as any).contextScroll).toBe(1);
+      expect((app as any).state).toEqual(before);
+      expect(app.render(200).join("\n")).toContain("context line 2");
+      app.handleInput("G");
+      expect(app.render(200).join("\n")).toContain("Generated explanation");
+    } finally { app.dispose(); }
+  });
+
+  it.each(["disposal", "supersession"])("ignores late context callbacks after %s", async (reason) => {
+    const updates: Array<((text: string) => void) | undefined> = [];
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (update?: (text: string) => void) => {
+        updates.push(update);
+        return `facts ${updates.length}`;
+      },
+    } });
+    const render = vi.spyOn((app as any).tui, "requestRender");
+    try {
+      expect(updates[0]).toBeTypeOf("function");
+      if (reason === "disposal") app.dispose();
+      else {
+        (app as any).contextPanelState = { status: "idle" };
+        app.handleInput("4");
+        app.handleInput("4");
+        await vi.waitFor(() => expect((app as any).contextPanelState.text).toBe("facts 2"));
+        updates[1]!("current explanation");
+      }
+      const before = structuredClone((app as any).contextPanelState);
+      render.mockClear();
+      updates[0]!("late explanation");
+      expect((app as any).contextPanelState).toEqual(before);
+      expect(render).not.toHaveBeenCalled();
+    } finally { app.dispose(); }
+  });
+
+  it("keeps an early context update when the initial load finishes later", async () => {
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (update?: (text: string) => void) => {
+        update?.("enriched facts");
+        return "initial facts";
+      },
+    } });
+    try { expect(app.render(200).join("\n")).toContain("enriched facts"); }
+    finally { app.dispose(); }
+  });
+
   it("joins the Tab cycle and shows the focused border", async () => {
     const { app } = await createContextHarness();
 

@@ -273,12 +273,39 @@ describe("remote pull request summary source", () => {
       checks: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
     };
 
-    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, { ...target(), handoff: handoff as never })!.load();
+    const update = vi.fn();
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, { ...target(), handoff: handoff as never })!.load(update);
 
     expect(exec).not.toHaveBeenCalled();
     expect(summary).toContain("Title:\nRemove old checkout path");
     expect(summary).toContain("Diff:\n2 files touched | +3/-9");
-    expect(summary).toContain("Problem:\nRemove the old path.");
+    expect(summary).toContain("Problem:\nIntent Remove the old path. Tested Unit tests pass.");
+    expect(summary).toContain("Validation:\nFailing: build");
+    expect(update.mock.lastCall?.[0]).toContain(`${summary}\n\nGenerated explanation (optional):\nTitle:\nStale title`);
+  });
+
+  it("returns authoritative facts before optional model enrichment", async () => {
+    let finish!: (text: string) => void;
+    const model = new Promise<string>((resolve) => { finish = resolve; });
+    const exec = vi.fn(async (command: string) => ({
+      code: 0, stdout: command === "pi" ? await model : "{}", stderr: "", killed: false,
+    }));
+    const update = vi.fn();
+    const source = createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!;
+    let facts: string | undefined;
+    const first = source.load(update).then((text) => { facts = text; });
+    try {
+      await vi.waitFor(() => expect(facts).toContain("Head:\nfeature @ abc123"));
+      expect(facts).toContain("Title:\nRemove old checkout path");
+      expect(facts).toContain("Validation:\nNo failing checks found.");
+      expect(update).not.toHaveBeenCalled();
+      finish("Status: approved - invented\nAn optional explanation.");
+      await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      expect(update.mock.lastCall?.[0]).toBe(`${facts}\n\nGenerated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.`);
+    } finally {
+      finish("");
+      await first;
+    }
   });
 
   it("fails closed when the configured provider response is malformed", async () => {

@@ -79,6 +79,10 @@ Common review controls:
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
 
+### Current PR context
+
+The context pane shows fetched PR facts, including the reviewed head, before the optional generated explanation. The explanation appears below those facts without replacing them or resetting your scroll position.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:

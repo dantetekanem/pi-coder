@@ -1510,6 +1510,8 @@ export class ReviewApp {
   private diffScroll = 0;
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
+  private contextRequestToken = 0;
+  private disposed = false;
   private repliesPanelState: RepliesPanelState = { status: "idle" };
   private replyAnalysis: ReplyAnalysisState = { status: "idle" };
   /** Only the newest replies request may write state, so an in-flight refresh cannot overwrite it. */
@@ -1590,6 +1592,7 @@ export class ReviewApp {
     this.syncCursorMode();
 
     queueMicrotask(() => {
+      if (this.disposed) return;
       this.ensureActiveEntry();
       this.ensureContextPanel();
       this.requestRender();
@@ -1597,6 +1600,7 @@ export class ReviewApp {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -1640,6 +1644,7 @@ export class ReviewApp {
   }
 
   private requestRender(): void {
+    if (this.disposed) return;
     if (typeof this.tui.requestRender === "function") this.tui.requestRender();
     if (this.options.onSessionChange == null) return;
     if (this.editTarget != null) {
@@ -1658,16 +1663,24 @@ export class ReviewApp {
     const source = this.options.contextPanelSource;
     if (source == null || !this.paneVisibility.context || this.contextPanelState.status !== "idle") return;
 
-    this.contextPanelState = { status: "loading" };
-    this.requestRender();
-    void source.load().then((text) => {
+    const token = ++this.contextRequestToken;
+    const isCurrent = () => !this.disposed && token === this.contextRequestToken;
+    let receivedUpdate = false;
+    const applyUpdate = (text: string) => {
+      if (!isCurrent()) return;
+      receivedUpdate = true;
       this.contextPanelState = { status: "ready", text };
-      this.contextScroll = 0;
       this.requestRender();
+    };
+    this.contextPanelState = { status: "loading" };
+    this.contextScroll = 0;
+    this.requestRender();
+    void source.load(applyUpdate).then((text) => {
+      if (!receivedUpdate) applyUpdate(text);
     }).catch((error: unknown) => {
+      if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
       this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
-      this.contextScroll = 0;
       this.requestRender();
     });
   }
