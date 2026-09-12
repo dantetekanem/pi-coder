@@ -1488,6 +1488,18 @@ describe("Replies pane", () => {
     empty.app.dispose();
   });
 
+  it("qualifies empty replies when the thread read is partial", async () => {
+    const snapshot = { ...makeRepliesSnapshot(0), threadCoverage: "partial" as const };
+    const { app } = await createRepliesHarness(snapshot);
+    try {
+      const rendered = app.render(200).join("\n");
+      expect(rendered).toContain("Thread read incomplete.");
+      expect(rendered).toContain("No replies in fetched threads.");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("selects, pages, and clamps replies with every supported navigation key", async () => {
     const { app } = await createRepliesHarness(makeRepliesSnapshot(12));
     focusReplies(app);
