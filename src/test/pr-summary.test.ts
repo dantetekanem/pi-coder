@@ -119,6 +119,38 @@ afterEach(() => {
 });
 
 describe("remote pull request summary source", () => {
+  it.each([
+    [{ isDraft: true }, "Status:\nblocked - draft PR"],
+    [{ mergeStateStatus: "DIRTY" }, "Status:\nblocked - merge state dirty"],
+    [{ reviewDecision: "APPROVED" }, "Status:\napproved - review decision approved"],
+    [{ url: "https://github.com/example/renamed/pull/12" }, "URL:\nhttps://github.com/example/renamed/pull/12"],
+    [{ statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }, "Validation:\nFailing: build"],
+    [{ statusCheckRollup: [{ name: "unit", status: "IN_PROGRESS" }] }, "Validation:\nPending: unit"],
+    [{ comments: [
+      { author: { login: "bob" }, body: "First comment", createdAt: "2026-06-25T10:00:00Z" },
+      { author: { login: "carol" }, body: "Latest comment", createdAt: "2026-06-25T11:00:00Z" },
+    ] }, "Open comments:\ncarol: Latest comment; bob: First comment"],
+    [{ reviews: [{ author: { login: "bob" }, state: "CHANGES_REQUESTED", body: "Keep compatibility" }] }, "Open comments:\nbob changes requested: Keep compatibility"],
+  ])("loads built-in GitHub context without provider configuration: %j", async (details, expected) => {
+    rmSync(settingsPath);
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "gh" && args[0] === "pr") {
+        expect(args.slice(0, 6)).toEqual(["pr", "view", "12", "--repo", "example/widgets", "--json"]);
+        const requestedFields = args[6]!.split(",");
+        const payload = Object.fromEntries(Object.entries(details).filter(([field]) => requestedFields.includes(field)));
+        return { code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false };
+      }
+      if (command === "gh" && args[1] === "graphql") {
+        return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }), stderr: "", killed: false };
+      }
+      return { code: 1, stdout: "", stderr: "model unavailable", killed: false };
+    });
+
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target("github"))!.load();
+
+    expect(summary).toContain(expected);
+  });
+
   it("uses configured details and capability-gated thread operations", async () => {
     const exec = vi.fn(async (command: string, args: string[]) => {
       if (command === "cli-one" && args[0] === "change") {
