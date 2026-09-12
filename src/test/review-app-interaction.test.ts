@@ -1573,6 +1573,8 @@ describe("Replies pane", () => {
 
     harness.app.handleInput("r");
     expect(harness.load).toHaveBeenCalledTimes(2);
+    expect(harness.load).toHaveBeenLastCalledWith({ refresh: true });
+    expect(harness.load.mock.calls[0]).toEqual([]);
     await vi.waitFor(() => expect((harness.app as any).repliesPanelState.status).toBe("ready"));
     expect((harness.app as any).replyAnalysis.status).toBe("idle");
     harness.app.dispose();

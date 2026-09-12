@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { createConversationRead } from "../conversation.js";
+import { createConversationRead, createConversationReader } from "../conversation.js";
 
 const result = (stdout = "{}", stderr = "", killed = false) => ({ stdout, stderr, killed, code: 0 });
 
 describe("conversation read limits", () => {
+  it("retains raw thread data alongside the generation without replacing IDs, full text or unknown values", async () => {
+    const raw = { coverage: "partial" as const, threads: [{ id: "thread", resolved: null, comments: [
+      { id: "comment", author: "unknown", authorUnknown: true, body: "é".repeat(2000) },
+    ] }], contextRows: [{ body: "Legacy ID-less comment" }] };
+    const reader = createConversationReader({} as never, { provider: "github", repo: "owner/repo" } as never,
+      async () => ({ details: { threadRead: raw }, selfLogin: "reviewer", replies: [] }));
+    const snapshot = await reader.load().snapshot;
+    expect(snapshot.details.threadRead).toBe(raw);
+    expect(snapshot).toMatchObject({ selfLogin: "reviewer", replies: [] });
+    expect(snapshot.metadata.coverage.threads).toBe("partial");
+  });
+
   it("counts accepted UTF8 output across both channels and stops admission after exhaustion", async () => {
     const exec = vi.fn(async () => result("é", "!"));
     const read = createConversationRead({ exec } as never, { maxBytes: 5 });

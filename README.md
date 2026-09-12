@@ -89,6 +89,8 @@ PR context and Replies distinguish missing resolution from an unresolved thread.
 
 Both panes label incomplete thread reads. An empty partial result means no replies were found in the fetched threads, not that the whole PR conversation is empty.
 
+PR context and Replies share pending reads within a review window. Supplied context does not trigger provider reads; Replies asks for an explicit refresh because the supplied data has no authenticated viewer or stable thread IDs. Press `r` in Replies to start a fresh read, even when the reviewed head is unchanged.
+
 ## Browse and edit code
 
 Run the Explorer, or open a repository-relative file directly in INSERT mode:
