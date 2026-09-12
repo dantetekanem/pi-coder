@@ -13,6 +13,7 @@
 - Preserve admitted conversation checkpoints across interrupted reads and support bounded same-generation retries without accepting stale model updates.
 - Page through PR review threads within read limits, resume admitted outer cursors, and keep usable GraphQL fragments when later data is unavailable.
 - Read additional comment pages within review threads and resume each thread from admitted progress.
+- Page through REST comments and reviews within shared read limits, honoring HTTP status and retaining interrupted progress without following supplied Link hosts.
 
 ## 0.6.2 - 2026-09-02
 
