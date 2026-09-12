@@ -113,6 +113,8 @@ const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
     commentUrl: ["html_url", "url"],
     commentPath: ["path"],
     commentLine: ["line"],
+    commentSide: ["side"],
+    commentCommitId: ["commit_id"],
     checkName: ["name"],
     checkWorkflowName: ["workflowName"],
     checkStatus: ["status"],

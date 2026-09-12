@@ -75,7 +75,7 @@ Common review controls:
 | Arrow keys | Navigate files and diff lines |
 | `c` / `d` | Add a comment / discussion |
 | `Enter` or `m` | Edit the selected line |
-| `v` | Toggle unified and side-by-side views |
+| `v` | Toggle unified and side-by-side views; from an opened PR thread, jump to its verified code location |
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
 | Replies: `t` / `Enter` / `o` / `A` | Switch personal/all fetched threads; inspect full text; open browser; analyze read-only. PgUp/PgDn and gg/G scroll; Esc returns. |

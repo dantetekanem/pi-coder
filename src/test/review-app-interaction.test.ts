@@ -1513,6 +1513,122 @@ describe("Replies pane", () => {
         comments: [{ id: `other-comment-${index}`, author: "other", body: `Unrelated thread ${index}` }] }))] };
   }
 
+  async function createAnchoredThread(pending?: Promise<ReviewFileContents>) {
+    const file = makeFile();
+    Object.assign(file.gitDiff!, { modifiedRevision: "a".repeat(40), originalRevision: "b".repeat(40) });
+    const data = fetchedThreads();
+    Object.assign(data.threads[0]!, { side: "added", headRevision: "a".repeat(40), baseRevision: "b".repeat(40), line: 90 });
+    const originalContent = Array.from({ length: 100 }, (_, index) => `unchanged-${index + 1}`).join("\n");
+    const contents = { originalContent, modifiedContent: originalContent.replace("unchanged-1\n", "changed\n") };
+    const load = vi.fn(async (_root: string, candidate: ReviewFile) => candidate === file && pending != null ? pending : contents);
+    const harness = createHarness(undefined, [makeFile("initial.ts"), file], {
+      loadFileContents: load,
+      reviewHeader: { identity: "PR1", revision: "a".repeat(40) },
+      openUrl: async (url) => ({ status: "opened", url }),
+      repliesSource: { title: "Replies", loadingText: "Loading", get threadData() { return { ...data }; },
+        load: async () => ({ ...makeRepliesSnapshot(1), conversation: data.conversation }) },
+    }, { columns: 220 });
+    await (harness.app as any).ensureActiveEntry();
+    harness.app.render(220);
+    await vi.waitFor(() => expect((harness.app as any).repliesPanelState.status).toBe("ready"));
+    focusReplies(harness.app);
+    harness.app.handleInput("\r");
+    return { ...harness, data, file, contents, load };
+  }
+
+  it.each([
+    "valid", "deleted", "prefix", "all-files", "deleted all-files", "outdated", "unknown side", "unknown head", "different head", "comparison",
+    "unknown base", "different base", "mutable base", "unavailable", "deleted unavailable", "path", "fractional", "zero", "bounds", "missing line",
+  ])("navigates only a verified thread anchor: %s", async (mode) => {
+    const { app, done, data, file, contents, load } = await createAnchoredThread();
+    const thread = data.threads[0]!;
+    const scope = mode.includes("all-files") ? "all-files" : "git-diff";
+    if (scope === "all-files") {
+      file.inAllFiles = true;
+      file.allFiles = file.gitDiff;
+      (app as any).currentVisibleScopes = ["git-diff", "all-files"];
+    }
+    if (mode.startsWith("deleted") || mode.includes("base")) {
+      thread.side = "deleted";
+      thread.path = file.gitDiff!.oldPath = "src/old.ts";
+    }
+    if (mode === "prefix") { file.pathPrefix = "nested"; thread.path = "nested/src/app.ts"; }
+    if (mode === "outdated") thread.outdated = true;
+    if (mode === "unknown side") thread.side = undefined;
+    if (mode === "unknown head") {
+      thread.headRevision = file.gitDiff!.modifiedRevision = (app as any).options.reviewHeader.revision = "HEAD";
+    }
+    if (mode === "different head") thread.headRevision = "c".repeat(40);
+    if (mode === "comparison") file.gitDiff!.modifiedRevision = "c".repeat(40);
+    if (mode === "unknown base") thread.baseRevision = undefined;
+    if (mode === "different base") thread.baseRevision = "c".repeat(40);
+    if (mode === "mutable base") thread.baseRevision = file.gitDiff!.originalRevision = "base";
+    if (mode === "unavailable") Object.assign(contents, { modifiedAvailable: false });
+    if (mode === "deleted unavailable") Object.assign(contents, { originalAvailable: false });
+    if (mode === "path") thread.path = "src/app.ts ";
+    if (mode === "fractional") thread.line = 1.5;
+    if (mode === "zero") thread.line = 0;
+    if (mode === "bounds") thread.line = 101;
+    if (mode === "missing line") thread.line = null;
+    const before = structuredClone((app as any).state);
+    app.handleInput("v");
+    if (["valid", "deleted", "prefix", "all-files", "deleted all-files"].includes(mode)) {
+      await vi.waitFor(() => expect((app as any).state.focus).toBe("diff"));
+      expect(getSelectedLineTarget((app as any).state, file.id, scope)).toEqual({ side: thread.side, line: 90 });
+      expect(app.render(220).join("\n")).toContain("unchanged-90");
+      app.handleInput("\t");
+      app.handleInput("\t");
+      app.handleInput("v");
+      expect((app as any).state.focus).toBe("diff");
+      expect(load).toHaveBeenCalledTimes(2);
+      app.handleInput("c");
+      expect((app as any).editTarget).toMatchObject({ fileId: file.id, scope, side: thread.side, startLine: 90 });
+    } else {
+      await vi.waitFor(() => expect((app as any).message).toContain("not verified"));
+      expect((app as any).state).toEqual(before);
+    }
+    expect(done).not.toHaveBeenCalled();
+    app.dispose();
+  });
+
+  it.each([
+    "stay", "close", "close reject", "scroll", "dispose", "refresh", "snapshot", "comparison", "reject", "empty",
+    ...["threads", "id", "side", "path", "line", "headRevision", "baseRevision", "outdated"].flatMap((field) => [field, `${field} reject`]),
+  ])("validates unloaded thread destinations before navigation: %s", async (action) => {
+    const pending = deferred<ReviewFileContents>();
+    const { app, done, file, data, contents, load } = await createAnchoredThread(pending.promise);
+    const before = structuredClone((app as any).state);
+    app.handleInput("v");
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    app.render(220);
+    expect((app as any).state).toEqual(before);
+    const field = action.split(" ")[0]!;
+    const mutations = { id: "changed", side: "deleted", path: "changed.ts", line: 1,
+      headRevision: "c".repeat(40), baseRevision: "c".repeat(40), outdated: false };
+    if (field === "threads") data.threads = [...data.threads];
+    if (Object.hasOwn(mutations, field)) Object.assign(data.threads[0]!, { [field]: mutations[field as keyof typeof mutations] });
+    if (action.startsWith("close")) app.handleInput("\u001b");
+    if (action === "scroll") app.handleInput("j");
+    if (action === "dispose") app.dispose();
+    if (action === "refresh" || action === "snapshot") data.conversation = conversation(2);
+    if (action === "refresh") {
+      data.threads = [{ ...data.threads[0]! }];
+      app.handleInput("r");
+      await vi.waitFor(() => expect((app as any).repliesRefreshing).toBe(false));
+    }
+    if (action === "comparison") file.gitDiff!.modifiedRevision = "c".repeat(40);
+    const after = structuredClone((app as any).state);
+    const message = (app as any).message;
+    if (action.endsWith("reject")) pending.reject(new Error("File unavailable"));
+    else pending.resolve(action === "empty" ? { originalContent: "", modifiedContent: "" } : contents);
+    await load.mock.results[1]!.value.catch(() => undefined);
+    if (action === "stay") expect((app as any).state.activeFileId).toBe(file.id);
+    else expect((app as any).state).toEqual(after);
+    if (!["stay", "reject", "empty"].includes(action)) expect((app as any).message).toBe(message);
+    expect(done).not.toHaveBeenCalled();
+    app.dispose();
+  });
+
   it.each([false, true])("inspects all full fetched text without requiring viewer identity: %s", async (unknownViewer) => {
     const data = fetchedThreads();
     if (unknownViewer) data.conversation.coverage.identity = "unavailable";
