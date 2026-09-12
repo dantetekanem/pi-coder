@@ -8,6 +8,7 @@ import {
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
 import { sanitizeTerminalText } from "./sanitize.js";
+import { createConversationRead } from "./conversation.js";
 import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewThreadCoverage } from "./types.js";
 
 const MAX_REPLY_BODY_LENGTH = 1200;
@@ -363,24 +364,30 @@ export async function fetchReviewThreads(
 }
 
 async function fetchReviewRepliesForProvider(
-  pi: ExtensionAPI,
+  read: ReturnType<typeof createConversationRead>,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
 ): Promise<ReviewRepliesSnapshot> {
+  const pi = read.pi;
   const pullRequest = target.pullRequest;
   const repo = target.repo ?? pullRequest?.repo;
   if (pullRequest == null || repo == null) throw new Error("Replies need a remote pull request with a known repository.");
 
-  const [selfLogin, read] = await Promise.all([
-    getSelfLogin(pi, target, provider, repo, pullRequest.number),
-    fetchReviewThreads(pi, target, provider, repo, pullRequest.number),
+  const [selfLogin, threads] = await Promise.all([
+    getSelfLogin(pi, target, provider, repo, pullRequest.number).then(read.retain),
+    fetchReviewThreads(pi, target, provider, repo, pullRequest.number).then(read.retain),
   ]);
   if (selfLogin == null) throw new Error(`Could not resolve your ${provider.label} identity; replies need it to tell your threads apart.`);
-  return { replies: collectRepliesToSelf(read.threads, selfLogin), selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: read.coverage };
+  return read.retain({ replies: collectRepliesToSelf(threads.threads, selfLogin), selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: threads.coverage });
+}
+
+function fetchBoundedReplies(pi: ExtensionAPI, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
+  const read = createConversationRead(pi);
+  return fetchReviewRepliesForProvider(read, target, provider).finally(read.close);
 }
 
 export async function fetchReviewReplies(pi: ExtensionAPI, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {
-  return fetchReviewRepliesForProvider(pi, target, providerForTarget(target));
+  return fetchBoundedReplies(pi, target, providerForTarget(target));
 }
 
 function modelArgs(ctx: ExtensionContext): string[] {
@@ -454,7 +461,7 @@ export function createRemoteReviewRepliesSource(
   return {
     title: `${provider.label} replies`,
     loadingText: `Reading ${provider.label} replies to your review comments...`,
-    load: () => fetchReviewRepliesForProvider(pi, target, provider),
+    load: () => fetchBoundedReplies(pi, target, provider),
     analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
   };
 }

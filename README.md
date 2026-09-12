@@ -83,7 +83,7 @@ Common review controls:
 
 The context pane shows fetched PR facts, including the reviewed head, before the optional generated explanation. The explanation appears below those facts without replacing them or resetting your scroll position.
 
-Failed context sections are labeled unavailable; successfully fetched facts remain visible.
+Known checks, comments, and reviews appear while slower conversation reads are still pending. Failed or limited sections are labeled unavailable; successfully fetched facts remain visible.
 
 PR context and Replies distinguish missing resolution from an unresolved thread. Replies from deleted or unavailable authors remain visible as `unknown`.
 
