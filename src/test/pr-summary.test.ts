@@ -554,6 +554,75 @@ describe("shared pull request sources", () => {
     }
   });
 
+  it.each(["request", "bytes", "retained", "time", "provider"])("keeps admitted outer pages through %s failure and retries the same cursor", async (failure) => {
+    const cursor = 'two  "pages" {x} __CODE_DIFF_QUERY_OPEN__ $&';
+    const firstPage = graph("First reply");
+    Object.assign(firstPage.data.repository.pullRequest.reviewThreads.pageInfo, { hasNextPage: true, endCursor: cursor });
+    const lastPage = graph("é".repeat(2000));
+    Object.assign(lastPage.data.repository.pullRequest.reviewThreads.nodes[0]!, { id: "last", isResolved: null });
+    Object.assign(lastPage.data.repository.pullRequest.reviewThreads.nodes[0]!.comments.nodes[1]!, { author: null });
+    let failing = true;
+    let now = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const normal = executor(async () => firstPage);
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (args[0] !== "query" || !args.at(-1)!.includes("after:")) return normal(command, args);
+      if (failure === "provider" && failing) throw new Error("rate limited");
+      if (failure === "time") now += 2000;
+      return { code: 0, stderr: "", killed: false, stdout: JSON.stringify(lastPage) };
+    });
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    const budgets = { maxRequests: failure === "request" ? 3 : 12, maxBytes: failure === "bytes" ? 1500 : 200_000,
+      maxRetainedBytes: failure === "retained" ? 20_000 : 200_000, maxMs: failure === "time" ? 1000 : 30_000 };
+    try {
+      const context = sources.contextPanelSource!.load(update, { budgets });
+      const first = await sources.repliesSource!.load();
+      await context;
+      expect(first.replies.map((reply) => reply.body)).toEqual(["First reply"]);
+      expect(first.conversation?.coverage.threads).toBe("partial");
+      expect(first.conversation?.continuation).toBeDefined();
+      const original = JSON.stringify(first);
+      failing = false;
+      const last = await sources.repliesSource!.load({ continuation: first.conversation!.continuation,
+        budgets: { maxRequests: 1, maxBytes: 200_000, maxRetainedBytes: 200_000, maxMs: 5000 } });
+      expect(last.conversation?.generation).toBe(first.conversation?.generation);
+      expect(last.conversation?.coverage.threads).toBe("complete");
+      expect(last.conversation?.continuation).toBeUndefined();
+      expect(last.replies.find((reply) => reply.threadId === "last")).toMatchObject({ author: "unknown", resolved: null });
+      expect(JSON.stringify(first)).toBe(original);
+      const requested = exec.mock.calls.filter(([, args]) => args[0] === "query").map(([, args]) =>
+        args.at(-1)!.match(/after:\s*("(?:\\.|[^"\\])*")/)?.[1]).filter((value) => value != null).map((value) => JSON.parse(value!));
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((value) => value === cursor)).toBe(true);
+      expect(exec.mock.calls.filter(([, args]) => args[0] === "identity")).toHaveLength(1);
+      expect(exec.mock.calls.some(([, args]) => args[0] === "threads")).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("retries a wholly unavailable GraphQL read without fallback and rejects its consumed token", async () => {
+    const config = settings();
+    const { reviewComments, ...operations } = config.providers.primary.operations;
+    writeFileSync(settingsPath, JSON.stringify({ ...config, providers: { primary: { ...config.providers.primary, operations } } }));
+    let queries = 0;
+    const exec = executor(async () => ++queries === 1 ? { errors: [{ message: "rate limit" }] } : graph());
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    const context = sources.contextPanelSource!.load(update);
+    await expect(sources.repliesSource!.load()).rejects.toThrow("Review threads unavailable");
+    await context;
+    const first = update.mock.lastCall?.[1];
+    expect(first?.coverage.threads).toBe("unavailable");
+    expect(first?.continuation).toBeDefined();
+    const result = await sources.repliesSource!.load({ continuation: first!.continuation });
+    expect(result.replies[0]?.body).toBe("Current reply");
+    expect(result.conversation).toMatchObject({ generation: first!.generation, coverage: { threads: "complete" } });
+    await expect(sources.repliesSource!.load({ continuation: first!.continuation })).rejects.toThrow(/Stale/);
+    expect(queries).toBe(2);
+  });
+
   it("keeps admitted threads through later exhaustion and retries without accepting an older same-generation model", async () => {
     const config = settings();
     config.providers.primary.capabilities.separatePullRequestContext = true;

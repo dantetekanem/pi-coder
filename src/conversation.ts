@@ -122,7 +122,7 @@ export function createConversationReader(
           details, selfLogin, replies, supplied: fromHandoff,
           metadata: {
             identity, generation: id, attempt: revision, fetchedAt: fromHandoff ? null : new Date().toISOString(),
-            continuation: !fromHandoff && (selfLogin == null || details.unavailable!.length > 0) ? retry : undefined,
+            continuation: !fromHandoff && (selfLogin == null || details.unavailable!.length > 0 || details.threadRead?.pagination?.done === false) ? retry : undefined,
             coverage: {
               details: coverage("PR details", fromHandoff ? "partial" : "complete"),
               comments: coverage("PR comments", "partial"), reviews: coverage("reviews", "partial"),
