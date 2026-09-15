@@ -81,11 +81,13 @@ function createHarness(
   contents: ReviewFileContents = { originalContent: "\told()  \n", modifiedContent: "\tcurrent()  \n" },
   files = [makeFile()],
   overrides: Partial<ConstructorParameters<typeof ReviewApp>[3]> = {},
-  terminal: { rows?: number; columns?: number } = {},
+  terminal: { rows?: number; columns?: number; mode?: "regular" | "fullscreen" } = {},
+  tuiOverride?: unknown,
 ) {
   const loadFileContents = vi.fn(async () => contents);
   const terminalWrite = vi.fn<(data: string) => void>();
   const tui = {
+    mode: terminal.mode ?? "regular",
     terminal: { write: terminalWrite, rows: terminal.rows ?? 30, columns: terminal.columns ?? 120 },
     requestRender: vi.fn(),
     getShowHardwareCursor: vi.fn(() => false),
@@ -96,7 +98,7 @@ function createHarness(
     bg: (_color: string, text: string) => text,
   };
   const done = vi.fn();
-  const app = new ReviewApp(tui as never, theme as never, done, {
+  const app = new ReviewApp((tuiOverride ?? tui) as never, theme as never, done, {
     files,
     repoRoot: "/repo",
     loadFileContents,
@@ -766,13 +768,145 @@ describe("ReviewApp interaction", () => {
     unavailableHarness.app.dispose();
   });
 
-  it("leaves mouse reporting to tmux for native selection", async () => {
+  it.each(["unified", "side-by-side"])("scrolls the %s diff viewport with Pi mouse events and resumes keyboard navigation", async (mode) => {
+    const content = Array.from({ length: 80 }, (_, index) => `line_${index + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    const before = app.render(120);
+    const bounds = (app as any).mousePaneLayout.diff;
+    const selected = (app as any).state.selectedLineTargetByScopeFile;
+    const wheel = (delta: number) => app.handleMouse({
+      type: "wheel", x: bounds.left + 1, y: bounds.top + 1, wheelDelta: delta,
+    });
+
+    expect(wheel(3)).toEqual({ handled: true });
+    expect(app.render(120)).not.toEqual(before);
+    expect((app as any).diffScroll).toBe(3);
+    expect((app as any).state.selectedLineTargetByScopeFile).toEqual(selected);
+    wheel(1000);
+    expect(app.render(120).join("\n")).toContain("line_80");
+    const bottom = (app as any).diffScroll;
+    expect(bottom).toBeGreaterThan(3);
+    wheel(1000);
+    app.render(120);
+    expect((app as any).diffScroll).toBe(bottom);
+    wheel(-1000);
+    app.render(120);
+    expect((app as any).diffScroll).toBe(0);
+    wheel(30);
+    app.render(120);
+    app.handleInput("\x1b[B");
+    app.render(120);
+    expect((app as any).diffScroll).toBeLessThan(30);
+    expect(app.handleMouse({ type: "press", x: 0, y: 0 })).toBeUndefined();
+    app.handleInput(`\x1b[<65;${bounds.left + 2};${bounds.top + 2}M`);
+    expect(app.render(120)).not.toEqual(before);
+    expect((app as any).diffScroll).toBe(1);
+    app.handleInput("c");
+    const editing = app.render(120);
+    wheel(3);
+    expect(app.render(120)).toEqual(editing);
+    app.dispose();
+  });
+
+  it("follows the new file selection after wheeling in the navigator", async () => {
+    const content = Array.from({ length: 80 }, (_, index) => `line_${index + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content }, [makeFile(), makeFile("src/next.ts")]);
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.render(120);
+    const { diff, navigator } = (app as any).mousePaneLayout;
+    app.handleMouse({ type: "wheel", x: diff.left + 1, y: diff.top + 1, wheelDelta: 30 });
+    app.render(120);
+    app.handleMouse({ type: "wheel", x: navigator.left + 1, y: navigator.top + 1, wheelDelta: 1 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledTimes(2));
+    expect(app.render(120).join("\n")).toContain("line_1 ");
+    expect((app as any).state.activeFileId).toBe(makeFile("src/next.ts").id);
+    app.dispose();
+  });
+
+  it("routes terminal wheel and file clicks through the real regular-mode Pi renderer", async () => {
+    const runtime = await import(process.env.PI_CODER_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
+    const Renderer = runtime.TuiMainScreen ?? runtime.TUI;
+    let input = (_data: string) => {};
+    const terminal = {
+      rows: 30, columns: 120, kittyProtocolActive: false,
+      start: (onInput: typeof input) => { input = onInput; },
+      stop: vi.fn(), write: vi.fn(), hideCursor: vi.fn(), showCursor: vi.fn(),
+    };
+    const tui = new Renderer(terminal);
+    const files = [makeFile("src/first.ts"), makeFile("src/second.ts")];
+    const content = Array.from({ length: 80 }, (_, index) => `row_${index}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content }, files, {}, {}, tui);
+    try {
+      tui.start();
+      tui.showOverlay(app, { anchor: "center", width: "100%", maxHeight: "100%", margin: { top: 1, bottom: 1 } });
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      const rendered = app.render(120);
+      const { diff, navigator } = (app as any).mousePaneLayout;
+      expect(terminal.write).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
+      input(`\x1b[<65;${diff.left + 2};${diff.top + 2}M`);
+      app.render(120);
+      expect((app as any).diffScroll).toBe(1);
+      const row = rendered.findIndex((line) => line.includes("second.ts")) + 3;
+      input(`\x1b[<0;${navigator.left + 2};${row}M`);
+      expect((app as any).state.activeFileId).toBe(files[1]!.id);
+    } finally {
+      tui.hideOverlay();
+      app.dispose();
+      tui.stop();
+    }
+    expect(terminal.write).toHaveBeenCalledWith("\x1b[?1006l\x1b[?1000l");
+  });
+
+  it("captures regular-mode mouse input only while the review is open", async () => {
     const { app, loadFileContents, terminalWrite } = createHarness();
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    expect(terminalWrite).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
 
-    expect(terminalWrite).not.toHaveBeenCalled();
+    app.dispose();
+    app.dispose();
+    expect(terminalWrite.mock.calls).toEqual([
+      ["\x1b[?1000h\x1b[?1006h"], ["\x1b[?1006l\x1b[?1000l"],
+    ]);
+  });
+
+  it("keeps Pi-owned mouse reporting intact in fullscreen mode", async () => {
+    const { app, loadFileContents, terminalWrite } = createHarness(undefined, undefined, {}, { mode: "fullscreen" });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
     app.dispose();
     expect(terminalWrite).not.toHaveBeenCalled();
+  });
+
+  it.each(["raw", "normalized"])("selects rendered navigator file rows using %s mouse input after scrolling and resizing", async (input) => {
+    const files = Array.from({ length: 25 }, (_, index) => makeFile(`src/file${String(index).padStart(2, "0")}.ts`));
+    const { app, loadFileContents } = createHarness(undefined, files, {}, { columns: 160, rows: 40 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("G");
+    app.render(160);
+    const rendered = app.render(140);
+    const originX = 10;
+    const originY = 2;
+    const bounds = (app as any).mousePaneLayout.navigator;
+    const screenX = bounds.left + 2;
+    const screenY = rendered.findIndex((line) => line.includes("file23.ts")) + originY;
+    expect(screenY).toBeGreaterThan(bounds.top);
+    const press = (y: number) => {
+      if (input === "raw") app.handleInput(`\x1b[<0;${screenX + 1};${y + 1}M`);
+      else app.handleMouse({ type: "press", button: "left", x: screenX - originX, y: y - originY, screenX, screenY: y });
+    };
+
+    press(screenY);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    expect((app as any).state.focus).toBe("navigator");
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenLastCalledWith("/repo", files[23], "git-diff"));
+    press(bounds.top);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    app.handleInput("\r");
+    app.handleInput("c");
+    press(screenY + 1);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    app.dispose();
   });
 
   it("starts a new grouped review on the first visible navigator file", async () => {
