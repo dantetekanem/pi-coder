@@ -1508,6 +1508,8 @@ export class ReviewApp {
   private message: string | null = null;
   private navigatorScroll = 0;
   private diffScroll = 0;
+  private diffWheelScrolling = false;
+  private diffMaxScroll = 0;
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
   private contextRequestToken = 0;
@@ -1529,6 +1531,8 @@ export class ReviewApp {
   private relatedFilterAnchorFileId: string | null = null;
   private relatedFilterReturnFileId: string | null = null;
   private mousePaneLayout: MousePaneLayout | null = null;
+  private readonly navigatorFileRows = new Map<number, string>();
+  private ownsMouseReporting = false;
   private lastWidth = 120;
   private diffActionHintCache: { width: number; line: string } | null = null;
   private pendingVimSequence: "g" | null = null;
@@ -1597,10 +1601,18 @@ export class ReviewApp {
       this.ensureContextPanel();
       this.requestRender();
     });
+    if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
+      this.ownsMouseReporting = true;
+      this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+    }
   }
 
   dispose(): void {
     this.disposed = true;
+    if (this.ownsMouseReporting) {
+      this.ownsMouseReporting = false;
+      this.tui.terminal.write("\x1b[?1006l\x1b[?1000l");
+    }
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -3592,22 +3604,72 @@ export class ReviewApp {
     this.requestRender();
   }
 
-  private handleMouseWheel(data: string): boolean {
-    const event = parseMouseWheelInput(data);
-    if (event == null) return false;
+  // Structural input keeps compatibility with Pi versions predating normalized mouse events.
+  handleMouse(event: {
+    type: string;
+    button?: string;
+    x: number;
+    y: number;
+    screenX?: number;
+    screenY?: number;
+    wheelDelta?: number;
+  }): { handled: true } | undefined {
+    const col = (event.screenX ?? event.x) + 1;
+    const row = (event.screenY ?? event.y) + 1;
+    if (event.type === "wheel") {
+      this.scrollMousePane(col, row, event.wheelDelta ?? 0);
+      return { handled: true };
+    }
+    if (event.type === "press" && event.button === "left" && this.selectNavigatorAtMouse(col, row)) {
+      return { handled: true };
+    }
+    return undefined;
+  }
 
-    const pane = this.getPaneAtMousePosition(event.col, event.row);
+  private handleMouseInput(data: string): boolean {
+    const wheel = parseMouseWheelInput(data);
+    if (wheel != null) return this.scrollMousePane(wheel.col, wheel.row, wheel.direction === "down" ? 1 : -1);
+    const mouse = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+    if (mouse == null) return false;
+    if (mouse[1] === "0" && mouse[4] === "M") {
+      this.selectNavigatorAtMouse(Number(mouse[2]), Number(mouse[3]));
+    }
+    return true;
+  }
+
+  private mouseNavigationBlocked(): boolean {
+    return this.editTarget != null || this.reanchorTarget != null
+      || this.helpMode || this.confirmCancel || this.searchMode || this.shortcutMode;
+  }
+
+  private selectNavigatorAtMouse(col: number, row: number): boolean {
+    if (this.mouseNavigationBlocked() || this.getPaneAtMousePosition(col, row) !== "navigator") return false;
+    const bounds = this.mousePaneLayout?.navigator;
+    if (bounds == null || col - 1 <= bounds.left || col - 1 >= bounds.right || row - 1 >= bounds.bottom) return false;
+    const fileId = this.navigatorFileRows.get(row - 1 - bounds.top);
+    if (fileId == null) return false;
+    this.diffWheelScrolling = false;
+    this.state = setFocus(setActiveFileId(this.state, this.files, fileId), "navigator");
+    void this.ensureActiveEntry();
+    this.requestRender();
+    return true;
+  }
+
+  private scrollMousePane(col: number, row: number, delta: number): boolean {
+    if (delta === 0 || this.mouseNavigationBlocked()) return true;
+    const pane = this.getPaneAtMousePosition(col, row);
     if (pane == null) return true;
-
-    const delta = event.direction === "down" ? 1 : -1;
     if (pane === "navigator") {
+      this.diffWheelScrolling = false;
       this.state = setFocus(this.state, "navigator");
       this.moveNavigatorSelection(delta);
       return true;
     }
     if (pane === "diff") {
       this.state = setFocus(this.state, "diff");
-      this.moveDiffSelection(delta);
+      this.diffWheelScrolling = true;
+      this.diffScroll = Math.max(0, Math.min(this.diffMaxScroll, this.diffScroll + delta));
+      this.requestRender();
       return true;
     }
     if (pane === "comments") {
@@ -3705,7 +3767,8 @@ export class ReviewApp {
       this.handleReanchorInput(data);
       return;
     }
-    if (this.handleMouseWheel(data)) return;
+    if (this.handleMouseInput(data)) return;
+    this.diffWheelScrolling = false;
 
     if (this.editTarget != null) {
       if (matchesKey(data, Key.escape)) {
@@ -4069,6 +4132,7 @@ export class ReviewApp {
   }
 
   private renderNavigator(width: number, height: number): string[] {
+    this.navigatorFileRows.clear();
     const files = this.getNavigatorFiles();
     const lines: string[] = [];
     const relatedAnchor = this.relatedFilterAnchorFile();
@@ -4116,6 +4180,7 @@ export class ReviewApp {
         continue;
       }
       const { file, group } = entry;
+      this.navigatorFileRows.set(lines.length + 1, file.id);
       const active = file.id === this.state.activeFileId;
       const prefix = active ? this.theme.fg("accent", "›") : " ";
       const status = this.theme.fg(active ? "accent" : "muted", getStatusLabel(file, this.state.activeScope));
@@ -4197,13 +4262,15 @@ export class ReviewApp {
       layout?.sideBySideRowOffsets.set(heightKey, rowOffsets);
     }
 
+    this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - viewportHeight);
+    if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
     const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const selectedRowIndex = selectedTarget == null
       ? -1
       : layout?.sideBySideTargetRowIndexes.get(`${selectedTarget.side}:${selectedTarget.line}`) ?? -1;
     let selectedIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 1] ?? 0;
     let selectedEndIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 2] ?? selectedIndex + 1;
-    if (selectedRowIndex >= 0) {
+    if (selectedRowIndex >= 0 && !this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex);
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
@@ -4402,6 +4469,8 @@ export class ReviewApp {
         rowOffsets = getRowOffsets(rowHeights);
         layout.unifiedRowOffsets.set(heightKey, rowOffsets);
       }
+      this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - maxBody);
+      if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
       const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       const selectedRowIndex = selectedTarget == null
         ? -1
@@ -4409,7 +4478,7 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
-        this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       renderedStartOffset = virtualRange.startOffset;
@@ -4470,7 +4539,7 @@ export class ReviewApp {
       const anchorTop = Math.max(0, editorStart - 1);
       if (editorEnd >= this.diffScroll + maxBody) this.diffScroll = editorEnd - maxBody + 1;
       if (anchorTop < this.diffScroll && editorEnd - anchorTop < maxBody) this.diffScroll = anchorTop;
-    } else {
+    } else if (!this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
     }
     this.diffScroll = Math.max(0, this.diffScroll);
