@@ -554,6 +554,48 @@ describe("shared pull request sources", () => {
     }
   });
 
+  it("keeps admitted threads through later exhaustion and retries without accepting an older same-generation model", async () => {
+    const config = settings();
+    config.providers.primary.capabilities.separatePullRequestContext = true;
+    writeFileSync(settingsPath, JSON.stringify(config));
+    const reviews = deferred<unknown>();
+    const model = deferred<string>();
+    const rows = [{ text: "x".repeat(2_000_000) }];
+    let attempts = 0;
+    const normal = executor(async () => graph(), () => model.promise);
+    const exec = vi.fn(async (command: string, args: string[]) => args[0] === "decisions"
+      ? { code: 0, stdout: JSON.stringify(++attempts === 1 ? await reviews.promise : rows), stderr: "", killed: false }
+      : normal(command, args));
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    const context = sources.contextPanelSource!.load(update);
+    const waiting = sources.repliesSource!.load();
+    void waiting.catch(() => undefined);
+    try {
+      await context;
+      await new Promise(setImmediate);
+      reviews.resolve(rows);
+      const first = await waiting;
+      expect(first.replies[0]?.body).toBe("Current reply");
+      expect(first.conversation?.coverage).toMatchObject({ reviews: "unavailable", threads: "complete" });
+      await vi.waitFor(() => expect(normal.mock.calls.some(([command]) => command === "pi")).toBe(true));
+      const previous = update.mock.lastCall;
+      const second = await sources.repliesSource!.load({ continuation: first.conversation!.continuation,
+        budgets: { maxBytes: 3_000_000, maxRetainedBytes: 20_000_000 } });
+      expect(second.conversation?.generation).toBe(first.conversation?.generation);
+      expect(second.conversation?.coverage.reviews).toBe("partial");
+      expect(second.conversation?.continuation).toBeUndefined();
+      expect(exec.mock.calls.filter(([, args]) => args[0] === "identity")).toHaveLength(1);
+      model.resolve("Outdated explanation");
+      await new Promise(setImmediate);
+      expect(update.mock.lastCall).toBe(previous);
+    } finally {
+      reviews.resolve([]);
+      model.resolve("");
+      await waiting.catch(() => undefined);
+    }
+  });
+
   it("preserves known identity and facts when the shared output budget rejects threads", async () => {
     const exec = executor(async () => graph("x".repeat(2_000_000)));
     const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
@@ -574,7 +616,10 @@ describe("shared pull request sources", () => {
       : { contextPanelSource: createRemotePullRequestSummarySource({ exec } as never, {} as never, supplied),
         repliesSource: createRemoteReviewRepliesSource({ exec } as never, {} as never, supplied) };
     const update = vi.fn();
+    await expect(sources.contextPanelSource!.load(update, { budgets: { maxMs: -1 } })).rejects.toThrow(/budget/i);
     await sources.contextPanelSource!.load(update);
+    await expect(sources.contextPanelSource!.load(undefined, { refresh: mode === "standalone", budgets: {} })).rejects.toThrow(/budget/i);
+    await expect(sources.repliesSource!.load({ refresh: true, continuation: {} })).rejects.toThrow(/continuation/i);
     await expect(sources.repliesSource!.load()).rejects.toThrow(/refresh/i);
     expect(exec).not.toHaveBeenCalled();
     if (mode === "shared") expect(update.mock.lastCall?.[1]).toMatchObject({ fetchedAt: null, coverage: { identity: "unavailable" },

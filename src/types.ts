@@ -1,3 +1,5 @@
+import type { ConversationReadLimits } from "./conversation.js";
+
 export type ReviewScope = "git-diff" | "last-commit" | "all-files";
 
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
@@ -57,11 +59,17 @@ export interface ReviewFileContents {
 export interface ReviewConversationMetadata {
   identity: string;
   generation: number;
+  attempt?: number;
+  continuation?: object;
   fetchedAt: string | null;
   coverage: Record<"details" | "comments" | "reviews" | "threads" | "checks" | "identity", "pending" | "complete" | "partial" | "unavailable">;
 }
 
-export interface ReviewConversationLoadOptions { refresh?: boolean }
+export interface ReviewConversationLoadOptions {
+  refresh?: boolean;
+  continuation?: object;
+  budgets?: ConversationReadLimits;
+}
 
 export interface ReviewContextPanelSource {
   title: string;
