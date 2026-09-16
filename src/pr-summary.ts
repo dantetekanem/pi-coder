@@ -10,7 +10,7 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
-import { collectRepliesToSelf, createRemoteReviewRepliesSource, fetchReviewThreads, getSelfLogin, type ReviewThreadRead } from "./review-replies.js";
+import { prepareRepliesToSelf, createRemoteReviewRepliesSource, fetchReviewThreads, getSelfLogin, type ReviewThreadRead } from "./review-replies.js";
 import { createConversationRead, createConversationReader } from "./conversation.js";
 import { fetchProviderRestPages, type ProviderRestPage } from "./provider-rest-pages.js";
 
@@ -589,8 +589,9 @@ export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionC
     let known: Parameters<typeof onProgress>[0] = { ...previous };
     const publish = (progress: typeof known) => {
       known = { ...known, ...progress };
-      onProgress({ ...known, replies: known.details?.threadRead != null && known.selfLogin != null
-        ? collectRepliesToSelf(known.details.threadRead.threads, known.selfLogin) : undefined });
+      const preview = known.details?.threadRead != null && known.selfLogin != null
+        ? prepareRepliesToSelf(known.details.threadRead.threads, known.selfLogin) : { replies: undefined, totalReplies: undefined };
+      onProgress({ ...known, ...preview });
     };
     const [details, selfLogin] = await Promise.all([
       fetchPullRequestDetails(read, target, provider, (details) => publish({ details }), previous?.details),
@@ -599,9 +600,9 @@ export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionC
         return selfLogin;
       }).catch(() => null),
     ]);
-    const replies = details.threadRead != null && selfLogin != null
-      ? collectRepliesToSelf(details.threadRead.threads, selfLogin) : undefined;
-    return { details, selfLogin, replies };
+    const preview = details.threadRead != null && selfLogin != null
+      ? prepareRepliesToSelf(details.threadRead.threads, selfLogin) : { replies: undefined, totalReplies: undefined };
+    return { details, selfLogin, ...preview };
   }, suppliedPullRequestDetails(target, provider));
   return { contextPanelSource: createRemotePullRequestSummarySource(pi, ctx, target, reader), repliesSource: createRemoteReviewRepliesSource(pi, ctx, target, reader) };
 }
@@ -612,6 +613,7 @@ export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: Exte
   let requestToken = 0;
   let useHandoff = true;
   return {
+    conversation: reader,
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
     load: async (onUpdate, options) => {
