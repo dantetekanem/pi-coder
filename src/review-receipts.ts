@@ -35,6 +35,10 @@ export interface ReviewReceipt {
   number: string;
   url: string;
   verdict: ReviewReceiptVerdict;
+  intendedVerdict?: ReviewReceiptVerdict;
+  outcome?: "submitted" | "partial";
+  commentsTotal?: number;
+  commentsTruncated?: boolean;
   submittedAt: string;
   reviewIds: string[];
   selfPrincipalId: string | null;
@@ -61,6 +65,8 @@ export interface ReviewReceiptInput {
   number: string;
   url: string;
   verdict: ReviewReceiptVerdict;
+  intendedVerdict?: ReviewReceiptVerdict;
+  outcome?: "submitted" | "partial";
   reviewIds?: Array<string | number | null | undefined>;
   selfPrincipalId?: string | null;
   headSha?: string | null;
@@ -123,6 +129,10 @@ export function buildReviewReceipt(input: ReviewReceiptInput): ReviewReceipt {
     number: input.number,
     url: input.url,
     verdict: input.verdict,
+    ...(input.intendedVerdict == null ? {} : { intendedVerdict: input.intendedVerdict }),
+    ...(input.outcome == null ? {} : { outcome: input.outcome }),
+    commentsTotal: input.comments?.length ?? 0,
+    commentsTruncated: (input.comments?.length ?? 0) > comments.length,
     submittedAt: input.submittedAt ?? new Date().toISOString(),
     reviewIds: (input.reviewIds ?? []).map(normalizeId).filter((id): id is string => id != null),
     selfPrincipalId: input.selfPrincipalId ?? null,
@@ -189,6 +199,10 @@ export function parseReviewReceipt(value: unknown): ReviewReceipt | null {
     number: value.number,
     url: value.url,
     verdict: value.verdict,
+    ...(value.intendedVerdict === "approve" || value.intendedVerdict === "request_changes" || value.intendedVerdict === "comment" ? { intendedVerdict: value.intendedVerdict } : {}),
+    ...(value.outcome === "submitted" || value.outcome === "partial" ? { outcome: value.outcome } : {}),
+    ...(typeof value.commentsTotal === "number" && Number.isSafeInteger(value.commentsTotal) && value.commentsTotal >= 0 ? { commentsTotal: value.commentsTotal } : {}),
+    ...(typeof value.commentsTruncated === "boolean" ? { commentsTruncated: value.commentsTruncated } : {}),
     submittedAt: typeof value.submittedAt === "string" ? value.submittedAt : "",
     reviewIds: Array.isArray(value.reviewIds) ? value.reviewIds.filter((id): id is string => typeof id === "string") : [],
     selfPrincipalId: typeof value.selfPrincipalId === "string" ? value.selfPrincipalId : null,
