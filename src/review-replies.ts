@@ -22,6 +22,8 @@ const QUERY_CLOSE_TOKEN = "__CODE_DIFF_QUERY_CLOSE__";
 export interface ReplyThreadComment {
   id: string;
   author: string;
+  /** The author label is a placeholder, not a provider principal. */
+  authorUnknown?: boolean;
   body: string;
   createdAt?: string;
   url?: string;
@@ -31,7 +33,8 @@ export interface ReplyThreadComment {
 
 export interface ReplyThread {
   id: string;
-  resolved: boolean;
+  resolved: boolean | null;
+  outdated?: boolean;
   path?: string;
   line?: number | null;
   comments: ReplyThreadComment[];
@@ -45,10 +48,12 @@ query PullRequestReplyThreads($owner: String!, $name: String!, $number: Int!) {
         nodes {
           id
           isResolved
+          isOutdated
           path
           line
           comments(first: 100) {
             nodes {
+              id
               databaseId
               author { login }
               body
@@ -88,8 +93,8 @@ function orderThreadComments(comments: ReplyThreadComment[]): ReplyThreadComment
     .map((entry) => entry.comment);
 }
 
-function samePrincipal(author: string, self: string): boolean {
-  return author.trim().toLowerCase() === self.trim().toLowerCase();
+function samePrincipal(comment: ReplyThreadComment, self: string): boolean {
+  return comment.authorUnknown !== true && comment.author.trim().toLowerCase() === self.trim().toLowerCase();
 }
 
 /**
@@ -104,12 +109,12 @@ export function collectRepliesToSelf(threads: ReplyThread[], selfLogin: string |
     const comments = orderThreadComments(thread.comments);
     let lastSelfIndex = -1;
     for (const [index, comment] of comments.entries()) {
-      if (samePrincipal(comment.author, selfLogin)) lastSelfIndex = index;
+      if (samePrincipal(comment, selfLogin)) lastSelfIndex = index;
     }
     if (lastSelfIndex < 0) continue;
 
     for (const comment of comments.slice(lastSelfIndex + 1)) {
-      if (samePrincipal(comment.author, selfLogin)) continue;
+      if (samePrincipal(comment, selfLogin)) continue;
       replies.push({
         id: `${thread.id}:${comment.id}`,
         threadId: thread.id,
@@ -168,21 +173,23 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
   for (const row of rows) {
     if (!isRecord(row)) continue;
     const author = providerString(provider, "commentAuthor", row);
-    const body = providerString(provider, "commentBody", row);
+    const body = readConfiguredField(provider, "commentBody", row);
     const id = providerIdentifier(provider, "commentId", row);
-    if (author == null || body == null || id == null) continue;
+    if (typeof body !== "string" || id == null) continue;
 
     const threadId = providerIdentifier(provider, "commentThreadId", row)
       ?? providerIdentifier(provider, "commentReplyToId", row)
       ?? id;
-    const resolved = readConfiguredField(provider, "commentResolved", row) === true;
+    const reportedResolution = readConfiguredField(provider, "commentResolved", row);
+    const resolved = typeof reportedResolution === "boolean" ? reportedResolution : null;
     const path = providerString(provider, "commentPath", row);
     const line = providerNumber(provider, "commentLine", row) ?? null;
 
     const existing = threads.get(threadId);
     const comment: ReplyThreadComment = {
       id,
-      author,
+      author: author ?? "unknown",
+      ...(author == null ? { authorUnknown: true } : {}),
       body,
       ...(providerString(provider, "commentCreatedAt", row) == null ? {} : { createdAt: providerString(provider, "commentCreatedAt", row)! }),
       ...(providerString(provider, "commentUrl", row) == null ? {} : { url: providerString(provider, "commentUrl", row)! }),
@@ -194,7 +201,7 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
       continue;
     }
     existing.comments.push(comment);
-    if (resolved) existing.resolved = true;
+    if (resolved != null && existing.resolved !== true) existing.resolved = resolved;
   }
 
   return [...threads.values()];
@@ -219,10 +226,12 @@ export function parseGraphqlReplyThreads(payload: unknown): ReplyThread[] {
       if (!isRecord(raw)) continue;
       const author = isRecord(raw.author) ? readString(raw.author.login) : undefined;
       const body = typeof raw.body === "string" ? raw.body : undefined;
-      if (author == null || body == null) continue;
+      const id = readIdentifier(raw.databaseId) ?? readIdentifier(raw.id);
+      if (body == null || id == null) continue;
       comments.push({
-        id: readIdentifier(raw.databaseId) ?? `${threadId}:${comments.length}`,
-        author,
+        id,
+        author: author ?? "unknown",
+        ...(author == null ? { authorUnknown: true } : {}),
         body,
         ...(readString(raw.createdAt) == null ? {} : { createdAt: readString(raw.createdAt)! }),
         ...(readString(raw.url) == null ? {} : { url: readString(raw.url)! }),
@@ -232,7 +241,8 @@ export function parseGraphqlReplyThreads(payload: unknown): ReplyThread[] {
     }
     threads.push({
       id: threadId,
-      resolved: node.isResolved === true,
+      resolved: typeof node.isResolved === "boolean" ? node.isResolved : null,
+      outdated: typeof node.isOutdated === "boolean" ? node.isOutdated : undefined,
       ...(readString(node.path) == null ? {} : { path: readString(node.path)! }),
       line: typeof node.line === "number" ? node.line : null,
       comments,

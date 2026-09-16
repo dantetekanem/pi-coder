@@ -6,6 +6,8 @@ import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import type { DiffReviewComment, ReviewComposition, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
 import { hashTargetSlice } from "../workbench/target.js";
+import * as piRender from "../pi-render.js";
+import { getSelectedLineTarget } from "../state.js";
 
 const STATUS_CELL_BOUND = 96;
 const STATUS_BYTE_BOUND = 256;
@@ -79,11 +81,13 @@ function createHarness(
   contents: ReviewFileContents = { originalContent: "\told()  \n", modifiedContent: "\tcurrent()  \n" },
   files = [makeFile()],
   overrides: Partial<ConstructorParameters<typeof ReviewApp>[3]> = {},
-  terminal: { rows?: number; columns?: number } = {},
+  terminal: { rows?: number; columns?: number; mode?: "regular" | "fullscreen" } = {},
+  tuiOverride?: unknown,
 ) {
   const loadFileContents = vi.fn(async () => contents);
   const terminalWrite = vi.fn<(data: string) => void>();
   const tui = {
+    mode: terminal.mode ?? "regular",
     terminal: { write: terminalWrite, rows: terminal.rows ?? 30, columns: terminal.columns ?? 120 },
     requestRender: vi.fn(),
     getShowHardwareCursor: vi.fn(() => false),
@@ -94,7 +98,7 @@ function createHarness(
     bg: (_color: string, text: string) => text,
   };
   const done = vi.fn();
-  const app = new ReviewApp(tui as never, theme as never, done, {
+  const app = new ReviewApp((tuiOverride ?? tui) as never, theme as never, done, {
     files,
     repoRoot: "/repo",
     loadFileContents,
@@ -103,10 +107,99 @@ function createHarness(
     notify: vi.fn(),
     ...overrides,
   });
-  return { app, done, loadFileContents, terminalWrite };
+  return { app, done, loadFileContents, terminalWrite, theme };
 }
 
 describe("ReviewApp interaction", () => {
+  it("reuses the action hint at the same width and rebuilds it after resize or invalidation", async () => {
+    const { app, loadFileContents, theme } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    const foreground = vi.spyOn(theme, "fg");
+    const hintCalls = () => foreground.mock.calls.filter(([, text]) => text === "Enter/m").length;
+    try {
+      app.render(120);
+      expect(hintCalls()).toBe(1);
+      app.render(120);
+      expect(hintCalls()).toBe(1);
+      app.render(160);
+      expect(hintCalls()).toBe(2);
+      app.invalidate();
+      app.render(160);
+      expect(hintCalls()).toBe(3);
+    } finally {
+      foreground.mockRestore();
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("reuses %s navigation targets until the layout is invalidated", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    app.render(120);
+    app.handleInput("\r");
+    app.handleInput("\x1b[B");
+    const fileId = (app as any).state.activeFileId;
+    const layout = (app as any).getDiffLayout(fileId, "git-diff");
+    const rowsKey = mode === "unified" ? "unifiedRows" : "sideBySideRows";
+    layout[rowsKey] = new Proxy(layout[rowsKey], {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property) && Number(property) > 500) {
+          throw new Error("rescanned offscreen navigation rows");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    try {
+      app.handleInput("\x1b[B");
+      expect(getSelectedLineTarget((app as any).state, fileId, "git-diff")).toEqual({ side: "added", line: 3 });
+      app.invalidate();
+      app.handleInput("\x1b[A");
+      expect(getSelectedLineTarget((app as any).state, fileId, "git-diff")).toEqual({ side: "added", line: 2 });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("styles only visible wrapped %s rows when measuring a large diff", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `const item${i} = "日本語";`).join("\n");
+    const { app, loadFileContents, theme } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    (app as any).state.wrapLines = true;
+    const background = vi.spyOn(theme, "bg");
+    try {
+      const lines = app.render(120);
+      expect(lines.join("\n")).toContain("item0");
+      expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
+      expect(background.mock.calls.length).toBeLessThan(120);
+    } finally {
+      background.mockRestore();
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("limits unwrapped %s highlighting to the viewport on first render and resize", async (mode) => {
+    const modifiedContent = Array.from({ length: 2000 }, (_, i) => `const item${i} = "日本語";`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    (app as any).state.wrapLines = false;
+    const highlight = vi.spyOn(piRender, "highlightCodeLineWithPi");
+    try {
+      for (const width of [120, 160]) {
+        const lines = app.render(width);
+        expect(lines.join("\n")).toContain("item0");
+        expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+        expect(highlight.mock.calls.length).toBeLessThan(120);
+      }
+    } finally {
+      highlight.mockRestore();
+      app.dispose();
+    }
+  });
+
   it("uses lowercase o for a writable local current-side bridge target and preserves editor isolation", async () => {
     const { app, done, loadFileContents } = createHarness(undefined, undefined, {
       reviewIdentity: "/repo|working|worktree|local",
@@ -675,13 +768,151 @@ describe("ReviewApp interaction", () => {
     unavailableHarness.app.dispose();
   });
 
-  it("leaves mouse reporting to tmux for native selection", async () => {
-    const { app, loadFileContents, terminalWrite } = createHarness();
+  it.each(["unified", "side-by-side"])("scrolls the %s diff viewport with Pi mouse events and resumes keyboard navigation", async (mode) => {
+    const content = Array.from({ length: 80 }, (_, index) => `line_${index + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content });
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    (app as any).diffViewMode = mode;
+    const before = app.render(120);
+    const bounds = (app as any).mousePaneLayout.diff;
+    const selected = (app as any).state.selectedLineTargetByScopeFile;
+    const wheel = (delta: number) => app.handleMouse({
+      type: "wheel", x: bounds.left + 1, y: bounds.top + 1, wheelDelta: delta,
+    });
 
-    expect(terminalWrite).not.toHaveBeenCalled();
+    expect(wheel(3)).toEqual({ handled: true });
+    expect(app.render(120)).not.toEqual(before);
+    expect((app as any).diffScroll).toBe(3);
+    expect((app as any).state.selectedLineTargetByScopeFile).toEqual(selected);
+    wheel(1000);
+    expect(app.render(120).join("\n")).toContain("line_80");
+    const bottom = (app as any).diffScroll;
+    expect(bottom).toBeGreaterThan(3);
+    wheel(1000);
+    app.render(120);
+    expect((app as any).diffScroll).toBe(bottom);
+    wheel(-1000);
+    app.render(120);
+    expect((app as any).diffScroll).toBe(0);
+    wheel(30);
+    app.render(120);
+    app.handleInput("\x1b[B");
+    app.render(120);
+    expect((app as any).diffScroll).toBeLessThan(30);
+    expect(app.handleMouse({ type: "press", x: 0, y: 0 })).toBeUndefined();
+    app.handleInput(`\x1b[<65;${bounds.left + 2};${bounds.top + 2}M`);
+    expect(app.render(120)).not.toEqual(before);
+    expect((app as any).diffScroll).toBe(1);
+    app.handleInput("c");
+    const editing = app.render(120);
+    wheel(3);
+    expect(app.render(120)).toEqual(editing);
+    app.dispose();
+  });
+
+  it("follows the new file selection after wheeling in the navigator", async () => {
+    const content = Array.from({ length: 80 }, (_, index) => `line_${index + 1}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content }, [makeFile(), makeFile("src/next.ts")]);
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.render(120);
+    const { diff, navigator } = (app as any).mousePaneLayout;
+    app.handleMouse({ type: "wheel", x: diff.left + 1, y: diff.top + 1, wheelDelta: 30 });
+    app.render(120);
+    app.handleMouse({ type: "wheel", x: navigator.left + 1, y: navigator.top + 1, wheelDelta: 1 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledTimes(2));
+    expect(app.render(120).join("\n")).toContain("line_1 ");
+    expect((app as any).state.activeFileId).toBe(makeFile("src/next.ts").id);
+    app.dispose();
+  });
+
+  it("routes terminal wheel and file clicks through the real regular-mode Pi renderer", async () => {
+    const runtime = await import(process.env.PI_CODER_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
+    const Renderer = runtime.TuiMainScreen ?? runtime.TUI;
+    let input = (_data: string) => {};
+    const terminal = {
+      rows: 30, columns: 120, kittyProtocolActive: false,
+      start: (onInput: typeof input) => { input = onInput; },
+      stop: vi.fn(), write: vi.fn(), hideCursor: vi.fn(), showCursor: vi.fn(),
+    };
+    const tui = new Renderer(terminal);
+    const files = [makeFile("src/first.ts"), makeFile("src/second.ts")];
+    const content = Array.from({ length: 80 }, (_, index) => `row_${index}`).join("\n");
+    const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content }, files, {}, {}, tui);
+    try {
+      tui.start();
+      tui.showOverlay(app, { anchor: "center", width: "100%", maxHeight: "100%", margin: { top: 1, bottom: 1 } });
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      const rendered = app.render(120);
+      const { diff, navigator } = (app as any).mousePaneLayout;
+      expect(terminal.write).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
+      input(`\x1b[<65;${diff.left + 2};${diff.top + 2}M`);
+      app.render(120);
+      expect((app as any).diffScroll).toBe(1);
+      const row = rendered.findIndex((line) => line.includes("second.ts")) + 3;
+      input(`\x1b[<0;${navigator.left + 2};${row}M`);
+      expect((app as any).state.activeFileId).toBe(files[1]!.id);
+    } finally {
+      tui.hideOverlay();
+      app.dispose();
+      tui.stop();
+    }
+    expect(terminal.write).toHaveBeenCalledWith("\x1b[?1006l\x1b[?1000l");
+  });
+
+  it("saves unfinished typing and releases regular-mode mouse input when disposed", async () => {
+    const onCompositionSave = vi.fn(() => true);
+    const { app, loadFileContents, terminalWrite } = createHarness(undefined, undefined, { onCompositionSave });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    expect(terminalWrite).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
+    app.handleInput("\r");
+    app.handleInput("c");
+    app.handleInput("unfinished feedback");
+
+    app.dispose();
+    app.dispose();
+
+    expect(onCompositionSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text: "unfinished feedback" }));
+    expect(terminalWrite.mock.calls).toEqual([
+      ["\x1b[?1000h\x1b[?1006h"], ["\x1b[?1006l\x1b[?1000l"],
+    ]);
+  });
+
+  it("keeps Pi-owned mouse reporting intact in fullscreen mode", async () => {
+    const { app, loadFileContents, terminalWrite } = createHarness(undefined, undefined, {}, { mode: "fullscreen" });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
     app.dispose();
     expect(terminalWrite).not.toHaveBeenCalled();
+  });
+
+  it.each(["raw", "normalized"])("selects rendered navigator file rows using %s mouse input after scrolling and resizing", async (input) => {
+    const files = Array.from({ length: 25 }, (_, index) => makeFile(`src/file${String(index).padStart(2, "0")}.ts`));
+    const { app, loadFileContents } = createHarness(undefined, files, {}, { columns: 160, rows: 40 });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("G");
+    app.render(160);
+    const rendered = app.render(140);
+    const originX = 10;
+    const originY = 2;
+    const bounds = (app as any).mousePaneLayout.navigator;
+    const screenX = bounds.left + 2;
+    const screenY = rendered.findIndex((line) => line.includes("file23.ts")) + originY;
+    expect(screenY).toBeGreaterThan(bounds.top);
+    const press = (y: number) => {
+      if (input === "raw") app.handleInput(`\x1b[<0;${screenX + 1};${y + 1}M`);
+      else app.handleMouse({ type: "press", button: "left", x: screenX - originX, y: y - originY, screenX, screenY: y });
+    };
+
+    press(screenY);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    expect((app as any).state.focus).toBe("navigator");
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenLastCalledWith("/repo", files[23], "git-diff"));
+    press(bounds.top);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    app.handleInput("\r");
+    app.handleInput("c");
+    press(screenY + 1);
+    expect((app as any).state.activeFileId).toBe(files[23]!.id);
+    app.dispose();
   });
 
   it("starts a new grouped review on the first visible navigator file", async () => {
@@ -1582,6 +1813,15 @@ describe("Replies pane", () => {
     app.dispose();
   });
 
+  it("distinguishes an unknown reply resolution from unresolved", async () => {
+    const { app } = await createRepliesHarness(makeRepliesSnapshot(1, { resolved: null }));
+    try {
+      expect(app.render(200).join("\n")).toContain("resolution unknown");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("renders load errors and the empty state", async () => {
     const failing = createHarness(undefined, undefined, {
       repliesSource: {
@@ -1742,6 +1982,67 @@ describe("PR context pane", () => {
     app.handleInput("\t");
     app.handleInput("\t");
   }
+
+  it("applies context enrichment without moving scroll or code selection", async () => {
+    let update: ((text: string) => void) | undefined;
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (onUpdate?: typeof update) => {
+        update = onUpdate;
+        return contextText;
+      },
+    } });
+    try {
+      focusContext(app);
+      app.handleInput("j");
+      const before = structuredClone((app as any).state);
+      expect(update).toBeTypeOf("function");
+      update!(`${contextText}\nGenerated explanation`);
+      expect((app as any).contextPanelState.text).toContain("Generated explanation");
+      expect((app as any).contextScroll).toBe(1);
+      expect((app as any).state).toEqual(before);
+      expect(app.render(200).join("\n")).toContain("context line 2");
+      app.handleInput("G");
+      expect(app.render(200).join("\n")).toContain("Generated explanation");
+    } finally { app.dispose(); }
+  });
+
+  it.each(["disposal", "supersession"])("ignores late context callbacks after %s", async (reason) => {
+    const updates: Array<((text: string) => void) | undefined> = [];
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (update?: (text: string) => void) => {
+        updates.push(update);
+        return `facts ${updates.length}`;
+      },
+    } });
+    const render = vi.spyOn((app as any).tui, "requestRender");
+    try {
+      expect(updates[0]).toBeTypeOf("function");
+      if (reason === "disposal") app.dispose();
+      else {
+        (app as any).contextPanelState = { status: "idle" };
+        app.handleInput("4");
+        app.handleInput("4");
+        await vi.waitFor(() => expect((app as any).contextPanelState.text).toBe("facts 2"));
+        updates[1]!("current explanation");
+      }
+      const before = structuredClone((app as any).contextPanelState);
+      render.mockClear();
+      updates[0]!("late explanation");
+      expect((app as any).contextPanelState).toEqual(before);
+      expect(render).not.toHaveBeenCalled();
+    } finally { app.dispose(); }
+  });
+
+  it("keeps an early context update when the initial load finishes later", async () => {
+    const { app } = await createContextHarness({ contextPanelSource: {
+      title: "PR context", loadingText: "Loading", load: async (update?: (text: string) => void) => {
+        update?.("enriched facts");
+        return "initial facts";
+      },
+    } });
+    try { expect(app.render(200).join("\n")).toContain("enriched facts"); }
+    finally { app.dispose(); }
+  });
 
   it("joins the Tab cycle and shows the focused border", async () => {
     const { app } = await createContextHarness();

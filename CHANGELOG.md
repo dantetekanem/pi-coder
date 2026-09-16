@@ -13,6 +13,12 @@
 - Keep completed COMMENT/DISCUSS pastes expanded for cursor recovery. Recovered buffers use the owned exact-text editor. Recovery storage has seven-day retention, 256 KiB per record and shared 64-record/16 MiB limits; capacity errors preserve existing text instead of truncating it.
 - Require manual orphan-lock recovery with all writers stopped. Draft persistence covers local process interruption, not `fsync` or power-loss durability.
 
+### Fixed
+
+- Show fetched PR facts before optional model explanations, without replacing facts or moving the context pane's scroll position.
+- Keep known PR facts visible when context sections fail, and label unavailable data instead of reporting an empty conversation.
+- Preserve replies from unknown authors and distinguish unknown thread resolution from unresolved in PR context and Replies.
+
 ## 0.6.2 - 2026-09-02
 
 ### Changed
