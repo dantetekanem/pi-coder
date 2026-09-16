@@ -64,7 +64,7 @@ const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
       args: ["pr", "view", "{number}", "--repo", "{repo}", "--json", "number,title,body,additions,deletions,changedFiles,author,state,headRefName,headRefOid,baseRefName"],
     },
     pullRequestDetails: {
-      args: ["pr", "view", "{number}", "--repo", "{repo}", "--json", "url,isDraft,mergeStateStatus,reviewDecision,statusCheckRollup,comments,reviews"],
+      args: ["pr", "view", "{number}", "--repo", "{repo}", "--json", "url,isDraft,mergeStateStatus,reviewDecision,statusCheckRollup,comments,reviews,createdAt,updatedAt"],
     },
     reviews: { args: ["api", "repos/{repo}/pulls/{number}/reviews?per_page=100"] },
     review: { args: ["api", "repos/{repo}/pulls/{number}/reviews/{reviewId}", "--include"] },
@@ -74,6 +74,9 @@ const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
     submitReview: { args: ["api", "repos/{repo}/pulls/{number}/reviews", "--include", "--method", "POST", "--input", "{payloadPath}"] },
     reviewThreads: { args: ["api", "graphql", "-f", "query={query}", "-F", "owner={owner}", "-F", "name={name}", "-F", "number={number}"] },
     reviewComments: { args: ["api", "repos/{repo}/pulls/{number}/comments?per_page=100"] },
+    reviewCommentsPage: { args: ["api", "--include", "repos/{repo}/pulls/{number}/comments?per_page=100&page={page}"] },
+    pullRequestCommentsPage: { args: ["api", "--include", "repos/{repo}/issues/{number}/comments?per_page=100&page={page}"] },
+    pullRequestReviewsPage: { args: ["api", "--include", "repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}"] },
   },
   refs: { head: "refs/pull/{number}/head" },
   fields: {
@@ -110,6 +113,8 @@ const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
     pullRequestChecks: ["statusCheckRollup"],
     pullRequestComments: ["comments"],
     pullRequestReviews: ["reviews"],
+    pullRequestCreatedAt: ["createdAt"],
+    pullRequestUpdatedAt: ["updatedAt"],
     commentAuthor: ["author.login", "user.login"],
     commentBody: ["body"],
     commentCreatedAt: ["createdAt", "created_at"],

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRemotePullRequestSources, createRemotePullRequestSummarySource } from "../pr-summary.js";
 import { createRemoteReviewRepliesSource } from "../review-replies.js";
 import type { RemoteReviewTarget } from "../remote.js";
+import { requireProviderSettings } from "../provider-settings.js";
 
 const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
 let directory: string;
@@ -140,6 +141,11 @@ describe("remote pull request summary source", () => {
         const requestedFields = args[6]!.split(",");
         const payload = Object.fromEntries(Object.entries(details).filter(([field]) => requestedFields.includes(field)));
         return { code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false };
+      }
+      if (command === "gh" && args.includes("--include")) {
+        const field = args.at(-1)!.includes("/issues/") ? "comments" : "reviews";
+        const rows = Object.entries(details).find(([key]) => key === field)?.[1] ?? [];
+        return { code: 0, stdout: `HTTP/2 200 OK\n\n${JSON.stringify(rows)}`, stderr: "", killed: false };
       }
       if (command === "gh" && args[1] === "graphql") {
         return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } } } } } }), stderr: "", killed: false };
@@ -494,6 +500,60 @@ describe("shared pull request sources", () => {
     code: 0, stderr: "", killed: false, stdout: command === "pi" ? await model() : JSON.stringify(args[0] === "query" ? await threads()
       : args[0] === "identity" ? { actor: { name: "reviewer" } } : { conversation: [], decisions: [], checks: [] }),
   }));
+
+  it.each(["complete", "HTTP 403", "request", "request comments", "invalid Link", "missing headers", "ID-less"])("reads bounded REST collections without reusing Link hosts: %s", async (mode) => {
+    const { id, ...definition } = requireProviderSettings("github");
+    writeFileSync(settingsPath, JSON.stringify({ version: 1, repositories: {}, providers: { github: {
+      ...definition, capabilities: { ...definition.capabilities, graphqlReviewThreads: false },
+    } } }));
+    const root = { id: 1, user: { login: "self" }, body: "Question" };
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      let stdout = "[]";
+      if (args[0] === "pr") stdout = JSON.stringify({ comments: [], reviews: [], statusCheckRollup: [] });
+      else if (args.at(-1) === "user") stdout = JSON.stringify({ login: "self" });
+      else if (args.includes("--include")) {
+        const endpoint = args.at(-1)!;
+        const first = endpoint.endsWith("page=1");
+        const issues = endpoint.includes("/issues/");
+        if (first && (mode === "request comments" ? issues : endpoint.includes("/pulls/12/comments?"))) await new Promise(setImmediate);
+        const rows = first ? [root] : [root, { id: 2, in_reply_to_id: 1, user: null, body: "Answer" }];
+        const next = mode === "invalid Link" && issues ? "0" : "2";
+        const newline = first ? "\r\n" : "\n";
+        const link = first ? `Link: <https://untrusted.invalid/ignored?page=${next}&per_page=7>; rel="next"${newline}` : "";
+        const status = mode === "HTTP 403" && issues ? "403 Forbidden" : "200 OK";
+        const headers = mode === "missing headers" && issues ? "" : `HTTP/2.0 ${status}${newline}${link}${newline}`;
+        stdout = headers + JSON.stringify(mode === "ID-less" && endpoint.includes("/pulls/12/comments?") ? rows.map(({ id, ...row }) => row) : rows);
+      }
+      return { code: 0, stdout: command === "pi" ? "" : stdout, stderr: "", killed: false };
+    });
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target("github"));
+    const loading = sources.repliesSource!.load({ budgets: { maxRequests: mode.startsWith("request") ? 7 : 12 } });
+    await sources.contextPanelSource!.load();
+    let snapshot = await loading;
+    if (mode.startsWith("request")) {
+      const first = snapshot;
+      const original = JSON.stringify(first);
+      if (mode === "request") expect(first.replies).toEqual([]);
+      expect(first.conversation?.coverage[mode === "request" ? "threads" : "comments"]).toBe("partial");
+      expect(first.conversation?.continuation).toBeDefined();
+      snapshot = await sources.repliesSource!.load({ continuation: first.conversation!.continuation, budgets: { maxRequests: 1 } });
+      expect(snapshot.conversation?.generation).toBe(first.conversation?.generation);
+      expect(JSON.stringify(first)).toBe(original);
+    }
+    expect(snapshot.replies).toEqual(mode === "ID-less" ? [] : [expect.objectContaining({ commentId: "2", author: "unknown", body: "Answer", resolved: null })]);
+    const comments = ["HTTP 403", "missing headers"].includes(mode) ? "unavailable" : mode === "invalid Link" ? "partial" : "complete";
+    expect(snapshot.conversation?.coverage).toMatchObject({ comments, reviews: "complete", threads: mode === "ID-less" ? "partial" : "complete" });
+    if (mode === "complete" || mode === "ID-less") {
+      const prompt = exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1) ?? "";
+      expect(prompt.match(/Question/g)).toHaveLength(mode === "ID-less" ? 4 : 3);
+      expect(prompt.match(/Answer/g)).toHaveLength(3);
+    }
+    const endpoints = exec.mock.calls.filter(([, args]) => args.includes("--include")).map(([, args]) => args.at(-1)!);
+    expect(endpoints).toContain("repos/example/widgets/pulls/12/comments?per_page=100&page=2");
+    expect(endpoints).toContain("repos/example/widgets/pulls/12/reviews?per_page=100&page=2");
+    expect(endpoints.every((value) => value.startsWith("repos/example/widgets/") && value.includes("/12/") && value.includes("per_page=100"))).toBe(true);
+    expect(exec.mock.calls.filter(([, args]) => args.at(-1) === "user")).toHaveLength(1);
+  });
 
   it("coalesces pending loads, shares metadata, isolates targets and fences an older model after a fresh load", async () => {
     const thread = deferred<ReturnType<typeof graph>>();

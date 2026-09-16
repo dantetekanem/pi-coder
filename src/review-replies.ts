@@ -10,6 +10,7 @@ import type { RemoteReviewTarget } from "./remote.js";
 import { sanitizeTerminalText } from "./sanitize.js";
 import { createConversationRead, type createConversationReader } from "./conversation.js";
 import { hasHandoffContext } from "./pr-handoff.js";
+import { fetchProviderRestPages, type ProviderRestPage } from "./provider-rest-pages.js";
 import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewThreadCoverage } from "./types.js";
 
 const MAX_REPLY_BODY_LENGTH = 1200;
@@ -52,7 +53,7 @@ interface ThreadPageProgress {
 export interface ReviewThreadRead {
   threads: ReplyThread[];
   coverage: ReviewThreadCoverage;
-  pagination?: ThreadPageProgress & { outerDone?: boolean; comments?: Array<ThreadPageProgress & { id: string }> };
+  pagination?: ThreadPageProgress & { page?: number; outerDone?: boolean; comments?: Array<ThreadPageProgress & { id: string }> };
   /** REST rows preserve legacy context text that has no stable comment ID. */
   contextRows?: unknown[];
 }
@@ -362,7 +363,7 @@ export async function fetchReviewThreads(
   const parsedNumber = Number.parseInt(number, 10);
   let accepted = options?.previous?.pagination == null ? undefined : options.previous;
   if (accepted?.pagination?.done) return accepted;
-  if (getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
+  if (accepted?.contextRows == null && getProviderCapability(provider, "graphqlReviewThreads") && parts.length === 2 && Number.isFinite(parsedNumber)) {
     const request = async (cursor?: string, threadId?: string) => {
       let query = REPLY_THREADS_QUERY;
       if (threadId != null) {
@@ -416,10 +417,21 @@ export async function fetchReviewThreads(
       }
     } catch (error) {
       if (accepted != null) return accepted;
-      if (provider.operations.reviewComments == null) throw error;
+      if (provider.operations.reviewComments == null && provider.operations.reviewCommentsPage == null) throw error;
     }
   }
 
+  if (provider.operations.reviewCommentsPage != null) {
+    const project = ({ rows, nextPage, coverage }: ProviderRestPage): ReviewThreadRead => ({
+      threads: groupFlatReviewComments(rows, provider), contextRows: rows,
+      coverage: getProviderCapability(provider, "graphqlReviewThreads")
+        || rows.some((row) => readIdentifier(readConfiguredField(provider, "commentId", row)) == null) ? "partial" : coverage,
+      pagination: { page: nextPage, seen: [], done: nextPage == null, partial: coverage === "partial" },
+    });
+    const previous = accepted?.contextRows == null ? undefined : { rows: accepted.contextRows, nextPage: accepted.pagination?.page, coverage: accepted.coverage };
+    return project(await fetchProviderRestPages(pi, provider, "reviewComments", { repo, number, cwd: target.gitRoot }, previous,
+      options == null ? undefined : (page) => options.onPage(project(page))));
+  }
   const operation = renderProviderOperation(provider, "reviewComments", { repo, number });
   const result = await pi.exec(provider.executable, operation.args, { cwd: target.gitRoot, timeout: PROVIDER_TIMEOUT_MS });
   if (result.code !== 0 || result.stdout.trim().length === 0) {

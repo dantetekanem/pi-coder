@@ -12,6 +12,7 @@ import {
 import type { RemoteReviewTarget } from "./remote.js";
 import { collectRepliesToSelf, createRemoteReviewRepliesSource, fetchReviewThreads, getSelfLogin, type ReviewThreadRead } from "./review-replies.js";
 import { createConversationRead, createConversationReader } from "./conversation.js";
+import { fetchProviderRestPages, type ProviderRestPage } from "./provider-rest-pages.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -45,6 +46,7 @@ interface PullRequestCheck {
 
 export interface PullRequestDetails {
   threadRead?: ReviewThreadRead;
+  pages?: Partial<Record<"comments" | "reviews", ProviderRestPage>>;
   unavailable?: string[];
   pending?: string[];
   url?: string;
@@ -429,8 +431,8 @@ async function fetchPullRequestDetails(
     unavailable: ["PR details", "checks", "PR comments", "reviews", "review threads"],
     checksUnavailable: true,
   };
-  const continuingThreads = previous?.threadRead?.pagination?.done === false;
-  let unavailable: string[] = continuingThreads ? [...(previous?.unavailable ?? [])] : [];
+  const resumingPages = previous?.threadRead?.pagination?.done === false || Object.values(previous?.pages ?? {}).some((page) => page?.nextPage != null);
+  let unavailable: string[] = resumingPages ? [...(previous?.unavailable ?? [])] : [];
   const retain = read.retain;
   async function readSection<T>(name: string, read: () => Promise<T>, fallback: T): Promise<T> {
     try {
@@ -442,17 +444,25 @@ async function fetchPullRequestDetails(
       return fallback;
     }
   }
-  const detailsPayload = continuingThreads ? undefined
+  const detailsPayload = resumingPages ? undefined
     : await readSection("PR details", () => fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`), undefined);
-  const separateContext = getProviderCapability(provider, "separatePullRequestContext") && !continuingThreads;
+  const separateContext = getProviderCapability(provider, "separatePullRequestContext") && !resumingPages;
   const readComments = async (field: string, embedded = false) => {
+    if (!embedded && provider.operations[`${field}Page`] != null) {
+      const key = field === "pullRequestComments" ? "comments" : "reviews";
+      const project = (page: ProviderRestPage) => update(key === "comments" ? "PR comments" : key, {
+        [key]: page.rows.map((row) => providerComment(provider, row)), pages: { ...details.pages, [key]: page },
+      });
+      const page = await fetchProviderRestPages(pi, provider, field, { repo, number: pr.number, cwd: target.gitRoot }, previous?.pages?.[key], project);
+      return page.rows.map((row) => providerComment(provider, row));
+    }
     const payload = separateContext && !embedded
       ? await fetchProviderOperation(pi, target, provider, field, { repo, number: pr.number }, `PR #${pr.number} ${field}`)
       : detailsPayload;
     if (payload == null) throw new Error("Context section unavailable.");
     return providerRows(provider, field, payload, separateContext && !embedded).map((row) => providerComment(provider, row));
   };
-  const [embeddedComments, embeddedReviews, checks] = continuingThreads
+  const [embeddedComments, embeddedReviews, checks] = resumingPages
     ? [previous?.comments ?? [], previous?.reviews ?? [], previous?.statusCheckRollup ?? []] : await Promise.all([
     readSection("PR comments", () => readComments("pullRequestComments", true), previous?.comments ?? []),
     readSection("reviews", () => readComments("pullRequestReviews", true), previous?.reviews ?? []),
@@ -471,7 +481,8 @@ async function fetchPullRequestDetails(
   let details: PullRequestDetails = {
     ...previous,
     unavailable: [...unavailable].sort(),
-    pending: ["review threads", ...(separateContext ? ["PR comments", "reviews"] : [])],
+    pending: ["review threads", ...(separateContext || provider.operations.pullRequestCommentsPage != null ? ["PR comments"] : []),
+      ...(separateContext || provider.operations.pullRequestReviewsPage != null ? ["reviews"] : [])],
     url: providerString(provider, "pullRequestUrl", detailsPayload) ?? pullRequestUrl(target, provider),
     isDraft: providerBoolean(provider, "pullRequestDraft", detailsPayload),
     mergeStateStatus: providerString(provider, "pullRequestMergeState", detailsPayload)?.toUpperCase(),
@@ -491,8 +502,8 @@ async function fetchPullRequestDetails(
     details = next;
   };
   await Promise.all([
-    separateContext && readSection("PR comments", () => readComments("pullRequestComments"), details.comments ?? []).then((comments) => update("PR comments", { comments })),
-    separateContext && readSection("reviews", () => readComments("pullRequestReviews"), details.reviews ?? []).then((reviews) => update("reviews", { reviews })),
+    (separateContext || provider.operations.pullRequestCommentsPage != null) && readSection("PR comments", () => readComments("pullRequestComments"), details.comments ?? []).then((comments) => update("PR comments", { comments })),
+    (separateContext || provider.operations.pullRequestReviewsPage != null) && readSection("reviews", () => readComments("pullRequestReviews"), details.reviews ?? []).then((reviews) => update("reviews", { reviews })),
     readSection("review threads", () => fetchReviewThreads(pi, target, provider, repo, pr.number,
       { previous: previous?.threadRead, onPage: (page) => update("review threads", projectReviewThreads(page, provider)) }), previous?.threadRead)
       .then((page) => update("review threads", page == null ? {} : projectReviewThreads(page, provider))),
