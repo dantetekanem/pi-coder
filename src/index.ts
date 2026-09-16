@@ -13,13 +13,14 @@ import { createRemotePullRequestSummarySource } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
 import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
-import { saveReviewReceipt } from "./review-receipts.js";
 import { createRemoteReviewRepliesSource } from "./review-replies.js";
 import { listReviewCompositions, removeReviewComposition, saveReviewComposition } from "./review-composition.js";
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
 import { buildReviewFileSignatures, createReviewInstanceId, createReviewSessionId, deleteReviewSession, hasReviewSessionIdentity, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
 import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscussContinuation, type RemoteReviewTarget } from "./remote.js";
-import { buildProviderComments, buildReviewBody, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict } from "./review-submit.js";
+import { buildProviderComments, buildReviewBody, prepareSubmissionHandoff, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict, type SubmitReviewInput, type SubmitReviewOptions, type SubmitReviewResult } from "./review-submit.js";
+import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionDraftBinding } from "./review-submission-journal.js";
+import { hasConsumableConfirmedSubmissionDraft } from "./review-submission-consumption.js";
 import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
 import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
@@ -61,6 +62,8 @@ interface ReviewRunStatus {
   context?: string;
   /** True only after a provider accepted the review submission. */
   submitted?: boolean;
+  /** Shared provider evidence, including partial/unknown outcomes and receipt status. */
+  submission?: SubmitReviewResult;
   /** Next pull request the caller queued, offered after a successful submission. */
   nextCandidate?: { url: string; title?: string };
 }
@@ -396,12 +399,31 @@ async function resolveUncertainGrammarChanges(
 interface UiConfirmedReviewOutcome {
   status: ReviewRunStatus;
   submitted: boolean;
-  bodySubmitted: boolean;
-  submittedCommentIndexes: number[];
 }
 
 function unsubmittedReviewOutcome(status: ReviewRunStatus): UiConfirmedReviewOutcome {
-  return { status, submitted: false, bodySubmitted: false, submittedCommentIndexes: [] };
+  return { status, submitted: false };
+}
+
+function continueSubmissionHandoff(
+  pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget,
+  handoff: { id: string; input: SubmitReviewInput },
+  newIntent?: boolean,
+): UiConfirmedReviewOutcome {
+  const { input } = handoff;
+  const prompt = [
+    "Continue grammar correction of this saved RAW, unconfirmed review. Nothing has been submitted.",
+    "Fix only grammar, spelling, punctuation, and meaning-preserving clarity. Do not inspect code or change the target, verdict, or comment locations.",
+    "Obtain the user's approval of the final review text before calling submit_pr_review. Never treat this raw handoff as confirmed text.",
+    "Keep handoffId unchanged. Supply one unique original index per final comment in handoffCommentIndexes; retain original indexes when omitting or reordering comments (removing original comment 0 leaves index 1 for original comment 1).",
+    "Submit only the approved final text. Never use newIntent to blindly retry an unknown write.",
+    "submit_pr_review arguments:",
+    "```json",
+    JSON.stringify({ ...input, cwd: input.gitRoot, gitRoot: undefined, newIntent, handoffId: handoff.id, handoffCommentIndexes: (input.comments ?? []).map((_comment, index) => index) }, null, 2),
+    "```",
+  ].join("\n");
+  sendReviewFollowUp(pi, ctx, prompt);
+  return unsubmittedReviewOutcome({ started: true, prompt, context: formatPullRequestContext(target.pullRequest!) });
 }
 
 async function submitUiConfirmedReviewWithOutcome(
@@ -411,6 +433,7 @@ async function submitUiConfirmedReviewWithOutcome(
   verdict: ReviewVerdict,
   body: string | undefined,
   comments: ReviewInlineComment[],
+  association?: { sourceDigest: string; draft: SubmissionDraftBinding; newIntent?: boolean },
 ): Promise<UiConfirmedReviewOutcome> {
   const pr = target.pullRequest!;
   const provider = providerForTarget(target);
@@ -430,6 +453,20 @@ async function submitUiConfirmedReviewWithOutcome(
   }
 
   if (grammarResult.status === "error") {
+    if (association != null) {
+      try {
+        const repo = target.repo ?? pr.repo;
+        if (repo == null) throw new Error("Repository is unknown.");
+        const handoff = prepareSubmissionHandoff({ provider: provider.id, repo, prNumber: pr.number,
+          commitId: pr.headRefOid, baseCommitId: pr.baseRefOid, verdict, body, comments,
+          prAuthorLogin: pr.authorLogin, gitRoot: target.gitRoot }, { sourceDigest: association.sourceDigest, draft: association.draft });
+        return continueSubmissionHandoff(pi, ctx, target, handoff, association.newIntent);
+      } catch (error) {
+        const message = `Could not save grammar handoff; review kept as a draft: ${error instanceof Error ? error.message : String(error)}`;
+        ctx.ui.notify(message, "warning");
+        return unsubmittedReviewOutcome({ started: true, message, context: formatPullRequestContext(pr) });
+      }
+    }
     const prompt = composeReviewSubmissionPrompt(target, verdict, body, comments);
     sendReviewFollowUp(pi, ctx, prompt);
     ctx.ui.notify(`Could not verify grammar automatically: ${grammarResult.error} Sent the review to the agent instead.`, "warning");
@@ -455,7 +492,7 @@ async function submitUiConfirmedReviewWithOutcome(
     ctx.ui.notify(message, "warning");
     return unsubmittedReviewOutcome({ started: true, message, context: formatPullRequestContext(pr) });
   }
-  const submission = await submitPullRequestReview(pi, {
+  return deliverConfirmedReview(pi, ctx, target, {
     provider: provider.id,
     repo,
     prNumber: pr.number,
@@ -466,28 +503,27 @@ async function submitUiConfirmedReviewWithOutcome(
     comments: resolved.comments,
     prAuthorLogin: pr.authorLogin,
     gitRoot: target.gitRoot,
+  }, association == null ? undefined : {
+    ...association,
+    draft: { ...association.draft, comments: resolved.commentIndexes.map((index) => association.draft.comments[index]!) },
   });
+}
+
+async function deliverConfirmedReview(
+  pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget,
+  input: SubmitReviewInput,
+  options?: SubmitReviewOptions,
+): Promise<UiConfirmedReviewOutcome> {
+  const pr = target.pullRequest!;
+  const submission = options == null
+    ? await submitPullRequestReview(pi, input)
+    : await submitPullRequestReview(pi, input, options);
   ctx.ui.notify(submission.message, submission.ok ? "info" : "warning");
   if (!submission.ok) {
-    return unsubmittedReviewOutcome({ started: true, message: submission.message, context: formatPullRequestContext(pr) });
+    return unsubmittedReviewOutcome({ started: true, message: submission.message, submission, context: formatPullRequestContext(pr) });
   }
 
   const prUrl = pullRequestUrl(target);
-  saveReviewReceipt({
-    provider: provider.id,
-    repo,
-    number: pr.number,
-    url: prUrl,
-    verdict,
-    headSha: pr.headRefOid,
-    body: resolved.body,
-    comments: resolved.comments.map((comment) => ({
-      path: comment.path,
-      line: comment.line,
-      side: comment.side,
-      body: comment.body,
-    })),
-  });
   sendReviewFollowUp(pi, ctx, [
     `pi-coder already submitted this ${pullRequestProviderName(target)} review after its grammar safety pass.`,
     "Do not ask for confirmation and do not submit the review again.",
@@ -496,10 +532,8 @@ async function submitUiConfirmedReviewWithOutcome(
     submission.message,
   ].join("\n"));
   return {
-    status: { started: true, message: submission.message, submitted: true, context: formatPullRequestContext(pr) },
+    status: { started: true, message: submission.message, submitted: true, submission, context: formatPullRequestContext(pr) },
     submitted: true,
-    bodySubmitted: resolved.body != null && resolved.body.trim().length > 0,
-    submittedCommentIndexes: resolved.commentIndexes,
   };
 }
 
@@ -1224,12 +1258,13 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       }
 
       if (remoteTarget?.pullRequest != null) {
-        const finished = await finishRemotePrReview(ctx, files, result, remoteTarget, sessionId);
-        if (finished.consumption == null) return finished.status;
-        const retained = persistDraftConsumption(finished.consumption);
-        const status = retained.message == null
-          ? finished.status
-          : { ...finished.status, message: finished.status.message == null ? retained.message : `${finished.status.message}\n${retained.message}` };
+        const finished = await finishRemotePrReview(ctx, files, result, remoteTarget, sessionId, fullSession?.state.draft ?? result);
+        let status = finished.status;
+        // Provider submissions are consumed by the shared service; only DISCUSS remains caller-owned.
+        if (finished.consumption != null) {
+          const retained = persistDraftConsumption(finished.consumption);
+          if (retained.message != null) status = { ...status, message: status.message == null ? retained.message : `${status.message}\n${retained.message}` };
+        }
         const nextCandidate = handoff?.nextCandidate;
         if (status.submitted !== true || nextCandidate == null) return status;
         return { ...status, nextCandidate };
@@ -1256,13 +1291,35 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     }
   }
 
-  async function finishRemotePrReview(ctx: ExtensionContext, files: Parameters<typeof composeReviewPrompt>[0], result: ReviewSubmitPayload, target: RemoteReviewTarget, sessionId: string): Promise<RemotePrFinishResult> {
+  async function finishRemotePrReview(ctx: ExtensionContext, files: Parameters<typeof composeReviewPrompt>[0], result: ReviewSubmitPayload, target: RemoteReviewTarget, sessionId: string, rawDraft: ReviewSessionData["state"]["draft"]): Promise<RemotePrFinishResult> {
     const pr = target.pullRequest!;
     const provider = providerForTarget(target);
     const supportsFileComments = getProviderCapability(provider, "fileComments");
     const inlineComments = buildProviderComments(files, result.comments, supportsFileComments, provider.label);
     const inlineCommentIds = getRemoteInlineCommentIds(files, result, supportsFileComments);
     const discussionPrompt = composeDiscussionPrompt(files, result);
+    const includeFileComments = !supportsFileComments;
+    const bodyConsumption = getRemoteBodyConsumption(result, includeFileComments);
+    const identity = pullRequestSessionIdentity(target);
+    const repo = target.repo ?? pr.repo;
+    if (repo == null) throw new Error("Repository is unknown.");
+    const sourceFingerprint = submissionDraftSourceFingerprint({ provider: provider.id, repo, prNumber: pr.number, commitId: pr.headRefOid, baseCommitId: pr.baseRefOid, gitRoot: target.gitRoot }, rawDraft);
+    const sourceDigest = submissionFingerprint({ provider: provider.id, repo: target.repo ?? pr.repo, prNumber: pr.number, head: pr.headRefOid, base: pr.baseRefOid, draft: { allComment: rawDraft.allComment, allIntent: rawDraft.allIntent, comments: rawDraft.comments }, inlineComments, reviewBody: buildReviewBody(files, result, includeFileComments) });
+    const bindItems = (ids: readonly string[]) => ids.map((id) => ({ id, fingerprint: submissionFingerprint(rawDraft.comments.find((comment) => comment.id === id)) }));
+    const draft: SubmissionDraftBinding = {
+      identity, sessionId, sourceFingerprint, comments: bindItems(inlineCommentIds), bodyComments: bindItems(bodyConsumption.commentIds),
+      ...(bodyConsumption.consumeAllComment ? { allCommentFingerprint: submissionFingerprint({ allComment: rawDraft.allComment, allIntent: rawDraft.allIntent }) } : {}),
+    };
+    const saved = createSubmissionJournal().findForDraft(identity, sessionId, sourceDigest, sourceFingerprint);
+    // Completed scope with nothing exact left to consume must not capture a new end-action decision.
+    if (saved != null && saved.draft != null
+      && (saved.steps.some((step) => step.status !== "submitted") || hasConsumableConfirmedSubmissionDraft(saved, rawDraft))) {
+      const submitted = await deliverConfirmedReview(pi, ctx, target, saved.input, { attemptId: saved.id, sourceDigest, draft: saved.draft });
+      return { status: submitted.status };
+    }
+
+    const handoff = createSubmissionJournal().findHandoffForDraft(identity, sessionId, sourceDigest);
+    if (handoff != null) return { status: continueSubmissionHandoff(pi, ctx, target, handoff, saved != null ? true : undefined).status };
 
     const discussionChoice = "Start discussion with agents";
     const endActions = buildReviewEndActions(loadReviewPreferences().lastReviewVerdict);
@@ -1292,29 +1349,13 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
 
     const verdict: ReviewVerdict = action.verdict;
     saveReviewPreference({ lastReviewVerdict: verdict });
-    const includeFileComments = !supportsFileComments;
     const reviewBody = buildReviewBody(files, result, includeFileComments);
-    const bodyConsumption = getRemoteBodyConsumption(result, includeFileComments);
     const optionalBody = action.skipBody
       ? undefined
       : await ctx.ui.editor(`${REVIEW_VERDICT_LABELS[verdict]}: optional review body comment`, "");
     const body = mergeReviewBodies(optionalBody, reviewBody);
-    const submitted = await submitUiConfirmedReviewWithOutcome(pi, ctx, target, verdict, body, inlineComments);
-    if (!submitted.submitted) return { status: submitted.status };
-
-    const submittedInlineIds = submitted.submittedCommentIndexes
-      .map((index) => inlineCommentIds[index])
-      .filter((id): id is string => id != null);
-    return {
-      status: submitted.status,
-      consumption: {
-        consumeAllComment: submitted.bodySubmitted && bodyConsumption.consumeAllComment,
-        commentIds: [
-          ...submittedInlineIds,
-          ...(submitted.bodySubmitted ? bodyConsumption.commentIds : []),
-        ],
-      },
-    };
+    const submitted = await submitUiConfirmedReviewWithOutcome(pi, ctx, target, verdict, body, inlineComments, { sourceDigest, draft, ...(saved == null ? {} : { newIntent: true }) });
+    return { status: submitted.status };
   }
 
   async function offerNextReview(ctx: ExtensionContext, status: ReviewRunStatus, cwd: string): Promise<ReviewRunStatus> {
@@ -1902,7 +1943,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerTool({
     name: "submit_pr_review",
     label: "submit-pr-review",
-    description: "Submit a pull request review through a configured provider after confirmation. Refuses self-approval and applies configured drift checks.",
+    description: "Submit a confirmed pull request review. Resume with attemptId; an intentional identical new review requires explicit newIntent. Never use newIntent to blindly retry an unknown write. Refuses self-approval and checks drift.",
     promptSnippet: "Submit a confirmed pull request review verdict through the matching configured provider.",
     promptGuidelines: [
       "Only call submit_pr_review after the user explicitly confirms the verdict and review text. The review UI confirmation also authorizes grammar, spelling, capitalization, punctuation, and meaning-preserving syntax corrections without another confirmation.",
@@ -1937,6 +1978,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       }), { description: "Line review comments, plus file comments when supported by the configured provider" })),
       prAuthorLogin: Type.Optional(Type.String({ description: "PR author login, used to block self-approval" })),
       cwd: Type.Optional(Type.String({ description: "Local checkout directory for the configured provider command" })),
+      attemptId: Type.Optional(Type.String({ description: "Saved confirmed submission attempt to resume" })),
+      handoffId: Type.Optional(Type.String({ description: "Opaque saved raw grammar handoff; requires final text approval before submission" })),
+      handoffCommentIndexes: Type.Optional(Type.Array(Type.Number({ description: "Original comment index, one unique index per final comment in final order" }))),
+      newIntent: Type.Optional(Type.Boolean({ description: "Explicitly authorize an intentional identical new review, never an unknown-write retry" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const input = params as {
@@ -1950,6 +1995,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         comments?: ReviewInlineComment[];
         prAuthorLogin?: string;
         cwd?: string;
+        attemptId?: string;
+        handoffId?: string;
+        handoffCommentIndexes?: number[];
+        newIntent?: boolean;
       };
       const result = await submitPullRequestReview(pi, {
         provider: input.provider,
@@ -1962,6 +2011,9 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         comments: input.comments,
         prAuthorLogin: input.prAuthorLogin,
         gitRoot: input.cwd,
+      }, { attemptId: input.attemptId, newIntent: input.newIntent,
+        ...(input.handoffId == null ? {} : { handoffId: input.handoffId }),
+        ...(input.handoffCommentIndexes == null ? {} : { handoffCommentIndexes: input.handoffCommentIndexes }),
       });
       if (ctx.hasUI) ctx.ui.notify(result.message, result.ok ? "info" : "warning");
       return {
