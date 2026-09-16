@@ -87,6 +87,18 @@ describe("review receipts", () => {
     expect(listReviewReceipts()).toEqual([saved]);
   });
 
+  it("retains partial outcome metadata and qualifies bounded comment evidence", () => {
+    const receipt = saveReviewReceipt({
+      provider: "primary", repo: "example/widgets", number: "12",
+      url: "https://primary.code.example/example/widgets/change/12",
+      verdict: "comment", intendedVerdict: "approve", outcome: "partial", reviewIds: [9],
+      comments: Array.from({ length: 201 }, (_, index) => ({ path: `file-${index}.ts`, line: 1, side: "RIGHT", body: "Note" })),
+    });
+    expect(receipt).toMatchObject({ intendedVerdict: "approve", outcome: "partial", reviewIds: ["9"], commentsTotal: 201, commentsTruncated: true });
+    expect(receipt?.comments).toHaveLength(200);
+    expect(loadReviewReceipt("primary", "example/widgets", "12")).toEqual(receipt);
+  });
+
   it("normalizes hashes and ignores malformed receipt files", () => {
     const left = buildReviewReceipt({
       provider: "primary",

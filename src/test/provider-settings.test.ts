@@ -106,6 +106,8 @@ describe("provider settings", () => {
         clone: "https://github.com/{repo}.git",
       },
       capabilities: {
+        atomicReview: true,
+        commitIdRequired: true,
         baseRevisionRequired: false,
         validateTargetBeforeSubmit: true,
         graphqlReviewThreads: true,
@@ -113,6 +115,18 @@ describe("provider settings", () => {
     });
     expect(renderProviderOperation(settings.providers.github!, "pullRequest", { repo: "example/widgets", number: 18 }).args)
       .toEqual(expect.arrayContaining(["pr", "view", "18", "--repo", "example/widgets", "--json"]));
+  });
+
+  it("renders scoped recovery reads and maps attribution without changing conversation reads", () => {
+    const provider = requireProviderSettings("github");
+    const values = { repo: "example/widgets", number: 18, reviewId: 9, page: 2 };
+    expect(renderProviderOperation(provider, "review", values).args).toEqual(["api", "repos/example/widgets/pulls/18/reviews/9", "--include"]);
+    expect(renderProviderOperation(provider, "reviewCommentsForReview", values).args).toEqual(["api", "repos/example/widgets/pulls/18/reviews/9/comments?per_page=100&page=2", "--include"]);
+    expect(renderProviderOperation(provider, "reviewComments", values).args).toEqual(["api", "repos/example/widgets/pulls/18/comments?per_page=100"]);
+    expect(renderProviderOperation(provider, "reviews", values).args).toEqual(["api", "repos/example/widgets/pulls/18/reviews?per_page=100"]);
+    expect(readConfiguredField(provider, "identityId", { id: 42 })).toBe(42);
+    expect(readConfiguredField(provider, "submissionAuthorId", { user: { id: 42 } })).toBe(42);
+    expect(readConfiguredField(provider, "submissionBody", { body: " Raw\n" })).toBe(" Raw\n");
   });
 
   it("renders configured operations without invoking a shell", () => {
