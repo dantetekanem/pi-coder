@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parsePiCodeDiffSettings } from "../provider-settings.js";
+import { createConversationRead } from "../conversation.js";
 import {
   analyzeReviewReply,
   buildReplyAnalysisPrompt,
@@ -288,14 +289,28 @@ describe("review replies", () => {
     expect(result).not.toContain("\u001b");
   });
 
-  it("fails closed with a provider-labeled identity error", async () => {
+  it.each([1, 2])("counts identity and fallback attempts within a %s-request read", async (maxRequests) => {
+    const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0, stderr: "", killed: false,
+      stdout: JSON.stringify(args[0] === "identity" ? { actor: { name: "reviewer" } } : { errors: [{ message: "denied" }] }),
+    }));
+    const read = createConversationRead({ exec } as never, { maxRequests });
+    try {
+      await expect(fetchReviewReplies(read.pi, target("primary") as never)).rejects.toThrow("request limit");
+      expect(exec).toHaveBeenCalledTimes(maxRequests);
+      expect(exec.mock.calls[0]?.[1][0]).toBe("identity");
+    } finally {
+      read.close();
+    }
+  });
+
+  it.each([false, true])("fails closed with missing or cancelled identity: %s", async (killed) => {
     const exec = vi.fn(async (command: string, args: string[]) => {
-      if (args[0] === "identity") return { code: 0, stdout: "{}", stderr: "", killed: false };
+      if (args[0] === "identity") return { code: 0, stdout: JSON.stringify(killed ? { actor: { name: "reviewer" } } : {}), stderr: "", killed };
       return { code: 0, stdout: JSON.stringify({ items: [] }), stderr: "", killed: false };
     });
 
     await expect(fetchReviewReplies({ exec } as never, target("secondary") as never)).rejects.toThrow(
-      "Could not resolve your Secondary code host identity",
+      killed ? "cancelled" : "Could not resolve your Secondary code host identity",
     );
   });
 });

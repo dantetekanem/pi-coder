@@ -270,6 +270,15 @@ describe("remote pull request summary source", () => {
     expect(exec.mock.calls.some(([, args]) => args[0] === "query")).toBe(false);
   });
 
+  it("uses healthy separate reviews after malformed embedded reviews", async () => {
+    const exec = vi.fn(async (command: string, args: string[]) => ({ code: command === "pi" ? 1 : 0, stderr: "", killed: false,
+      stdout: JSON.stringify(args[0] === "change" ? { decisions: {} } : args[0] === "decisions"
+        ? [{ author: { name: "bob" }, text: "Recovered review", state: "COMMENTED" }] : []),
+    }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target("secondary"))!.load();
+    expect(summary).toMatch(/Open comments:\nbob commented: Recovered review; Thread read incomplete\.$/);
+  });
+
   it("uses supplied handoff context without provider reads", async () => {
     const exec = vi.fn(async (command: string) => {
       if (command === "pi") return { code: 1, stdout: "", stderr: "agent unavailable", killed: false };
@@ -306,6 +315,35 @@ describe("remote pull request summary source", () => {
     expect(update.mock.lastCall?.[0]).toContain(`${summary}\n\nGenerated explanation (optional):\nTitle:\nStale title`);
   });
 
+  it.each(["primary", "secondary"])("returns known embedded facts before slow %s conversation reads", async (providerId) => {
+    const failed = { code: 1, stdout: "", stderr: "unavailable", killed: false };
+    let finish!: () => void;
+    const slow = new Promise<typeof failed>((resolve) => { finish = () => resolve(failed); });
+    const exec = vi.fn(async (command: string, args: string[]) => command === "pi" ? failed : args[0] === "change"
+      ? { ...failed, code: 0, stdout: JSON.stringify({ checks: [{ name: "unit", result: "FAILURE" }],
+        conversation: [{ author: { name: "bob" }, text: "Known comment" }],
+        decisions: [{ author: { name: "carol" }, text: "Known review", state: "COMMENTED" }] }) }
+      : slow);
+    const update = vi.fn();
+    let facts: string | undefined;
+    const loading = createRemotePullRequestSummarySource({ exec } as never, {} as never, target(providerId))!.load(update)
+      .then((text) => { facts = text; });
+    try {
+      await vi.waitFor(() => expect(facts).toContain("Known review"));
+      expect(facts).toContain("Status:\nblocked - 1 failing check");
+      expect(facts).toContain("Validation:\nFailing: unit");
+      expect(facts).toContain("Pending:");
+      finish();
+      await vi.waitFor(() => expect(update.mock.lastCall?.[0]).toContain("Unavailable:"));
+      const prompt = exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1);
+      expect(prompt).toContain("Known comment");
+      expect(prompt).toContain("Known review");
+    } finally {
+      finish();
+      await loading;
+    }
+  });
+
   it("returns authoritative facts before optional model enrichment", async () => {
     let finish!: (text: string) => void;
     const model = new Promise<string>((resolve) => { finish = resolve; });
@@ -320,14 +358,53 @@ describe("remote pull request summary source", () => {
       await vi.waitFor(() => expect(facts).toContain("Head:\nfeature @ abc123"));
       expect(facts).toContain("Title:\nRemove old checkout path");
       expect(facts).toContain("Validation:\nNo failing checks found.");
-      expect(update).not.toHaveBeenCalled();
-      finish("Status: approved - invented\nAn optional explanation.");
       await vi.waitFor(() => expect(update).toHaveBeenCalled());
-      expect(update.mock.lastCall?.[0]).toBe(`${facts}\n\nGenerated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.`);
+      const completeFacts = update.mock.lastCall![0];
+      finish("Status: approved - invented\nAn optional explanation.");
+      await vi.waitFor(() => expect(update.mock.lastCall?.[0]).toContain("Generated explanation (optional):"));
+      expect(update.mock.lastCall?.[0]).toBe(`${completeFacts}\n\nGenerated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.`);
     } finally {
       finish("");
       await first;
     }
+  });
+
+  it.each([false, true])("keeps newer context after superseded conversation completion (failed=%s)", async (failed) => {
+    const empty = { code: 0, stderr: "", killed: false, stdout: JSON.stringify({ data: { repository: { pullRequest: {
+      reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+    } } } }) };
+    let finish!: (value: typeof empty) => void;
+    const old = new Promise<typeof empty>((resolve) => { finish = resolve; });
+    let details = 0;
+    let threads = 0;
+    const exec = vi.fn(async (command: string, args: string[]) => command === "pi" ? { ...empty, code: 1 }
+      : args[0] === "query" ? (++threads === 1 ? old : empty)
+      : { ...empty, stdout: JSON.stringify({ draft: ++details > 1 }) });
+    const source = createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!;
+    const update = vi.fn();
+    try {
+      await source.load(update);
+      await source.load(update);
+      await vi.waitFor(() => expect(update.mock.lastCall?.[0]).toContain("blocked - draft PR"));
+      const latest = update.mock.lastCall![0];
+      finish({ ...empty, code: failed ? 1 : 0 });
+      await new Promise(setImmediate);
+      expect(update.mock.lastCall?.[0]).toBe(latest);
+    } finally {
+      finish(empty);
+    }
+  });
+
+  it("keeps embedded facts when thread output exhausts the default byte budget", async () => {
+    const oversized = { data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: "thread", comments: { nodes: [
+      { id: "comment", body: `Unbounded reply ${"x".repeat(2_000_000)}` },
+    ] } }] } } } } };
+    const exec = vi.fn(async (command: string, args: string[]) => ({ code: command === "pi" ? 1 : 0, stderr: "", killed: false,
+      stdout: JSON.stringify(args[0] === "change" ? { conversation: [{ text: "Retained comment" }] } : oversized),
+    }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Retained comment; Unavailable: review threads");
+    expect(exec.mock.calls.filter(([command]) => command !== "pi")).toHaveLength(2);
   });
 
   it.each([0, 1])("keeps target facts when details fail with exit %s", async (code) => {

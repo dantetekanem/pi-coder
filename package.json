@@ -18,6 +18,7 @@
     "access": "public"
   },
   "files": [
+    "src/conversation.ts",
     "src/diff.ts",
     "src/git.ts",
     "src/git-change-status.ts",
