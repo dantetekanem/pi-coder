@@ -141,7 +141,7 @@ describe("remote pull request summary source", () => {
         return { code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false };
       }
       if (command === "gh" && args[1] === "graphql") {
-        return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }), stderr: "", killed: false };
+        return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } } } } } }), stderr: "", killed: false };
       }
       return { code: 1, stdout: "", stderr: "model unavailable", killed: false };
     });
@@ -228,6 +228,21 @@ describe("remote pull request summary source", () => {
     expect(exec).toHaveBeenCalledWith("pi", expect.arrayContaining(["--model", "model-vendor/model-one"]), expect.objectContaining({ cwd: "/repo" }));
   });
 
+  it.each(["missing", "outer", "nested"])("qualifies incomplete thread reads rather than approving: %s", async (incomplete) => {
+    const connection = {
+      pageInfo: incomplete === "missing" ? undefined : { hasNextPage: incomplete === "outer" },
+      nodes: [{ id: "thread", isResolved: true, comments: {
+        nodes: [], pageInfo: { hasNextPage: incomplete === "nested" },
+      } }],
+    };
+    const exec = vi.fn(async (command: string, args: string[]) => ({ code: command === "pi" ? 1 : 0, stderr: "", killed: false,
+      stdout: JSON.stringify(args[0] === "query" ? { data: { repository: { pullRequest: { reviewThreads: connection } } } } : { decision: "APPROVED" }),
+    }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Status:\npending - thread read incomplete");
+    expect(summary).toContain("Open comments:\nThread read incomplete.");
+  });
+
   it("uses separate configured context and flat review comments when thread queries are disabled", async () => {
     const exec = vi.fn(async (command: string, args: string[]) => {
       if (command === "cli-two" && args[0] === "change") {
@@ -251,6 +266,7 @@ describe("remote pull request summary source", () => {
     expect(summary).toContain("Status:\nblocked - changes requested");
     expect(summary).toContain("Validation:\nCheck details unavailable from Secondary code host context.");
     expect(summary).toContain("Can this preserve compatibility?");
+    expect(summary).toContain("Thread read incomplete.");
     expect(exec.mock.calls.some(([, args]) => args[0] === "query")).toBe(false);
   });
 
@@ -358,7 +374,7 @@ describe("remote pull request summary source", () => {
 
   it("labels malformed checks unavailable while retaining comments", async () => {
     const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0, stderr: "", killed: false,
-      stdout: JSON.stringify(args[0] === "query" ? { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }
+      stdout: JSON.stringify(args[0] === "query" ? { data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } } } } } }
         : { decision: "APPROVED", checks: {}, conversation: [{ author: { name: "bob" }, text: "Known comment" }] }),
     }));
     const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();

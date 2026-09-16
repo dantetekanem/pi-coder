@@ -78,10 +78,13 @@ export interface ReviewReplyItem {
   resolved: boolean | null;
 }
 
+export type ReviewThreadCoverage = "complete" | "partial";
+
 export interface ReviewRepliesSnapshot {
   replies: ReviewReplyItem[];
   selfLogin: string;
   fetchedAt: string;
+  threadCoverage?: ReviewThreadCoverage;
 }
 
 export interface ReviewRepliesPanelSource {
