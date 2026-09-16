@@ -69,7 +69,10 @@ describe("confirmed submission attempt lifecycle", () => {
     expect(posts(client)).toHaveLength(1);
   });
 
-  it("recovers a write-bound ID through the real scoped adapter without repeating the POST", async () => {
+  it("recovers a write-bound ID through the unchanged custom scoped adapter without repeating the POST", async () => {
+    const { id: _id, ...provider } = structuredClone(requireProviderSettings("github"));
+    provider.operations.review!.args.push("-H", "Accept: application/vnd.github+json");
+    writeFileSync(join(directory, "settings.json"), JSON.stringify({ version: 1, providers: { github: provider }, repositories: {} }));
     const client = api(async (args) => {
       if (args.includes("POST")) return { code: 1, stdout: 'HTTP/2.0 502 Bad Gateway\r\n\r\n{"id":9}', stderr: "Connection lost", killed: false };
       const value = args[1]?.includes("/comments?") ? [] : { ...JSON.parse(accepted().stdout), body: input().body };
@@ -77,14 +80,69 @@ describe("confirmed submission attempt lifecycle", () => {
     });
     const first = await submitPullRequestReview(client as never, input());
     expect(first).toMatchObject({ status: "unknown", steps: [{ reviewId: "9", reviewIdSource: "write_response" }] });
-    const { id: _id, ...provider } = structuredClone(requireProviderSettings("github"));
-    provider.operations.review!.args.push("-H", "Accept: application/vnd.github+json");
-    writeFileSync(join(directory, "settings.json"), JSON.stringify({ version: 1, providers: { github: provider }, repositories: {} }));
     const recovered = await submitPullRequestReview(client as never, input(), { attemptId: first.attemptId });
     expect(recovered).toMatchObject({ status: "submitted", receiptStatus: "saved", reviewedCommitId: input().commitId, attemptId: first.attemptId });
     expect(createSubmissionJournal().load(first.attemptId!)?.steps).toMatchObject([{ status: "submitted", reviewId: "9" }]);
     expect(posts(client)).toHaveLength(1);
     expect(client.exec.mock.calls.slice(-2).map(([, args]) => args[1])).toEqual(["repos/example/widgets/pulls/12/reviews/9", "repos/example/widgets/pulls/12/reviews/9/comments?per_page=100&page=1"]);
+  });
+
+  it.each([
+    "operations.review.args",
+    "operations.review.method",
+    "operations.reviewCommentsForReview.args",
+    "operations.reviewCommentsForReview.method",
+    "fields.submissionId",
+    "fields.submissionState",
+    "fields.submissionCommitId",
+    "fields.submissionAuthorId",
+    "fields.submissionAuthor",
+    "fields.submissionBody",
+    "fields.commentId",
+    "fields.commentReviewId",
+    "fields.commentReplyToId",
+    "fields.commentAuthorId",
+    "fields.commentAuthor",
+    "fields.commentPath",
+    "fields.commentBody",
+    "fields.commentCommitId",
+    "fields.commentOriginalCommitId",
+    "fields.commentSubjectType",
+    "fields.commentLine",
+    "fields.commentSide",
+    "fields.commentStartLine",
+    "fields.commentStartSide",
+    "fields.commentOriginalLine",
+    "fields.commentOriginalStartLine",
+  ])("blocks resume before recovery reads when %s changes", async (changed) => {
+    const client = api(async () => ({
+      code: 1,
+      stdout: 'HTTP/2.0 502 Bad Gateway\r\n\r\n{"id":9}',
+      stderr: "Connection lost",
+      killed: false,
+    }));
+    const first = await submitPullRequestReview(client as never, input());
+    expect(first).toMatchObject({ status: "unknown", steps: [{ reviewId: "9", reviewIdSource: "write_response" }] });
+    const journal = createSubmissionJournal();
+    const savedAttempt = journal.load(first.attemptId!);
+    const { id: _id, ...provider } = structuredClone(requireProviderSettings("github"));
+    const [section, name, property] = changed.split(".");
+    if (section === "fields") {
+      provider.fields[name!] = ["changed"];
+    } else if (property === "method") {
+      provider.operations[name!]!.method = "GET";
+    } else {
+      provider.operations[name!]!.args.push("-H", "Accept: application/vnd.github+json");
+    }
+    writeFileSync(join(directory, "settings.json"), JSON.stringify({ version: 1, providers: { github: provider }, repositories: {} }));
+    client.exec.mockClear();
+
+    const resumed = await submitPullRequestReview(client as never, input(), { attemptId: first.attemptId });
+
+    expect(resumed).toMatchObject({ status: "unknown", journalStatus: "saved", attemptId: first.attemptId });
+    expect(resumed.message).toContain("The confirmed provider contract changed.");
+    expect(client.exec).not.toHaveBeenCalled();
+    expect(journal.load(first.attemptId!)).toEqual(savedAttempt);
   });
 
   it("rejects changed input on an explicit intent and permits a deliberate identical new intent", async () => {

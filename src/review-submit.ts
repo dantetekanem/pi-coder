@@ -392,10 +392,12 @@ function submissionPlan(input: SubmitReviewInput, provider: ProviderSettings): R
 }
 
 function submissionProviderDigest(provider: ProviderSettings): string {
-  return submissionFingerprint({ executable: provider.executable, canonical: provider.urls.canonical,
-    operations: [provider.operations.submitReview, provider.operations.identity, provider.operations.pullRequest],
+  return submissionFingerprint({
+    executable: provider.executable,
+    canonical: provider.urls.canonical,
+    operations: provider.operations,
     capabilities: provider.capabilities,
-    fields: Object.fromEntries(Object.entries(provider.fields).filter(([name]) => ["identityId", "identityLogin", "submissionId", "submissionState", "submissionCommitId", "submissionAuthorId", "submissionAuthor", "state", "headRefOid"].includes(name))),
+    fields: provider.fields,
   });
 }
 
