@@ -2138,6 +2138,64 @@ describe("PR context pane", () => {
     finally { app.dispose(); }
   });
 
+  it("keeps the first continuation result after repeated m input without Replies", async () => {
+    const continuation = {};
+    const pending = deferred<void>();
+    const initialConversation: ReviewConversationMetadata = {
+      identity: "current-pr",
+      generation: 1,
+      attempt: 1,
+      continuation,
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+      coverage: {
+        details: "complete",
+        comments: "complete",
+        reviews: "complete",
+        threads: "complete",
+        checks: "complete",
+        identity: "complete",
+      },
+    };
+    const continuedConversation: ReviewConversationMetadata = {
+      ...initialConversation,
+      attempt: 2,
+      continuation: {},
+    };
+    const load = vi.fn<ReviewContextPanelSource["load"]>(async (update, options) => {
+      if (options == null) {
+        update?.("initial facts", initialConversation);
+        return "initial facts";
+      }
+      if (load.mock.calls.length === 2) {
+        await pending.promise;
+        update?.("continued facts", continuedConversation);
+        return "continued facts";
+      }
+      throw new Error("Stale or foreign conversation continuation.");
+    });
+    const { app } = await createContextHarness({
+      contextPanelSource: {
+        title: "PR context",
+        loadingText: "Loading",
+        conversation: {},
+        load,
+      },
+    });
+    try {
+      focusContext(app);
+      app.handleInput("m");
+      app.handleInput("m");
+      pending.resolve();
+      await pending.promise;
+
+      await vi.waitFor(() => expect((app as any).contextPanelState.text).toBe("continued facts"));
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(app.render(200).join("\n")).toContain("continued facts");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("joins the Tab cycle and shows the focused border", async () => {
     const { app } = await createContextHarness();
 

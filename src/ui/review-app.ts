@@ -1514,6 +1514,7 @@ export class ReviewApp {
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
   private contextRequestToken = 0;
+  private contextRequestInFlight = false;
   private contextConversation?: ReviewConversationMetadata;
   private conversation?: ReviewConversationMetadata;
   private repliesRefreshing = false;
@@ -1696,6 +1697,7 @@ export class ReviewApp {
     if (source == null || (options == null && (!this.paneVisibility.context || this.contextPanelState.status !== "idle"))) return;
 
     const token = ++this.contextRequestToken;
+    this.contextRequestInFlight = true;
     const isCurrent = () => !this.disposed && token === this.contextRequestToken;
     let receivedUpdate = false;
     const applyUpdate = (text: string, metadata?: ReviewConversationMetadata) => {
@@ -1728,6 +1730,8 @@ export class ReviewApp {
       if (this.contextPanelState.status !== "ready") this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
       else this.setMessage(`Could not refresh PR context: ${message}`);
       this.requestRender();
+    }).finally(() => {
+      if (isCurrent()) this.contextRequestInFlight = false;
     });
   }
 
@@ -1774,6 +1778,7 @@ export class ReviewApp {
       this.requestRender();
       return;
     }
+    if (options.continuation != null && this.contextRequestInFlight) return;
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
     if (context != null) this.ensureContextPanel(options);
