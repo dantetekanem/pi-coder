@@ -15,11 +15,16 @@ const mocks = vi.hoisted(() => ({
   runReviewApp: vi.fn(),
   resolveRemoteReviewTarget: vi.fn(),
   createReviewSessionId: vi.fn(() => "automatic-session"),
+  createReviewInstanceId: vi.fn(() => "automatic-session"),
+  hasReviewSessionIdentity: vi.fn(() => false),
   loadReviewSession: vi.fn(),
   saveReviewSession: vi.fn(),
-  saveReviewSessionWithStatus: vi.fn(() => ({ id: "automatic-session", saved: true })),
+  saveReviewSessionWithStatus: vi.fn((..._args: any[]): any => ({ id: "automatic-session", saved: true, generation: 1, indexUpdated: true })),
   deleteReviewSession: vi.fn(),
   listReviewSessions: vi.fn((): any[] => []),
+  listReviewCompositions: vi.fn((): any[] => []),
+  saveReviewComposition: vi.fn(),
+  removeReviewComposition: vi.fn(),
   buildReviewFileSignatures: vi.fn((): Record<string, string> => ({})),
   rebaseReviewSession: vi.fn(),
   reviewGrammar: vi.fn(),
@@ -75,6 +80,8 @@ vi.mock("../remote.js", async (importOriginal) => ({
 
 vi.mock("../review-session.js", () => ({
   createReviewSessionId: mocks.createReviewSessionId,
+  createReviewInstanceId: mocks.createReviewInstanceId,
+  hasReviewSessionIdentity: mocks.hasReviewSessionIdentity,
   loadReviewSession: mocks.loadReviewSession,
   saveReviewSession: mocks.saveReviewSession,
   saveReviewSessionWithStatus: mocks.saveReviewSessionWithStatus,
@@ -82,6 +89,12 @@ vi.mock("../review-session.js", () => ({
   listReviewSessions: mocks.listReviewSessions,
   buildReviewFileSignatures: mocks.buildReviewFileSignatures,
   rebaseReviewSession: mocks.rebaseReviewSession,
+}));
+
+vi.mock("../review-composition.js", () => ({
+  listReviewCompositions: mocks.listReviewCompositions,
+  saveReviewComposition: mocks.saveReviewComposition,
+  removeReviewComposition: mocks.removeReviewComposition,
 }));
 
 vi.mock("../ui/review-app.js", () => ({
@@ -270,8 +283,14 @@ describe("code diff extension", () => {
     rmSync(preferencesPath, { force: true });
     writeFileSync(settingsPath, JSON.stringify(testSettings()), "utf8");
     mocks.loadReviewSession.mockReturnValue(null);
-    mocks.saveReviewSessionWithStatus.mockReturnValue({ id: "automatic-session", saved: true });
+    mocks.createReviewInstanceId.mockReset().mockReturnValue("automatic-session");
+    mocks.hasReviewSessionIdentity.mockReset().mockReturnValue(false);
+    mocks.saveReviewSessionWithStatus.mockReset().mockImplementation((_identity, _data, context: any) => ({ id: context.id, saved: true, status: "saved", generation: (context.expectedGeneration ?? 0) + 1, indexUpdated: true }));
+    mocks.deleteReviewSession.mockReset().mockReturnValue({ deleted: true, status: "deleted", generation: 1, indexUpdated: true });
     mocks.listReviewSessions.mockReturnValue([]);
+    mocks.listReviewCompositions.mockReset().mockReturnValue([]);
+    mocks.saveReviewComposition.mockReset();
+    mocks.removeReviewComposition.mockReset();
     mocks.buildReviewFileSignatures.mockReturnValue({});
     mocks.rebaseReviewSession.mockImplementation((session: any) => ({
       data: session,
@@ -292,6 +311,167 @@ describe("code diff extension", () => {
     mocks.submitPullRequestReview.mockResolvedValue({ ok: true, message: "https://github.com/example/widgets/pull/1\nReview comment was posted at 12:00.\n1 inline comment was added." });
     mocks.createRemoteReviewRepliesSource.mockImplementation((_pi, _ctx, target) => target?.pullRequest == null ? undefined : mocks.repliesSource);
     mocks.runPiWorkbench.mockResolvedValue({ status: "closed", changedPaths: [] });
+  });
+
+  function draftReviewHarness() {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async (_title: string, choices: string[]) => choices[0]) } };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: null });
+    codeDiffExtension(pi as never);
+    return { ctx, open: (args = "", extra = {}) => tools.get("open_code_diff").execute("draft-test", { args, ...extra }, new AbortController().signal, vi.fn(), ctx) };
+  }
+
+  it("offers editor recovery only for explicit resume, including when the source diff is now empty", async () => {
+    const session = { ...reviewSessionData({ allComment: "current", allIntent: "comment", comments: [] }), id: "selected", identity: "/repo|working|local", generation: 7, revision: "worktree" };
+    const recovery = { id: "writer", text: "unfinished", target: { intent: "comment" } };
+    mocks.loadReviewSession.mockReturnValue(session);
+    mocks.listReviewCompositions.mockReturnValue([recovery]);
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    const harness = draftReviewHarness();
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [], visibleScopes: ["all-files"], branchBaseRevision: null });
+    await harness.open("--resume selected");
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ initialComposition: recovery, files: [] }));
+    expect(mocks.saveReviewComposition).not.toHaveBeenCalled();
+    expect(mocks.removeReviewComposition).not.toHaveBeenCalled();
+  });
+
+  it("requires first-snapshot membership before writing composition and coalesces storage errors", async () => {
+    const composition = { id: "writer", text: "first unfinished comment" };
+    mocks.saveReviewComposition.mockImplementation(() => { throw new Error("capacity reached"); });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.onCompositionSave(composition)).toBe(false);
+      expect(mocks.saveReviewComposition).not.toHaveBeenCalled();
+      options.onSessionChange(reviewSessionData({ allComment: "", allIntent: "comment", comments: [] }));
+      expect(options.onCompositionSave(composition)).toBe(false);
+      expect(options.onCompositionSave(composition)).toBe(false);
+      return { type: "cancel", disposition: "park" };
+    });
+    const harness = draftReviewHarness();
+    await harness.open();
+    expect(mocks.saveReviewSessionWithStatus.mock.calls[0]?.[2]).toMatchObject({ expectedGeneration: null });
+    expect(harness.ctx.ui.notify.mock.calls.filter(([message]) => String(message).includes("capacity reached"))).toHaveLength(1);
+  });
+
+  it("gives independent opens separate create-only instances for the same target", async () => {
+    mocks.createReviewInstanceId.mockReturnValueOnce("instance-a").mockReturnValueOnce("instance-b");
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.onSessionChange(reviewSessionData({ allComment: options.reviewSessionId, allIntent: "comment", comments: [] }))).toBe(true);
+      return { type: "cancel", disposition: "park" };
+    });
+    const a = draftReviewHarness();
+    const b = draftReviewHarness();
+    await a.open();
+    await b.open();
+    const saves = mocks.saveReviewSessionWithStatus.mock.calls;
+    expect(saves.map((call) => call[2])).toEqual([
+      expect.objectContaining({ id: "instance-a", expectedGeneration: null }),
+      expect.objectContaining({ id: "instance-b", expectedGeneration: null }),
+    ]);
+    expect(saves[0]![0]).toBe(saves[1]![0]);
+    expect(a.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("--resume instance-a"), "info");
+  });
+
+  it("keeps the resumed instance and advances only committed generations, including an index failure", async () => {
+    const draft = reviewSessionData({ allComment: "Keep this note", allIntent: "comment", comments: [] });
+    mocks.loadReviewSession.mockReturnValue({ ...draft, id: "selected", generation: 7, revision: "worktree" });
+    mocks.saveReviewSessionWithStatus.mockImplementation((_identity, _data, context: any) => ({ saved: true, status: "saved", id: context.id, generation: context.expectedGeneration + 1, indexUpdated: false }));
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.reviewSessionId).toBe("selected");
+      expect(options.onSessionChange(draft)).toBe(true);
+      expect(options.onSessionChange(draft)).toBe(true);
+      return { type: "cancel", disposition: "discard" };
+    });
+    await draftReviewHarness().open("--resume selected");
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([7, 8, 9]);
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "selected", 10);
+    expect(mocks.createReviewInstanceId).not.toHaveBeenCalled();
+  });
+
+  it("does not acknowledge a stale autosave or reload and replay it over the newer snapshot", async () => {
+    const draft = reviewSessionData({ allComment: "My edits", allIntent: "comment", comments: [] });
+    mocks.loadReviewSession.mockReturnValue({ ...draft, id: "selected", generation: 7, revision: "worktree" });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      mocks.saveReviewSessionWithStatus.mockReturnValue({ saved: false, status: "conflict", attempted: draft, current: { ...draft, generation: 9 } });
+      expect(options.onSessionChange(draft)).toBe(false);
+      expect(options.onSessionChange(draft)).toBe(false);
+      return { type: "cancel", disposition: "park" };
+    });
+    const harness = draftReviewHarness();
+    const result = await harness.open("--resume selected");
+    expect(result.details.started).toBe(false);
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([7, 8, 8, 8]);
+    expect(mocks.loadReviewSession).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/conflict.*in.memory/i), "warning");
+  });
+
+  it("reports conflicting discard instead of claiming the newer draft was deleted", async () => {
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "Original", allIntent: "comment", comments: [] }), generation: 3, revision: "worktree" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "discard" });
+    mocks.deleteReviewSession.mockReturnValue({ deleted: false, status: "conflict", actualGeneration: 5 });
+    const result = await draftReviewHarness().open("--resume selected");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "selected", 4);
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/not discarded.*conflict/i) });
+  });
+
+  it("consumes at the saved generation and deletes only the just-consumed generation", async () => {
+    const draft = reviewSessionData({ allComment: "Deliver this", allIntent: "discuss", comments: [] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      options.onSessionChange(draft);
+      return { type: "submit", ...draft.state.draft };
+    });
+    mocks.composeReviewPrompt.mockReturnValue("Delivered discussion");
+    await draftReviewHarness().open();
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([null, 1]);
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "automatic-session", 2);
+  });
+
+  it("reopens a UUID continuation using the recorded target identity and instance", async () => {
+    const id = "784f5b79-cc4d-4e13-9872-66185ea8bd55";
+    mocks.hasReviewSessionIdentity.mockReturnValue(true);
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "Retained", allIntent: "comment", comments: [] }), id, generation: 2, revision: "abc123" });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: id, priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
+    expect(mocks.hasReviewSessionIdentity).toHaveBeenCalledWith("pr|github|example/widgets|1", id);
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reviewSessionId: id }));
+    expect(composeRemoteDiscussionPrompt(remoteTarget(), "Discuss", id)).toContain(`"priorSessionId": "${id}"`);
+  });
+
+  it("rejects an explicit missing or deleted resume instead of recreating its terminal id", async () => {
+    const result = await draftReviewHarness().open("--resume deleted-instance");
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/missing, deleted, or belongs to another target/) });
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
+  });
+
+  it("starts a fresh instance after a completely consumed DISCUSS continuation", async () => {
+    mocks.hasReviewSessionIdentity.mockReturnValue(true);
+    mocks.createReviewInstanceId.mockReturnValue("next-pass");
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "discard" });
+    await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: "consumed-instance", priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reviewSessionId: "next-pass" }));
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "next-pass", undefined);
+  });
+
+  it("discards with the loaded generation then creates a fresh writable instance", async () => {
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "old", allIntent: "comment", comments: [] }), generation: 4, revision: "worktree" });
+    mocks.createReviewInstanceId.mockReturnValue("replacement");
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      options.onSessionChange(reviewSessionData({ allComment: "new", allIntent: "comment", comments: [] }));
+      return { type: "cancel", disposition: "park" };
+    });
+    await draftReviewHarness().open("--resume discarded --discard-resume");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "discarded", 4);
+    expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ id: "replacement", expectedGeneration: null }));
+  });
+
+  it("reports a locked picker rather than presenting an empty review list", async () => {
+    mocks.listReviewSessions.mockImplementationOnce(() => { throw new Error("Review session store is locked by process 42"); });
+    const harness = draftReviewHarness();
+    const result = await harness.open("--resume");
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/Could not list parked reviews:.*locked/) });
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
   });
 
   it("builds an agent-mediated review submission prompt", () => {
@@ -1728,7 +1908,7 @@ describe("code diff extension", () => {
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
     codeDiffExtension(pi as never);
 
-    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "--resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mountedSession.state.draft.comments).toEqual([
       unchanged,
@@ -1768,8 +1948,8 @@ describe("code diff extension", () => {
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
     codeDiffExtension(pi as never);
 
-    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
-    await tools.get("open_code_diff").execute("tool-call", { args: "base..head" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "base..head --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mounted).toHaveLength(2);
     expect(mounted.map((session) => session.state.draft.comments)).toEqual([[mapped], [mapped]]);
@@ -2398,7 +2578,7 @@ describe("code diff extension", () => {
 
     codeDiffExtension(pi as never);
     await tools.get("open_code_diff").execute("tool-call", {
-      args: "",
+      args: "--resume automatic-session",
       comments: [
         { path: "src/app.ts", body: "Conflicting generated finding.", line: 3 },
         { path: "src/app.ts", body: "New generated finding.", line: 5 },
@@ -2542,11 +2722,12 @@ describe("code diff extension", () => {
       },
     };
 
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "", allIntent: "discuss", comments: [] }), generation: 0, revision: "worktree" });
     codeDiffExtension(pi as never);
     await commands.get("diff")!.handler("--cwd ~/Poetry/rpgmenace --include-generated --whole-repo --resume saved-session", ctx);
     await vi.waitFor(() => expect(mocks.getReviewWindowData).toHaveBeenCalledWith(pi, expandedCwd, { includeGenerated: true, wholeRepo: true }));
     expect(mocks.loadReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session");
-    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session"));
+    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session", 2));
 
     mocks.deleteReviewSession.mockClear();
     const discardCommands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
@@ -2558,7 +2739,7 @@ describe("code diff extension", () => {
     };
     codeDiffExtension(discardPi as never);
     await discardCommands.get("diff")!.handler("--cwd ~/Poetry/rpgmenace --discard-resume", ctx);
-    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "automatic-session"));
+    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "automatic-session", 0));
   });
 
   it("treats a bare existing local directory as the diff cwd", async () => {
@@ -2926,7 +3107,7 @@ describe("code diff extension", () => {
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
 
     const { tools, ctx } = remoteReviewHarness("def456");
-    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mocks.createReviewSessionId).toHaveBeenCalledWith("pr|github|example/widgets|1");
     expect(mocks.rebaseReviewSession).toHaveBeenCalledWith(parked, expect.any(Array), ["all-files"], { "src/app.ts": "modified:src/app.ts:1:0" });
@@ -2936,7 +3117,7 @@ describe("code diff extension", () => {
       expect.anything(),
       expect.objectContaining({ id: "automatic-session", revision: "def456", fileSignatures: { "src/app.ts": "modified:src/app.ts:1:0" } }),
     );
-    expect(ctx.ui.notify).toHaveBeenCalledWith("Review parked. Resume with /diff remote example/widgets#1.", "info");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review parked. Resume with /diff remote example/widgets#1 --resume automatic-session.", "info");
   });
 
   it("deletes the saved session only when the reviewer explicitly discards", async () => {
@@ -2945,7 +3126,7 @@ describe("code diff extension", () => {
     const { tools, ctx } = remoteReviewHarness("abc123");
     await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
 
-    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "automatic-session");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "automatic-session", undefined);
   });
 
   it("puts the last verdict first and offers one empty-body fast path", () => {
@@ -3111,7 +3292,8 @@ describe("code diff extension", () => {
 
   it("offers a resume picker for a bare --resume and reopens the chosen parked review", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    mocks.listReviewSessions.mockReturnValue([{
+    const previousIdentity = "/repo|origin/main|old-sha|example/widgets#1";
+    const parked = {
       id: "parked-session",
       identity: "pr|github|example/widgets|1",
       updatedAt: "2025-01-02T03:04:05.000Z",
@@ -3123,7 +3305,8 @@ describe("code diff extension", () => {
       url: "https://github.com/example/widgets/pull/1",
       resumeArgs: "remote example/widgets#1",
       cwd: "/repo",
-    }]);
+    };
+    mocks.listReviewSessions.mockReturnValue([{ ...parked, id: "other-instance" }, { ...parked, identity: previousIdentity }]);
     mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({
       repoRoot: "/repo",
       files: [remoteReviewFile()],
@@ -3138,18 +3321,19 @@ describe("code diff extension", () => {
       registerShortcut: vi.fn(),
       on: vi.fn(),
     };
-    const choice = "example/widgets#1 Add review mode · 3 comments · 1 reviewed · 2025-01-02 03:04";
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "", allIntent: "discuss", comments: [] }), generation: 0, revision: "abc123" });
     const ctx = {
       hasUI: true,
       cwd: "/repo",
-      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async () => choice), editor: vi.fn() },
+      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async (_title: string, choices: string[]) => choices[1]), editor: vi.fn() },
     };
 
     codeDiffExtension(pi as never);
     await commands.get("diff")!.handler("--resume", ctx);
 
-    await vi.waitFor(() => expect(ctx.ui.select).toHaveBeenCalledWith("Resume a parked review", [choice]));
+    await vi.waitFor(() => expect(ctx.ui.select).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(mocks.resolveRemoteReviewTarget).toHaveBeenCalledWith(pi, "/repo", "example/widgets#1", "/repo", expect.any(Function), undefined));
-    await vi.waitFor(() => expect(mocks.loadReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "parked-session"));
+    await vi.waitFor(() => expect(mocks.loadReviewSession).toHaveBeenCalledWith(previousIdentity, "parked-session"));
+    await vi.waitFor(() => expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalledWith("pr|github|example/widgets|1", expect.anything(), expect.objectContaining({ id: "parked-session", previousIdentity, expectedGeneration: 0 })));
   });
 });

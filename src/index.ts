@@ -15,8 +15,9 @@ import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, 
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { saveReviewReceipt } from "./review-receipts.js";
 import { createRemoteReviewRepliesSource } from "./review-replies.js";
+import { listReviewCompositions, removeReviewComposition, saveReviewComposition } from "./review-composition.js";
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
-import { buildReviewFileSignatures, createReviewSessionId, deleteReviewSession, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
+import { buildReviewFileSignatures, createReviewInstanceId, createReviewSessionId, deleteReviewSession, hasReviewSessionIdentity, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
 import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscussContinuation, type RemoteReviewTarget } from "./remote.js";
 import { buildProviderComments, buildReviewBody, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict } from "./review-submit.js";
 import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
@@ -32,7 +33,7 @@ import { ReviewInvocationCoordinator } from "./adapters/pi/review-invocation.js"
 import { listBundledShikiThemes } from "./workbench/node/shiki.js";
 import { normalizeWorkbenchLaunch } from "./workbench/target.js";
 import type { CodeStory, CodeTarget, WorkbenchCompletionResult, WorkbenchLaunch } from "./workbench/contracts.js";
-import { hasExactSubmoduleRange, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
+import { hasExactSubmoduleRange, type ReviewComposition, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
 
 type InteractiveReviewMode = "working" | "staged" | "branch" | "custom";
 
@@ -170,8 +171,7 @@ function extractRemoteArgs(trimmed: string, fallbackCwd: string): string | null 
   const tokens = trimmed.split(/\s+/);
   const firstToken = tokens[0]!;
   if (firstToken.toLowerCase() === "remote") {
-    const target = trimmed.slice(firstToken.length).trim();
-    return target.length === 0 ? null : target;
+    return tokens[1] ?? null;
   }
   if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) return parseInteractiveReviewArgs(trimmed).remote ?? null;
   if (trimmed.includes("..")) return null;
@@ -586,7 +586,7 @@ export function composeRemoteReviewPrompt(target: RemoteReviewTarget, reviewProm
   return lines.join("\n").trim();
 }
 
-export function composeRemoteDiscussionPrompt(target: RemoteReviewTarget, discussionPrompt: string): string {
+export function composeRemoteDiscussionPrompt(target: RemoteReviewTarget, discussionPrompt: string, sessionId = createReviewSessionId(pullRequestSessionIdentity(target))): string {
   const pr = target.pullRequest!;
   const context = formatPullRequestContext(pr);
   const reopenArguments = {
@@ -594,7 +594,7 @@ export function composeRemoteDiscussionPrompt(target: RemoteReviewTarget, discus
     cwd: target.gitRoot,
     continuation: {
       kind: "remote-discuss" as const,
-      priorSessionId: createReviewSessionId(pullRequestSessionIdentity(target)),
+      priorSessionId: sessionId,
       priorBaseRevision: target.baseRef,
       priorHeadRevision: pr.headRefOid,
     },
@@ -701,7 +701,7 @@ function formatParkedSessionChoice(entry: ReviewSessionIndexEntry): string {
   const comments = `${entry.commentCount} comment${entry.commentCount === 1 ? "" : "s"}`;
   const reviewed = `${entry.reviewedCount} reviewed`;
   const when = entry.updatedAt.slice(0, 16).replace("T", " ");
-  return `${entry.label} · ${comments} · ${reviewed} · ${when}`;
+  return `${entry.label} · ${comments} · ${reviewed} · ${when} · ${entry.id}`;
 }
 
 function consumeDraftItems(session: ReviewSessionData, consumption: DraftConsumption): ReviewSessionData {
@@ -870,7 +870,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         ? loadReviewFileContents(pi, activeRepoRoot, file, scope, branchBaseRevision, modifiedRevision)
         : loadReviewFileContents(pi, activeRepoRoot, file, scope);
       const shortcutConfig = loadCommentShortcuts();
-      if (files.length === 0) {
+      if (files.length === 0 && sessionOptions?.resumeId == null) {
         const message = "No reviewable files found for this diff.";
         ctx.ui.notify(message, "info");
         return { started: false, message };
@@ -879,14 +879,26 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       notifyShortcutWarnings(ctx, shortcutConfig.warnings);
       const sessionTarget = buildReviewSessionTarget(data, remoteTarget);
       const sessionIdentity = sessionTarget.identity;
+      let storageIdentity = sessionOptions?.resumeIdentity ?? sessionIdentity;
       const sessionRevision = sessionTarget.revision;
       const fileSignatures = buildReviewFileSignatures(files);
       let sessionContext = { revision: sessionRevision, fileSignatures, meta: sessionTarget.meta };
-      const sessionId = sessionOptions?.resumeId != null && sessionOptions.resumeId !== "latest"
-        ? sessionOptions.resumeId
-        : createReviewSessionId(sessionIdentity);
-      if (sessionOptions?.discard) deleteReviewSession(sessionIdentity, sessionId);
-      const savedSession = sessionOptions?.discard ? null : loadReviewSession(sessionOptions?.resumeIdentity ?? sessionIdentity, sessionId);
+      const resumeId = sessionOptions?.resumeId === "latest"
+        ? listReviewSessions().find((entry) => entry.identity === sessionIdentity)?.id
+        : sessionOptions?.resumeId;
+      if (sessionOptions?.resumeId === "latest" && resumeId == null) throw new Error("No parked review exists for this target.");
+      const legacyId = createReviewSessionId(sessionIdentity);
+      let savedSession = resumeId == null && !sessionOptions?.discard ? null : loadReviewSession(storageIdentity, resumeId ?? legacyId);
+      if (resumeId != null && savedSession == null) throw new Error(`Review session ${resumeId} is missing, deleted, or belongs to another target. Use /diff --resume to select an existing review.`);
+      if (sessionOptions?.discard) {
+        const deletion = deleteReviewSession(storageIdentity, resumeId ?? legacyId, savedSession?.generation);
+        if (!deletion.deleted) throw new Error(`Review was not discarded (${deletion.status}); its saved snapshot was retained.`);
+        savedSession = null;
+        storageIdentity = sessionIdentity;
+      }
+      // A new review never reuses a prior instance, including a consumed legacy target-keyed draft.
+      const sessionId = resumeId != null && !sessionOptions?.discard ? resumeId : createReviewInstanceId();
+      let expectedGeneration: number | null = resumeId != null && savedSession != null ? savedSession.generation : null;
       let initialSession: ReviewSessionData | null = savedSession;
       if (savedSession != null && savedSession.revision !== sessionRevision) {
         const rebase = rebaseReviewSession(savedSession, files, visibleScopes, fileSignatures);
@@ -900,31 +912,71 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       } else if (savedSession != null) {
         ctx.ui.notify(`Resumed review session ${sessionId}.`, "info");
       }
+      let recoveredComposition: ReviewComposition | undefined;
+      if (resumeId != null && savedSession != null) {
+        const recoveries = listReviewCompositions(storageIdentity, sessionId);
+        if (recoveries.length > 0) {
+          const labels = recoveries.map((item) => `${item.id.slice(0, 8)} · ${item.target.intent} · ${sanitizeTerminalText(item.path ?? "review-wide note")} · ${sanitizeTerminalText(item.text).slice(0, 60)}`);
+          const selected = await ctx.ui.select("Recover unfinished editor text? Nothing is submitted.", [...labels, "Keep committed feedback; leave recovery copies saved"]);
+          if (selected != null) recoveredComposition = recoveries[labels.indexOf(selected)];
+        }
+      }
       let latestSession: ReviewSessionData | null = initialSession;
-      let latestSessionDurable = initialSession != null;
+      let latestSessionDurable = initialSession != null && expectedGeneration != null;
+      let lastSaveFailure: string | undefined;
+      const saveSession = (session: ReviewSessionData): boolean => {
+        const save = saveReviewSessionWithStatus(sessionIdentity, session, {
+          ...sessionContext, id: sessionId, expectedGeneration,
+          ...(storageIdentity === sessionIdentity ? {} : { previousIdentity: storageIdentity }),
+        });
+        latestSessionDurable = save.saved;
+        if (save.saved) {
+          storageIdentity = sessionIdentity;
+          expectedGeneration = save.generation;
+          if (!save.indexUpdated && lastSaveFailure !== "index") ctx.ui.notify(`Review saved as ${sessionId}, but the picker index could not be updated. Resume with --resume ${sessionId}.`, "warning");
+          lastSaveFailure = save.indexUpdated ? undefined : "index";
+        } else if (lastSaveFailure !== save.status) {
+          lastSaveFailure = save.status;
+          ctx.ui.notify(`Review save ${save.status}: your edits remain in memory and the stored snapshot was not overwritten. Keep this review open until persistence is resolved.`, "warning");
+        }
+        return save.saved;
+      };
+      let lastCompositionFailure: string | undefined;
+      const persistComposition = (operation: () => void): boolean => {
+        try {
+          operation();
+          lastCompositionFailure = undefined;
+          return true;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (lastCompositionFailure !== message) ctx.ui.notify(`Editor recovery failed: ${sanitizeTerminalText(message)}. Keep the editor open or copy its text.`, "warning");
+          lastCompositionFailure = message;
+          return false;
+        }
+      };
+      const deleteSession = (): string | undefined => {
+        const deletion = deleteReviewSession(storageIdentity, sessionId, expectedGeneration ?? undefined);
+        if (deletion.deleted) return undefined;
+        const message = `Review was not discarded (${deletion.status}); the saved snapshot was retained.`;
+        ctx.ui.notify(message, "warning");
+        return message;
+      };
       const persistDraftConsumption = (
         consumption: DraftConsumption,
         failureItemLabel = "submitted items",
       ): { remainingItems: number; message?: string } => {
-        const currentSession = latestSession ?? loadReviewSession(sessionIdentity, sessionId);
-        if (currentSession == null) {
-          deleteReviewSession(sessionIdentity, sessionId);
-          return { remainingItems: 0 };
-        }
+        const currentSession = latestSession ?? loadReviewSession(storageIdentity, sessionId);
+        if (currentSession == null) return { remainingItems: 0, message: deleteSession() };
         const retainedSession = consumeDraftItems(currentSession, consumption);
         const remainingItems = countDraftItems(retainedSession);
-        const save = saveReviewSessionWithStatus(sessionIdentity, retainedSession, { ...sessionContext, id: sessionId });
-        if (!save.saved) {
+        if (!saveSession(retainedSession)) {
           const message = `Could not save consumed review state; the previous full snapshot was retained, so ${failureItemLabel} may appear again on resume.`;
           ctx.ui.notify(message, "warning");
           return { remainingItems, message };
         }
         latestSession = retainedSession;
         latestSessionDurable = true;
-        if (remainingItems === 0) {
-          deleteReviewSession(sessionIdentity, sessionId);
-          return { remainingItems };
-        }
+        if (remainingItems === 0) return { remainingItems, message: deleteSession() };
         const message = `${remainingItems} unresolved draft ${remainingItems === 1 ? "item remains" : "items remain"} saved in review session ${sessionId}.`;
         ctx.ui.notify(message, "warning");
         return { remainingItems, message };
@@ -975,9 +1027,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           );
           initialSession = { ...initialSession, state: validatedState };
           latestSession = initialSession;
-          const validationSave = saveReviewSessionWithStatus(sessionIdentity, initialSession, { ...sessionContext, id: sessionId });
-          latestSessionDurable = validationSave.saved;
-          if (!validationSave.saved) {
+          if (!saveSession(initialSession)) {
             ctx.ui.notify("Draft anchor validation could not be saved; this mount is using the validated in-memory snapshot while the previous full durable snapshot remains intact.", "warning");
           }
         }
@@ -1001,10 +1051,16 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           reviewSessionId: sessionId,
           reviewScopeFingerprint: localReview?.scopeFingerprint,
           initialBanner: resumeBanner,
+          initialComposition: firstReview ? recoveredComposition : undefined,
+          onCompositionSave: (composition) => {
+            // Only a first snapshot failure needs membership retried. Never reload/replay a stale generation.
+            if (expectedGeneration == null && (latestSession == null || !saveSession(latestSession))) return false;
+            return persistComposition(() => saveReviewComposition(storageIdentity, sessionId, composition));
+          },
+          onCompositionRemove: (id) => persistComposition(() => removeReviewComposition(storageIdentity, sessionId, id)),
           onSessionChange: (session) => {
             latestSession = session;
-            latestSessionDurable = saveReviewSessionWithStatus(sessionIdentity, session, { ...sessionContext, id: sessionId }).saved;
-            return true;
+            return saveSession(session);
           },
         });
         result = herdrFullscreen
@@ -1141,21 +1197,18 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
 
       if (result.type === "cancel") {
         if (result.disposition == null) {
-          deleteReviewSession(sessionIdentity, sessionId);
+          const failure = deleteSession();
+          if (failure != null) return { started: false, message: failure };
           const message = "Review cancelled.";
           ctx.ui.notify(message, "info");
           return { started: true, message };
         }
         if (result.disposition === "discard") {
-          deleteReviewSession(sessionIdentity, sessionId);
-          return { started: true };
+          const failure = deleteSession();
+          return failure == null ? { started: true } : { started: false, message: failure };
         }
-        if (latestSession != null && !latestSessionDurable) {
-          latestSessionDurable = saveReviewSessionWithStatus(sessionIdentity, latestSession, { ...sessionContext, id: sessionId }).saved;
-        }
-        const resumeHint = sessionTarget.meta.resumeArgs == null || sessionTarget.meta.resumeArgs.length === 0
-          ? "/diff --resume"
-          : `/diff ${sessionTarget.meta.resumeArgs}`;
+        if (latestSession != null && !latestSessionDurable) saveSession(latestSession);
+        const resumeHint = `/diff ${sessionTarget.meta.resumeArgs ? `${sessionTarget.meta.resumeArgs} ` : ""}--resume ${sessionId}`;
         const message = latestSessionDurable
           ? `Review parked. Resume with ${resumeHint}.`
           : "Could not save the review draft; it was not safely parked.";
@@ -1163,7 +1216,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         return { started: latestSessionDurable, message };
       }
 
-      const fullSession = latestSession ?? loadReviewSession(sessionIdentity, sessionId);
+      const fullSession = latestSession ?? loadReviewSession(storageIdentity, sessionId);
       if (!hasSubmitPayloadContent(result) && fullSession != null && countDraftItems(fullSession) > 0) {
         const message = `Review not submitted because unresolved drafts remain in session ${sessionId}. Reanchor or remove them before submitting.`;
         ctx.ui.notify(message, "warning");
@@ -1171,7 +1224,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       }
 
       if (remoteTarget?.pullRequest != null) {
-        const finished = await finishRemotePrReview(ctx, files, result, remoteTarget);
+        const finished = await finishRemotePrReview(ctx, files, result, remoteTarget, sessionId);
         if (finished.consumption == null) return finished.status;
         const retained = persistDraftConsumption(finished.consumption);
         const status = retained.message == null
@@ -1203,7 +1256,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     }
   }
 
-  async function finishRemotePrReview(ctx: ExtensionContext, files: Parameters<typeof composeReviewPrompt>[0], result: ReviewSubmitPayload, target: RemoteReviewTarget): Promise<RemotePrFinishResult> {
+  async function finishRemotePrReview(ctx: ExtensionContext, files: Parameters<typeof composeReviewPrompt>[0], result: ReviewSubmitPayload, target: RemoteReviewTarget, sessionId: string): Promise<RemotePrFinishResult> {
     const pr = target.pullRequest!;
     const provider = providerForTarget(target);
     const supportsFileComments = getProviderCapability(provider, "fileComments");
@@ -1223,7 +1276,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
 
     if (choice === discussionChoice) {
       return {
-        status: { started: true, prompt: composeRemoteDiscussionPrompt(target, discussionPrompt) },
+        status: { started: true, prompt: composeRemoteDiscussionPrompt(target, discussionPrompt, sessionId) },
         consumption: {
           consumeAllComment: result.allIntent === "discuss" && result.allComment.trim().length > 0,
           commentIds: result.comments.filter((comment) => comment.intent === "discuss").map((comment) => comment.id),
@@ -1307,7 +1360,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   }
 
   function validateRemoteDiscussContinuation(target: RemoteReviewTarget, continuation: RemoteDiscussContinuation): string | undefined {
-    if (target.pullRequest == null || continuation.priorSessionId !== createReviewSessionId(pullRequestSessionIdentity(target))) {
+    if (target.pullRequest == null || (continuation.priorSessionId !== createReviewSessionId(pullRequestSessionIdentity(target)) && !hasReviewSessionIdentity(pullRequestSessionIdentity(target), continuation.priorSessionId))) {
       return "Remote DISCUSS continuation does not belong to the requested remote review identity.";
     }
     if (continuation.priorBaseRevision !== target.baseRef || continuation.priorHeadRevision !== target.pullRequest.headRefOid) {
@@ -1320,7 +1373,14 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     if (!ctx.hasUI) return { started: false, message: "Interactive review requires a TUI session." };
 
     if (params.resume === "latest" && params.remote == null && params.mode == null && params.ref == null && params.cwd == null && params.discardResume !== true) {
-      const picked = await pickParkedReview(ctx);
+      let picked: ReviewSessionIndexEntry | null;
+      try {
+        picked = await pickParkedReview(ctx);
+      } catch (error) {
+        const message = `Could not list parked reviews: ${error instanceof Error ? error.message : String(error)}`;
+        ctx.ui.notify(message, "warning");
+        return { started: false, message };
+      }
       if (picked == null) return { started: false, message: "No parked review selected." };
       const remote = picked.resumeArgs?.startsWith("remote ") === true ? picked.resumeArgs.slice("remote ".length) : undefined;
       return runInteractiveReview(
@@ -1367,7 +1427,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           ? await getReviewWindowDataForRevisionRange(pi, target.gitRoot, target.baseRef, target.headRef)
           : await getReviewWindowDataForRevisionRange(pi, target.gitRoot, target.baseRef, target.headRef, rangeOptions);
         setRemoteProgress(ctx, undefined);
-        const status = await openReviewData(ctx, data, target, comments, { resumeId: params.resume, resumeIdentity: params.resumeIdentity, discard: params.discardResume });
+        // A fully consumed continuation names a terminal instance; start a fresh one for that target.
+        const continuationId = params.continuation?.priorSessionId;
+        const resumeId = continuationId != null && loadReviewSession(pullRequestSessionIdentity(target), continuationId) != null ? continuationId : params.resume;
+        const status = await openReviewData(ctx, data, target, comments, { resumeId, resumeIdentity: params.resumeIdentity, discard: params.discardResume });
         return offerNextReview(ctx, status, target.gitRoot);
       } catch (error) {
         setRemoteProgress(ctx, undefined);
@@ -1427,7 +1490,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     if (handoff != null) {
       const remote = extractRemoteArgs(trimmed, fallbackCwd);
       if (remote == null) return unsupported("Supplied pull request metadata requires a remote review target, for example: remote <url>.", ctx);
-      return runInteractiveReview({ remote, handoff, continuation }, ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(trimmed), remote, handoff, continuation }, ctx, fallbackCwd, comments);
     }
 
     if (trimmed.length === 0) return openReview(ctx, fallbackCwd, comments);
@@ -1436,9 +1499,9 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     const firstToken = tokens[0]!;
 
     if (firstToken.toLowerCase() === "remote") {
-      const target = trimmed.slice(firstToken.length).trim();
-      if (target.length === 0) return unsupported("Usage: /diff remote <url | branch>", ctx);
-      return runInteractiveReview({ remote: target, continuation }, ctx, fallbackCwd, comments);
+      const target = tokens[1];
+      if (target == null) return unsupported("Usage: /diff remote <url | branch>", ctx);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(2).join(" ")), remote: target, continuation }, ctx, fallbackCwd, comments);
     }
 
     if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) {
@@ -1449,9 +1512,9 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     if (localCwd != null) return openReview(ctx, localCwd, comments);
 
     if (trimmed.includes("..")) {
-      return runInteractiveReview({ mode: "custom", ref: trimmed }, ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), mode: "custom", ref: firstToken }, ctx, fallbackCwd, comments);
     }
-    return runInteractiveReview({ remote: trimmed, continuation }, ctx, fallbackCwd, comments);
+    return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), remote: firstToken, continuation }, ctx, fallbackCwd, comments);
   }
 
   function formatOpenCodeDiffToolText(status: ReviewRunStatus, args: string, cwd: string): string {
