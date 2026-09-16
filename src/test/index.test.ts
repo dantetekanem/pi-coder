@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashTargetSlice } from "../workbench/target.js";
+import { submissionDraftSourceFingerprint, submissionFingerprint } from "../review-submission-journal.js";
 
 const mocks = vi.hoisted(() => ({
   loadCommentShortcuts: vi.fn(),
@@ -15,16 +16,23 @@ const mocks = vi.hoisted(() => ({
   runReviewApp: vi.fn(),
   resolveRemoteReviewTarget: vi.fn(),
   createReviewSessionId: vi.fn(() => "automatic-session"),
+  createReviewInstanceId: vi.fn(() => "automatic-session"),
+  hasReviewSessionIdentity: vi.fn(() => false),
   loadReviewSession: vi.fn(),
   saveReviewSession: vi.fn(),
-  saveReviewSessionWithStatus: vi.fn(() => ({ id: "automatic-session", saved: true })),
+  saveReviewSessionWithStatus: vi.fn((..._args: any[]): any => ({ id: "automatic-session", saved: true, generation: 1, indexUpdated: true })),
   deleteReviewSession: vi.fn(),
   listReviewSessions: vi.fn((): any[] => []),
+  listReviewCompositions: vi.fn((): any[] => []),
+  saveReviewComposition: vi.fn(),
+  removeReviewComposition: vi.fn(),
   buildReviewFileSignatures: vi.fn((): Record<string, string> => ({})),
   rebaseReviewSession: vi.fn(),
   reviewGrammar: vi.fn(),
   submitPullRequestReview: vi.fn(),
-  saveReviewReceipt: vi.fn(),
+  findForDraft: vi.fn(),
+  findHandoffForDraft: vi.fn(),
+  prepareSubmissionHandoff: vi.fn(),
   createRemoteReviewRepliesSource: vi.fn(),
   repliesSource: { title: "Replies", loadingText: "Loading", load: vi.fn() },
   runPiWorkbench: vi.fn(),
@@ -44,6 +52,9 @@ const settingsPath = join(preferencesDir, "provider-settings.json");
 const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
 const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
 const originalHerdrFullscreen = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
+const storeEnvs = ["PI_CODE_DIFF_SUBMISSIONS_DIR", "PI_CODE_DIFF_RECEIPTS_DIR", "PI_CODE_DIFF_SESSIONS_DIR"];
+const originalStores = storeEnvs.map((key) => process.env[key]);
+storeEnvs.forEach((key) => { process.env[key] = join(preferencesDir, key); });
 process.env.PI_CODE_DIFF_PREFERENCES_PATH = preferencesPath;
 process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
 
@@ -54,6 +65,10 @@ afterAll(() => {
   else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
   if (originalHerdrFullscreen == null) delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
   else process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = originalHerdrFullscreen;
+  storeEnvs.forEach((key, index) => {
+    if (originalStores[index] == null) delete process.env[key];
+    else process.env[key] = originalStores[index];
+  });
   rmSync(preferencesDir, { recursive: true, force: true });
 });
 
@@ -75,6 +90,8 @@ vi.mock("../remote.js", async (importOriginal) => ({
 
 vi.mock("../review-session.js", () => ({
   createReviewSessionId: mocks.createReviewSessionId,
+  createReviewInstanceId: mocks.createReviewInstanceId,
+  hasReviewSessionIdentity: mocks.hasReviewSessionIdentity,
   loadReviewSession: mocks.loadReviewSession,
   saveReviewSession: mocks.saveReviewSession,
   saveReviewSessionWithStatus: mocks.saveReviewSessionWithStatus,
@@ -82,6 +99,12 @@ vi.mock("../review-session.js", () => ({
   listReviewSessions: mocks.listReviewSessions,
   buildReviewFileSignatures: mocks.buildReviewFileSignatures,
   rebaseReviewSession: mocks.rebaseReviewSession,
+}));
+
+vi.mock("../review-composition.js", () => ({
+  listReviewCompositions: mocks.listReviewCompositions,
+  saveReviewComposition: mocks.saveReviewComposition,
+  removeReviewComposition: mocks.removeReviewComposition,
 }));
 
 vi.mock("../ui/review-app.js", () => ({
@@ -98,13 +121,15 @@ vi.mock("../review-grammar.js", async (importOriginal) => ({
   reviewGrammar: mocks.reviewGrammar,
 }));
 
+vi.mock("../review-submission-journal.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../review-submission-journal.js")>()),
+  createSubmissionJournal: () => ({ findForDraft: mocks.findForDraft, findHandoffForDraft: mocks.findHandoffForDraft }),
+}));
+
 vi.mock("../review-submit.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../review-submit.js")>()),
   submitPullRequestReview: mocks.submitPullRequestReview,
-}));
-
-vi.mock("../review-receipts.js", () => ({
-  saveReviewReceipt: mocks.saveReviewReceipt,
+  prepareSubmissionHandoff: mocks.prepareSubmissionHandoff,
 }));
 
 vi.mock("../review-replies.js", () => ({
@@ -269,9 +294,18 @@ describe("code diff extension", () => {
     delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
     rmSync(preferencesPath, { force: true });
     writeFileSync(settingsPath, JSON.stringify(testSettings()), "utf8");
+    mocks.findForDraft.mockReset().mockReturnValue(null);
+    mocks.findHandoffForDraft.mockReset().mockReturnValue(null);
+    mocks.prepareSubmissionHandoff.mockReset().mockImplementation((input, context) => ({ id: "handoff-1", input, ...context }));
     mocks.loadReviewSession.mockReturnValue(null);
-    mocks.saveReviewSessionWithStatus.mockReturnValue({ id: "automatic-session", saved: true });
+    mocks.createReviewInstanceId.mockReset().mockReturnValue("automatic-session");
+    mocks.hasReviewSessionIdentity.mockReset().mockReturnValue(false);
+    mocks.saveReviewSessionWithStatus.mockReset().mockImplementation((_identity, _data, context: any) => ({ id: context.id, saved: true, status: "saved", generation: (context.expectedGeneration ?? 0) + 1, indexUpdated: true }));
+    mocks.deleteReviewSession.mockReset().mockReturnValue({ deleted: true, status: "deleted", generation: 1, indexUpdated: true });
     mocks.listReviewSessions.mockReturnValue([]);
+    mocks.listReviewCompositions.mockReset().mockReturnValue([]);
+    mocks.saveReviewComposition.mockReset();
+    mocks.removeReviewComposition.mockReset();
     mocks.buildReviewFileSignatures.mockReturnValue({});
     mocks.rebaseReviewSession.mockImplementation((session: any) => ({
       data: session,
@@ -292,6 +326,167 @@ describe("code diff extension", () => {
     mocks.submitPullRequestReview.mockResolvedValue({ ok: true, message: "https://github.com/example/widgets/pull/1\nReview comment was posted at 12:00.\n1 inline comment was added." });
     mocks.createRemoteReviewRepliesSource.mockImplementation((_pi, _ctx, target) => target?.pullRequest == null ? undefined : mocks.repliesSource);
     mocks.runPiWorkbench.mockResolvedValue({ status: "closed", changedPaths: [] });
+  });
+
+  function draftReviewHarness() {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async (_title: string, choices: string[]) => choices[0]) } };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: null });
+    codeDiffExtension(pi as never);
+    return { ctx, open: (args = "", extra = {}) => tools.get("open_code_diff").execute("draft-test", { args, ...extra }, new AbortController().signal, vi.fn(), ctx) };
+  }
+
+  it("offers editor recovery only for explicit resume, including when the source diff is now empty", async () => {
+    const session = { ...reviewSessionData({ allComment: "current", allIntent: "comment", comments: [] }), id: "selected", identity: "/repo|working|local", generation: 7, revision: "worktree" };
+    const recovery = { id: "writer", text: "unfinished", target: { intent: "comment" } };
+    mocks.loadReviewSession.mockReturnValue(session);
+    mocks.listReviewCompositions.mockReturnValue([recovery]);
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    const harness = draftReviewHarness();
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [], visibleScopes: ["all-files"], branchBaseRevision: null });
+    await harness.open("--resume selected");
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ initialComposition: recovery, files: [] }));
+    expect(mocks.saveReviewComposition).not.toHaveBeenCalled();
+    expect(mocks.removeReviewComposition).not.toHaveBeenCalled();
+  });
+
+  it("requires first-snapshot membership before writing composition and coalesces storage errors", async () => {
+    const composition = { id: "writer", text: "first unfinished comment" };
+    mocks.saveReviewComposition.mockImplementation(() => { throw new Error("capacity reached"); });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.onCompositionSave(composition)).toBe(false);
+      expect(mocks.saveReviewComposition).not.toHaveBeenCalled();
+      options.onSessionChange(reviewSessionData({ allComment: "", allIntent: "comment", comments: [] }));
+      expect(options.onCompositionSave(composition)).toBe(false);
+      expect(options.onCompositionSave(composition)).toBe(false);
+      return { type: "cancel", disposition: "park" };
+    });
+    const harness = draftReviewHarness();
+    await harness.open();
+    expect(mocks.saveReviewSessionWithStatus.mock.calls[0]?.[2]).toMatchObject({ expectedGeneration: null });
+    expect(harness.ctx.ui.notify.mock.calls.filter(([message]) => String(message).includes("capacity reached"))).toHaveLength(1);
+  });
+
+  it("gives independent opens separate create-only instances for the same target", async () => {
+    mocks.createReviewInstanceId.mockReturnValueOnce("instance-a").mockReturnValueOnce("instance-b");
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.onSessionChange(reviewSessionData({ allComment: options.reviewSessionId, allIntent: "comment", comments: [] }))).toBe(true);
+      return { type: "cancel", disposition: "park" };
+    });
+    const a = draftReviewHarness();
+    const b = draftReviewHarness();
+    await a.open();
+    await b.open();
+    const saves = mocks.saveReviewSessionWithStatus.mock.calls;
+    expect(saves.map((call) => call[2])).toEqual([
+      expect.objectContaining({ id: "instance-a", expectedGeneration: null }),
+      expect.objectContaining({ id: "instance-b", expectedGeneration: null }),
+    ]);
+    expect(saves[0]![0]).toBe(saves[1]![0]);
+    expect(a.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("--resume instance-a"), "info");
+  });
+
+  it("keeps the resumed instance and advances only committed generations, including an index failure", async () => {
+    const draft = reviewSessionData({ allComment: "Keep this note", allIntent: "comment", comments: [] });
+    mocks.loadReviewSession.mockReturnValue({ ...draft, id: "selected", generation: 7, revision: "worktree" });
+    mocks.saveReviewSessionWithStatus.mockImplementation((_identity, _data, context: any) => ({ saved: true, status: "saved", id: context.id, generation: context.expectedGeneration + 1, indexUpdated: false }));
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      expect(options.reviewSessionId).toBe("selected");
+      expect(options.onSessionChange(draft)).toBe(true);
+      expect(options.onSessionChange(draft)).toBe(true);
+      return { type: "cancel", disposition: "discard" };
+    });
+    await draftReviewHarness().open("--resume selected");
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([7, 8, 9]);
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "selected", 10);
+    expect(mocks.createReviewInstanceId).not.toHaveBeenCalled();
+  });
+
+  it("does not acknowledge a stale autosave or reload and replay it over the newer snapshot", async () => {
+    const draft = reviewSessionData({ allComment: "My edits", allIntent: "comment", comments: [] });
+    mocks.loadReviewSession.mockReturnValue({ ...draft, id: "selected", generation: 7, revision: "worktree" });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      mocks.saveReviewSessionWithStatus.mockReturnValue({ saved: false, status: "conflict", attempted: draft, current: { ...draft, generation: 9 } });
+      expect(options.onSessionChange(draft)).toBe(false);
+      expect(options.onSessionChange(draft)).toBe(false);
+      return { type: "cancel", disposition: "park" };
+    });
+    const harness = draftReviewHarness();
+    const result = await harness.open("--resume selected");
+    expect(result.details.started).toBe(false);
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([7, 8, 8, 8]);
+    expect(mocks.loadReviewSession).toHaveBeenCalledTimes(1);
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/conflict.*in.memory/i), "warning");
+  });
+
+  it("reports conflicting discard instead of claiming the newer draft was deleted", async () => {
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "Original", allIntent: "comment", comments: [] }), generation: 3, revision: "worktree" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "discard" });
+    mocks.deleteReviewSession.mockReturnValue({ deleted: false, status: "conflict", actualGeneration: 5 });
+    const result = await draftReviewHarness().open("--resume selected");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "selected", 4);
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/not discarded.*conflict/i) });
+  });
+
+  it("consumes at the saved generation and deletes only the just-consumed generation", async () => {
+    const draft = reviewSessionData({ allComment: "Deliver this", allIntent: "discuss", comments: [] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      options.onSessionChange(draft);
+      return { type: "submit", ...draft.state.draft };
+    });
+    mocks.composeReviewPrompt.mockReturnValue("Delivered discussion");
+    await draftReviewHarness().open();
+    expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([null, 1]);
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "automatic-session", 2);
+  });
+
+  it("reopens a UUID continuation using the recorded target identity and instance", async () => {
+    const id = "784f5b79-cc4d-4e13-9872-66185ea8bd55";
+    mocks.hasReviewSessionIdentity.mockReturnValue(true);
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "Retained", allIntent: "comment", comments: [] }), id, generation: 2, revision: "abc123" });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: id, priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
+    expect(mocks.hasReviewSessionIdentity).toHaveBeenCalledWith("pr|github|example/widgets|1", id);
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reviewSessionId: id }));
+    expect(composeRemoteDiscussionPrompt(remoteTarget(), "Discuss", id)).toContain(`"priorSessionId": "${id}"`);
+  });
+
+  it("rejects an explicit missing or deleted resume instead of recreating its terminal id", async () => {
+    const result = await draftReviewHarness().open("--resume deleted-instance");
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/missing, deleted, or belongs to another target/) });
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
+  });
+
+  it("starts a fresh instance after a completely consumed DISCUSS continuation", async () => {
+    mocks.hasReviewSessionIdentity.mockReturnValue(true);
+    mocks.createReviewInstanceId.mockReturnValue("next-pass");
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "discard" });
+    await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: "consumed-instance", priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reviewSessionId: "next-pass" }));
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "next-pass", undefined);
+  });
+
+  it("discards with the loaded generation then creates a fresh writable instance", async () => {
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "old", allIntent: "comment", comments: [] }), generation: 4, revision: "worktree" });
+    mocks.createReviewInstanceId.mockReturnValue("replacement");
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
+      options.onSessionChange(reviewSessionData({ allComment: "new", allIntent: "comment", comments: [] }));
+      return { type: "cancel", disposition: "park" };
+    });
+    await draftReviewHarness().open("--resume discarded --discard-resume");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "discarded", 4);
+    expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ id: "replacement", expectedGeneration: null }));
+  });
+
+  it("reports a locked picker rather than presenting an empty review list", async () => {
+    mocks.listReviewSessions.mockImplementationOnce(() => { throw new Error("Review session store is locked by process 42"); });
+    const harness = draftReviewHarness();
+    const result = await harness.open("--resume");
+    expect(result.details).toMatchObject({ started: false, message: expect.stringMatching(/Could not list parked reviews:.*locked/) });
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
   });
 
   it("builds an agent-mediated review submission prompt", () => {
@@ -371,20 +566,10 @@ describe("code diff extension", () => {
       verdict: "comment",
       comments: [{ path: "src/app.ts", line: 12, side: "RIGHT", body: corrected }],
     }));
-    expect(mocks.saveReviewReceipt).toHaveBeenCalledWith({
-      provider: "github",
-      repo: "example/widgets",
-      number: "1",
-      url: "https://github.com/example/widgets/pull/1",
-      verdict: "comment",
-      headSha: "abc123",
-      body: undefined,
-      comments: [{ path: "src/app.ts", line: 12, side: "RIGHT", body: corrected }],
-    });
     expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("already submitted this github code host review"));
   });
 
-  it("does not save a receipt when the provider rejects the submission", async () => {
+  it("keeps the review unsubmitted after a self-approval rejection", async () => {
     mocks.submitPullRequestReview.mockResolvedValue({ ok: false, blockedSelfApproval: true, message: "Refusing to approve your own pull request." });
     const pi = { sendUserMessage: vi.fn() };
     const ctx = {
@@ -397,11 +582,10 @@ describe("code diff extension", () => {
     const result = await submitUiConfirmedReview(pi as never, ctx as never, remoteTarget(), "approve", undefined, []);
 
     expect(result.submitted).not.toBe(true);
-    expect(mocks.saveReviewReceipt).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
-  it("does not save a receipt when grammar verification falls back to the agent", async () => {
+  it("falls back to the agent when grammar verification fails", async () => {
     mocks.reviewGrammar.mockResolvedValue({ status: "error", error: "model unavailable" });
     const pi = { sendUserMessage: vi.fn() };
     const ctx = {
@@ -415,11 +599,10 @@ describe("code diff extension", () => {
 
     expect(result.submitted).not.toBe(true);
     expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
-    expect(mocks.saveReviewReceipt).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).toHaveBeenCalledOnce();
   });
 
-  it("does not save a receipt when the reviewer cancels an uncertain grammar change", async () => {
+  it("honors cancellation of an uncertain grammar correction", async () => {
     mocks.reviewGrammar.mockResolvedValue({
       status: "review",
       corrected: { body: "Changed meaning", comments: [] },
@@ -437,29 +620,29 @@ describe("code diff extension", () => {
 
     expect(result.message).toBe("Review submission cancelled; nothing was posted.");
     expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
-    expect(mocks.saveReviewReceipt).not.toHaveBeenCalled();
   });
 
-  it("does not save a receipt for the agent-mediated submission tool", async () => {
+  it.each(["submitted", "partial", "unknown", "rejected"] as const)("exposes the same shared %s result and receipt through UI and tool entry points", async (status) => {
+    const receipt = status === "submitted" || status === "partial" ? { reviewIds: ["9"] } : null;
+    const submission = { status, ok: status === "submitted", message: "Provider evidence", reviewedCommitId: "abc123", receiptStatus: receipt == null ? "not_applicable" : "saved", receipt };
+    mocks.submitPullRequestReview.mockResolvedValue(submission);
     const tools = new Map<string, any>();
     const pi = {
-      registerCommand: vi.fn(),
-      registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
-      registerShortcut: vi.fn(),
-      on: vi.fn(),
+      registerCommand: vi.fn(), registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
+      registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn(),
     };
     codeDiffExtension(pi as never);
-
-    await tools.get("submit_pr_review").execute("tool-call", {
-      repo: "example/widgets",
-      prNumber: "1",
-      commitId: "abc123",
-      verdict: "comment",
-      body: "Fallback body",
-    }, new AbortController().signal, vi.fn(), { hasUI: false, ui: { notify: vi.fn() } });
-
-    expect(mocks.submitPullRequestReview).toHaveBeenCalledOnce();
-    expect(mocks.saveReviewReceipt).not.toHaveBeenCalled();
+    const target = remoteTarget();
+    const ctx = { hasUI: false, isIdle: () => true, ui: { setStatus: vi.fn(), notify: vi.fn(), select: vi.fn(), editor: vi.fn() } };
+    const uiResult = await submitUiConfirmedReview(pi as never, ctx as never, target, "comment", "Confirmed body", []);
+    const toolResult = await tools.get("submit_pr_review").execute("tool-call", {
+      provider: target.provider, repo: target.repo, prNumber: target.pullRequest!.number,
+      commitId: target.pullRequest!.headRefOid, baseCommitId: undefined,
+      verdict: "comment", body: "Confirmed body", comments: [], prAuthorLogin: target.pullRequest!.authorLogin, cwd: target.gitRoot,
+    }, new AbortController().signal, vi.fn(), ctx);
+    expect(uiResult.submission).toBe(submission);
+    expect(toolResult.details.result).toBe(submission);
+    expect(mocks.submitPullRequestReview.mock.calls[0]![1]).toEqual(mocks.submitPullRequestReview.mock.calls[1]![1]);
   });
 
   it("asks only about corrections that may change technical meaning", async () => {
@@ -1143,7 +1326,7 @@ describe("code diff extension", () => {
     expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
   });
 
-  it("consumes only successfully submitted remote IDs and body contributors", async () => {
+  it("binds only selected remote IDs and body contributors to the shared service", async () => {
     const tools = new Map<string, any>();
     const file = remoteReviewFile();
     const mappedLine = {
@@ -1209,17 +1392,15 @@ describe("code diff extension", () => {
     expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({
       body: "Review-wide public note\n\nsrc/app.ts:\nMapped file note",
       comments: [{ path: "src/app.ts", line: 5, side: "RIGHT", start_line: 4, start_side: "RIGHT", body: "Mapped line note" }],
-    }));
-    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(
-      "pr|github|example/widgets|1",
-      expect.objectContaining({ state: expect.objectContaining({ draft: { allComment: "", allIntent: "comment", comments: [stale] } }) }),
-      expect.objectContaining({ id: "automatic-session", revision: "abc123" }),
-    );
-    expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/1 unresolved draft item remains/i), "warning");
+    }), expect.objectContaining({ draft: expect.objectContaining({ bodyComments: [{ id: "mapped-file", fingerprint: expect.any(String) }], allCommentFingerprint: expect.any(String) }) }));
+    expect(mocks.submitPullRequestReview.mock.calls[0]![2].draft).toMatchObject({
+      comments: [{ id: mappedLine.id, fingerprint: submissionFingerprint(mappedLine) }],
+      bodyComments: [{ id: mappedFile.id, fingerprint: submissionFingerprint(mappedFile) }],
+      allCommentFingerprint: submissionFingerprint({ allComment: payload.allComment, allIntent: payload.allIntent }),
+    });
   });
 
-  it("retains stale fields after a successful mixed secondary-provider submission", async () => {
+  it("binds mapped secondary-provider feedback while excluding stale scope", async () => {
     const tools = new Map<string, any>();
     const file = remoteReviewFile();
     const mapped = { id: "provider-mapped", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Mapped Provider note", anchorStatus: "mapped" as const };
@@ -1252,27 +1433,207 @@ describe("code diff extension", () => {
       provider: "secondary",
       body: "Provider body",
       comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: mapped.body }],
-    }));
-    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(
-      "pr|secondary|example/widgets|42",
-      expect.objectContaining({ state: expect.objectContaining({ draft: { allComment: "", allIntent: "comment", comments: [stale] } }) }),
-      expect.objectContaining({ id: "automatic-session", revision: "head-sha" }),
-    );
-    expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
+    }), expect.any(Object));
+    expect(mocks.submitPullRequestReview.mock.calls[0]![2].draft).toMatchObject({
+      comments: [{ id: mapped.id, fingerprint: submissionFingerprint(mapped) }], bodyComments: [],
+      allCommentFingerprint: submissionFingerprint({ allComment: payload.allComment, allIntent: payload.allIntent }),
+    });
   });
 
-  it("retains a mapped stable ID removed during grammar confirmation", async () => {
+  it("keeps same-ID feedback edited while the shared service is submitting", async () => {
+    const tools = new Map<string, any>();
+    const file = remoteReviewFile();
+    const comment = { id: "stable", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Approved original", anchorStatus: "mapped" as const };
+    const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [comment] });
+    const edited = reviewSessionData({ allComment: "", allIntent: "comment", comments: [{ ...comment, body: "New feedback during POST" }] });
+    let save!: (value: typeof session) => void;
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => { save = options.onSessionChange; save(session); return { type: "submit", ...session.state.draft }; });
+    mocks.submitPullRequestReview.mockImplementation(async () => {
+      save(edited);
+      return { ok: true, status: "submitted", message: "Remote accepted; edited draft retained.", draftConsumption: { status: "retained", remainingItems: 1 } };
+    });
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", isIdle: () => true, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), setStatus: vi.fn(), select: vi.fn(async () => "Post Comments"), editor: vi.fn(async () => "") } };
+    codeDiffExtension(pi as never);
+    const result = await tools.get("open_code_diff").execute("call", { args: "remote example/widgets#1" }, undefined, undefined, ctx);
+    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ state: expect.objectContaining({ draft: edited.state.draft }) }), expect.any(Object));
+    expect(result.details.submission.draftConsumption).toEqual({ status: "retained", remainingItems: 1 });
+  });
+
+  it.each(["discuss", "omitted", "all-omitted", "cleanup-failed", "pending", "cancel", "handoff"])("restores settled remainder actions without abandoning safe resume: %s", async (mode) => {
+    const tools = new Map<string, any>(), file = remoteReviewFile();
+    const accepted = { id: "accepted", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Accepted", anchorStatus: "mapped" as const };
+    const retained = { ...accepted, id: "retained", body: "Retained", intent: mode === "discuss" ? "discuss" as const : "comment" as const };
+    const raw = { allComment: "", allIntent: "comment" as const, comments: [mode === "cleanup-failed" ? accepted : retained] };
+    const session = { ...reviewSessionData(raw), id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" };
+    const allOmitted = mode === "all-omitted" || mode === "handoff";
+    const input = { provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "approve", comments: allOmitted ? [] : [{ path: "src/app.ts", line: 4, side: "RIGHT", body: accepted.body }] };
+    const saved = { id: "settled", input, draft: { identity: session.identity, sessionId: session.id, comments: allOmitted ? [] : [{ id: accepted.id, fingerprint: submissionFingerprint(accepted) }], bodyComments: [] }, steps: [{ status: mode === "pending" ? "unknown" : "submitted", commentIndexes: allOmitted ? [] : [0], bodyIncluded: false }] };
+    mocks.loadReviewSession.mockReturnValue(session);
+    mocks.findForDraft.mockReturnValue(saved);
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return { type: "submit", ...raw }; });
+    mocks.composeDiscussionPrompt.mockReturnValue("Discuss retained feedback");
+    if (mode === "handoff") mocks.reviewGrammar.mockResolvedValue({ status: "error", error: "offline" });
+    if (mode === "cancel") mocks.reviewGrammar.mockResolvedValue({ status: "review", corrected: { comments: [retained.body] }, changes: [{ key: "comment:0", original: retained.body, corrected: retained.body, grammarOnly: false, reason: "Confirm" }] });
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", isIdle: () => true, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), setStatus: vi.fn(), select: vi.fn().mockResolvedValueOnce(mode === "discuss" ? "Start discussion with agents" : "Post Comments").mockResolvedValue("Cancel submission"), editor: vi.fn(async () => "") } };
+    codeDiffExtension(pi as never);
+    const open = () => tools.get("open_code_diff").execute("call", { args: "remote example/widgets#1 --resume same-instance" }, undefined, undefined, ctx);
+    const result = await open();
+    if (mode === "cleanup-failed" || mode === "pending") {
+      expect(ctx.ui.select).not.toHaveBeenCalled();
+      expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, input, expect.objectContaining({ attemptId: saved.id }));
+    } else {
+      expect(ctx.ui.select).toHaveBeenCalled();
+      if (mode !== "discuss") expect(mocks.reviewGrammar).toHaveBeenCalledOnce();
+      if (mode === "discuss" || mode === "cancel" || mode === "handoff") expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
+      else expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({ comments: [expect.objectContaining({ body: retained.body })] }), expect.objectContaining({ newIntent: true }));
+      if (mode === "discuss") expect(result.details.prompt).toContain("Discuss retained feedback");
+      if (mode === "handoff") {
+        const handoff = mocks.prepareSubmissionHandoff.mock.results[0]!.value;
+        mocks.findHandoffForDraft.mockReturnValue(handoff);
+        await open();
+        expect(ctx.ui.select).toHaveBeenCalledOnce();
+        expect(mocks.reviewGrammar).toHaveBeenCalledOnce();
+        const args = JSON.parse(pi.sendUserMessage.mock.calls[1]![0].split("```json\n")[1].split("\n```")[0]);
+        expect(args).toMatchObject({ handoffId: handoff.id, newIntent: true });
+        expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it("resumes the same pending verdict after shared partial consumption changed the raw draft", async () => {
+    const tools = new Map<string, any>();
+    const file = remoteReviewFile();
+    const posted = { id: "posted", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Inline feedback", anchorStatus: "mapped" as const };
+    const bodyNote = { id: "body-note", fileId: file.id, scope: "all-files" as const, side: "file" as const, intent: "comment" as const, body: "Pending approval body", anchorStatus: "mapped" as const };
+    const original = reviewSessionData({ allComment: "", allIntent: "comment", comments: [posted, bodyNote] });
+    let current = original;
+    mocks.loadReviewSession.mockImplementation(() => ({ ...current, id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" }));
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(current); return { type: "submit", ...current.state.draft }; });
+    mocks.submitPullRequestReview.mockResolvedValue({ ok: false, status: "partial", message: "Comments accepted; approval rejected.", draftConsumption: { status: "saved", remainingItems: 1 } });
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", isIdle: () => true, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), setStatus: vi.fn(), select: vi.fn(async (_title, choices: string[]) => choices.find((choice) => choice.startsWith("Approve"))), editor: vi.fn(async () => "") } };
+    codeDiffExtension(pi as never);
+    const open = () => tools.get("open_code_diff").execute("call", { args: "remote example/widgets#1 --resume same-instance" }, undefined, undefined, ctx);
+    await open();
+    const [, input, binding] = mocks.submitPullRequestReview.mock.calls[0]!;
+    expect(binding.draft.sourceFingerprint).toBe(submissionDraftSourceFingerprint(input, original.state.draft));
+    current = reviewSessionData({ allComment: "", allIntent: "comment", comments: [bodyNote] });
+    const remaining = submissionDraftSourceFingerprint(input, current.state.draft);
+    mocks.findForDraft.mockImplementation((_identity, id, _source, fingerprint) => id === "same-instance" && fingerprint === remaining ? { id: "partial-attempt", input, ...binding, steps: [{ status: "rejected" }] } : null);
+    await open();
+    expect(mocks.reviewGrammar).toHaveBeenCalledOnce();
+    expect(ctx.ui.select).toHaveBeenCalledOnce();
+    expect(mocks.submitPullRequestReview.mock.calls[1]![1]).toEqual(input);
+    expect(mocks.submitPullRequestReview.mock.calls[1]![2]).toMatchObject({ attemptId: "partial-attempt" });
+  });
+
+  it.each(["unchanged", "edited", "head", "fresh"])("reconnects only the same confirmed draft intent: %s", async (change) => {
+    const tools = new Map<string, any>();
+    const file = remoteReviewFile();
+    const comment = { id: "stable", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Raw text", anchorStatus: "mapped" as const };
+    const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [comment] };
+    const session = { ...reviewSessionData(payload), id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" };
+    mocks.loadReviewSession.mockReturnValue(session);
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return payload; });
+    mocks.reviewGrammar.mockImplementation(async (_ctx, original) => ({ status: "safe", corrected: { ...original, comments: ["Final grammar text"] }, changes: [] }));
+    mocks.submitPullRequestReview.mockResolvedValue({ ok: false, status: "unknown", message: "Unknown write", attemptId: "attempt-1" });
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", isIdle: () => true, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), setStatus: vi.fn(), select: vi.fn(async () => "Post Comments"), editor: vi.fn(async () => "Optional body") } };
+    codeDiffExtension(pi as never);
+    const open = (args = "remote example/widgets#1 --resume same-instance") => tools.get("open_code_diff").execute("call", { args }, undefined, undefined, ctx);
+    await open();
+    const [, input, binding] = mocks.submitPullRequestReview.mock.calls[0]!;
+    expect(binding).toMatchObject({ draft: { sessionId: "same-instance", comments: [{ id: "stable", fingerprint: submissionFingerprint(comment) }] }, sourceDigest: expect.any(String) });
+    mocks.findForDraft.mockImplementation((identity, sessionId, sourceDigest) => identity === binding.draft.identity && sessionId === binding.draft.sessionId && sourceDigest === binding.sourceDigest ? { id: "attempt-1", input, ...binding, steps: [{ status: "unknown" }] } : null);
+    if (change === "edited") comment.body = "Edited draft";
+    if (change === "head") mocks.resolveRemoteReviewTarget.mockResolvedValue({ ...remoteTarget(), pullRequest: { ...remoteTarget().pullRequest, headRefOid: "new-head" } });
+    await open(change === "fresh" ? "remote example/widgets#1" : undefined);
+    const resumed = change === "unchanged";
+    expect(ctx.ui.select).toHaveBeenCalledTimes(resumed ? 1 : 2);
+    expect(ctx.ui.editor).toHaveBeenCalledTimes(resumed ? 1 : 2);
+    expect(mocks.reviewGrammar).toHaveBeenCalledTimes(resumed ? 1 : 2);
+    expect(mocks.submitPullRequestReview.mock.calls[1]![2]).toMatchObject(resumed ? { attemptId: "attempt-1" } : { draft: expect.any(Object) });
+    if (resumed) expect(mocks.submitPullRequestReview.mock.calls[1]![1]).toEqual(input);
+  });
+
+  it.each(["resume", "failure", "confirmed", "edited", "head", "fresh"])("preserves grammar fallback association: %s", async (mode) => {
+    const tools = new Map<string, any>();
+    const file = remoteReviewFile();
+    const comment = { id: "stable", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Raw text", anchorStatus: "mapped" as const };
+    const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [comment] };
+    const session = { ...reviewSessionData(payload), id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" };
+    mocks.loadReviewSession.mockReturnValue(session);
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return payload; });
+    mocks.reviewGrammar.mockResolvedValue({ status: "error", error: "offline" });
+    if (mode === "failure") mocks.prepareSubmissionHandoff.mockImplementation(() => { throw new Error("storage full"); });
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", isIdle: () => true, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), setStatus: vi.fn(), select: vi.fn(async () => "Post Comments"), editor: vi.fn(async () => "Raw body") } };
+    codeDiffExtension(pi as never);
+    const open = (args = "remote example/widgets#1 --resume same-instance") => tools.get("open_code_diff").execute("call", { args }, undefined, undefined, ctx);
+    await open();
+    expect(mocks.prepareSubmissionHandoff).toHaveBeenCalledWith(expect.objectContaining({ body: "Raw body", comments: [expect.objectContaining({ body: "Raw text" })] }), expect.objectContaining({ draft: expect.objectContaining({ sessionId: "same-instance", comments: [{ id: "stable", fingerprint: submissionFingerprint(comment) }] }) }));
+    expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
+    expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
+    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ state: expect.objectContaining({ draft: expect.objectContaining({ comments: [comment] }) }) }), expect.any(Object));
+    if (mode === "failure") {
+      expect(pi.sendUserMessage).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("storage full"), "warning");
+      return;
+    }
+    expect(mocks.prepareSubmissionHandoff.mock.invocationCallOrder[0]).toBeLessThan(pi.sendUserMessage.mock.invocationCallOrder[0]!);
+    const promptArguments = JSON.parse(pi.sendUserMessage.mock.calls[0]![0].split("```json\n")[1].split("\n```")[0]);
+    expect(promptArguments).toMatchObject({ handoffId: "handoff-1", handoffCommentIndexes: [0], body: "Raw body", comments: [{ body: "Raw text" }] });
+    const [input, binding] = mocks.prepareSubmissionHandoff.mock.calls[0]!;
+    mocks.findHandoffForDraft.mockImplementation((identity, sessionId, sourceDigest) => identity === binding.draft.identity && sessionId === binding.draft.sessionId && sourceDigest === binding.sourceDigest ? { id: "handoff-1", input, ...binding } : null);
+    if (mode === "confirmed") mocks.findForDraft.mockReturnValue({ id: "attempt-1", input: { ...input, body: "Confirmed" }, ...binding, steps: [{ status: "pending" }] });
+    if (mode === "edited") comment.body = "Edited";
+    if (mode === "head") mocks.resolveRemoteReviewTarget.mockResolvedValue({ ...remoteTarget(), pullRequest: { ...remoteTarget().pullRequest, headRefOid: "new-head" } });
+    await open(mode === "fresh" ? "remote example/widgets#1" : undefined);
+    const bypassed = mode === "resume" || mode === "confirmed";
+    expect(ctx.ui.select).toHaveBeenCalledTimes(bypassed ? 1 : 2);
+    expect(ctx.ui.editor).toHaveBeenCalledTimes(bypassed ? 1 : 2);
+    expect(mocks.reviewGrammar).toHaveBeenCalledTimes(bypassed ? 1 : 2);
+    if (mode === "confirmed") expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({ body: "Confirmed" }), expect.objectContaining({ attemptId: "attempt-1" }));
+    else expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
+    if (mode === "resume") expect(pi.sendUserMessage.mock.calls[1]![0]).toEqual(pi.sendUserMessage.mock.calls[0]![0]);
+  });
+
+  it("forwards handoff indexes after the first original comment is omitted", async () => {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    codeDiffExtension(pi as never);
+    await tools.get("submit_pr_review").execute("call", { provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "comment", comments: [{ path: "src/app.ts", line: 5, side: "RIGHT", body: "Second original" }], handoffId: "handoff-1", handoffCommentIndexes: [1] }, undefined, undefined, { hasUI: false });
+    expect(mocks.submitPullRequestReview.mock.calls[0]![2]).toMatchObject({ handoffId: "handoff-1", handoffCommentIndexes: [1] });
+  });
+
+  it("forwards explicit tool retry and intentional-new-review controls", async () => {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    codeDiffExtension(pi as never);
+    await tools.get("submit_pr_review").execute("call", { provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "comment", attemptId: "saved-attempt", newIntent: true }, undefined, undefined, { hasUI: false });
+    expect(mocks.submitPullRequestReview.mock.calls[0]![2]).toEqual({ attemptId: "saved-attempt", newIntent: true });
+  });
+
+  it.each(["immediate", "resumed"])("binds only the stable ID retained during grammar confirmation: %s", async (delivery) => {
     const tools = new Map<string, any>();
     const file = remoteReviewFile();
     const posted = { id: "posted", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Post this comment", anchorStatus: "mapped" as const };
     const removed = { id: "grammar-removed", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 5, endLine: 5, body: "Keep this draft if omitted", anchorStatus: "mapped" as const };
-    const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [posted, removed] };
-    const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [posted, removed] });
+    const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [removed, posted] };
+    const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [removed, posted] });
+    if (delivery === "resumed") mocks.submitPullRequestReview.mockResolvedValueOnce({ ok: false, status: "unknown", message: "Unknown write" });
     mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
     mocks.reviewGrammar.mockResolvedValue({
       status: "review",
-      corrected: { comments: [posted.body, removed.body] },
-      changes: [{ key: "comment:1", original: removed.body, corrected: removed.body, grammarOnly: false, reason: "Explicit omission test." }],
+      corrected: { comments: [removed.body, posted.body] },
+      changes: [{ key: "comment:0", original: removed.body, corrected: removed.body, grammarOnly: false, reason: "Explicit omission test." }],
     });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
@@ -1292,13 +1653,17 @@ describe("code diff extension", () => {
 
     expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({
       comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: posted.body }],
-    }));
-    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(
-      "pr|github|example/widgets|1",
-      expect.objectContaining({ state: expect.objectContaining({ draft: { allComment: "", allIntent: "comment", comments: [removed] } }) }),
-      expect.objectContaining({ id: "automatic-session", revision: "abc123" }),
-    );
-    expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
+    }), expect.objectContaining({ draft: expect.objectContaining({ comments: [{ id: posted.id, fingerprint: submissionFingerprint(posted) }] }) }));
+    if (delivery === "resumed") {
+      const [, input, binding] = mocks.submitPullRequestReview.mock.calls[0]!;
+      mocks.findForDraft.mockReturnValue({ id: "attempt-1", input, ...binding, steps: [{ status: "unknown" }] });
+      mocks.loadReviewSession.mockReturnValue({ ...session, id: "automatic-session", identity: binding.draft.identity, generation: 1, revision: "abc123" });
+      await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, undefined, undefined, ctx);
+      expect(mocks.submitPullRequestReview.mock.calls[1]![1]).toEqual(input);
+      expect(ctx.ui.select).toHaveBeenCalledTimes(2);
+      expect(mocks.reviewGrammar).toHaveBeenCalledOnce();
+    }
+
   });
 
   it("preserves the full mixed remote draft when provider submission fails", async () => {
@@ -1449,24 +1814,10 @@ describe("code diff extension", () => {
       verdict: "comment",
       body: "General review comment\n\nExisting review-wide note",
       comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Keep this inline comment" }],
-    }));
+    }), expect.any(Object));
     expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
-    expect(mocks.saveReviewReceipt).toHaveBeenCalledWith(expect.objectContaining({
-      provider: "github",
-      repo: "example/widgets",
-      number: "1",
-      url: "https://github.com/example/widgets/pull/1",
-      body: "General review comment\n\nExisting review-wide note",
-      comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Keep this inline comment" }],
-    }));
-    expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(
-      "pr|github|example/widgets|1",
-      expect.objectContaining({ state: expect.objectContaining({ draft: { allComment: "", allIntent: "comment", comments: [] } }) }),
-      expect.objectContaining({ id: "automatic-session", revision: "abc123" }),
-    );
-    expect(mocks.saveReviewSessionWithStatus.mock.invocationCallOrder.at(-1)).toBeLessThan(mocks.deleteReviewSession.mock.invocationCallOrder[0]!);
-    expect(mocks.deleteReviewSession).toHaveBeenCalled();
+
   });
 
   it("runs a configured secondary remote target through the normal confirmed review flow", async () => {
@@ -1544,21 +1895,9 @@ describe("code diff extension", () => {
         { path: "src/app.ts", line: 4, side: "RIGHT", body: "Line note" },
         { path: "src/app.ts", subject_type: "file", body: "File note" },
       ],
-    }));
+    }), expect.any(Object));
     expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ provider: "secondary", repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
-    expect(mocks.saveReviewReceipt).toHaveBeenCalledWith(expect.objectContaining({
-      provider: "secondary",
-      repo: "example/widgets",
-      number: "42",
-      url: secondaryUrl,
-      headSha: "head-sha",
-      body: "Optional body\n\nOverall note",
-      comments: [
-        { path: "src/app.ts", line: 4, side: "RIGHT", body: "Line note" },
-        { path: "src/app.ts", line: undefined, side: undefined, body: "File note" },
-      ],
-    }));
   });
 
   it("does not offer an agent discussion when no DISCUSS items exist and keeps the draft on dismissal", async () => {
@@ -1728,7 +2067,7 @@ describe("code diff extension", () => {
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
     codeDiffExtension(pi as never);
 
-    await tools.get("open_code_diff").execute("tool-call", { args: "" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "--resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mountedSession.state.draft.comments).toEqual([
       unchanged,
@@ -1768,8 +2107,8 @@ describe("code diff extension", () => {
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
     codeDiffExtension(pi as never);
 
-    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
-    await tools.get("open_code_diff").execute("tool-call", { args: "base..head" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "base..head --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mounted).toHaveLength(2);
     expect(mounted.map((session) => session.state.draft.comments)).toEqual([[mapped], [mapped]]);
@@ -2398,7 +2737,7 @@ describe("code diff extension", () => {
 
     codeDiffExtension(pi as never);
     await tools.get("open_code_diff").execute("tool-call", {
-      args: "",
+      args: "--resume automatic-session",
       comments: [
         { path: "src/app.ts", body: "Conflicting generated finding.", line: 3 },
         { path: "src/app.ts", body: "New generated finding.", line: 5 },
@@ -2542,11 +2881,12 @@ describe("code diff extension", () => {
       },
     };
 
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "", allIntent: "discuss", comments: [] }), generation: 0, revision: "worktree" });
     codeDiffExtension(pi as never);
     await commands.get("diff")!.handler("--cwd ~/Poetry/rpgmenace --include-generated --whole-repo --resume saved-session", ctx);
     await vi.waitFor(() => expect(mocks.getReviewWindowData).toHaveBeenCalledWith(pi, expandedCwd, { includeGenerated: true, wholeRepo: true }));
     expect(mocks.loadReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session");
-    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session"));
+    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session", 2));
 
     mocks.deleteReviewSession.mockClear();
     const discardCommands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
@@ -2558,7 +2898,7 @@ describe("code diff extension", () => {
     };
     codeDiffExtension(discardPi as never);
     await discardCommands.get("diff")!.handler("--cwd ~/Poetry/rpgmenace --discard-resume", ctx);
-    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "automatic-session"));
+    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "automatic-session", 0));
   });
 
   it("treats a bare existing local directory as the diff cwd", async () => {
@@ -2926,7 +3266,7 @@ describe("code diff extension", () => {
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
 
     const { tools, ctx } = remoteReviewHarness("def456");
-    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
+    await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mocks.createReviewSessionId).toHaveBeenCalledWith("pr|github|example/widgets|1");
     expect(mocks.rebaseReviewSession).toHaveBeenCalledWith(parked, expect.any(Array), ["all-files"], { "src/app.ts": "modified:src/app.ts:1:0" });
@@ -2936,7 +3276,7 @@ describe("code diff extension", () => {
       expect.anything(),
       expect.objectContaining({ id: "automatic-session", revision: "def456", fileSignatures: { "src/app.ts": "modified:src/app.ts:1:0" } }),
     );
-    expect(ctx.ui.notify).toHaveBeenCalledWith("Review parked. Resume with /diff remote example/widgets#1.", "info");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review parked. Resume with /diff remote example/widgets#1 --resume automatic-session.", "info");
   });
 
   it("deletes the saved session only when the reviewer explicitly discards", async () => {
@@ -2945,7 +3285,7 @@ describe("code diff extension", () => {
     const { tools, ctx } = remoteReviewHarness("abc123");
     await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1" }, new AbortController().signal, vi.fn(), ctx);
 
-    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "automatic-session");
+    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "automatic-session", undefined);
   });
 
   it("puts the last verdict first and offers one empty-body fast path", () => {
@@ -3037,7 +3377,7 @@ describe("code diff extension", () => {
     expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({
       verdict: "approve",
       body: "Existing review-wide note",
-    }));
+    }), expect.any(Object));
     expect(ctx.ui.select).toHaveBeenCalledWith("Next queued review: Follow-up fix (https://github.com/example/widgets/pull/2)", ["Review it now", "Not now"]);
     expect(mocks.resolveRemoteReviewTarget).toHaveBeenCalledWith(
       pi,
@@ -3111,7 +3451,8 @@ describe("code diff extension", () => {
 
   it("offers a resume picker for a bare --resume and reopens the chosen parked review", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    mocks.listReviewSessions.mockReturnValue([{
+    const previousIdentity = "/repo|origin/main|old-sha|example/widgets#1";
+    const parked = {
       id: "parked-session",
       identity: "pr|github|example/widgets|1",
       updatedAt: "2025-01-02T03:04:05.000Z",
@@ -3123,7 +3464,8 @@ describe("code diff extension", () => {
       url: "https://github.com/example/widgets/pull/1",
       resumeArgs: "remote example/widgets#1",
       cwd: "/repo",
-    }]);
+    };
+    mocks.listReviewSessions.mockReturnValue([{ ...parked, id: "other-instance" }, { ...parked, identity: previousIdentity }]);
     mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({
       repoRoot: "/repo",
       files: [remoteReviewFile()],
@@ -3138,18 +3480,19 @@ describe("code diff extension", () => {
       registerShortcut: vi.fn(),
       on: vi.fn(),
     };
-    const choice = "example/widgets#1 Add review mode · 3 comments · 1 reviewed · 2025-01-02 03:04";
+    mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "", allIntent: "discuss", comments: [] }), generation: 0, revision: "abc123" });
     const ctx = {
       hasUI: true,
       cwd: "/repo",
-      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async () => choice), editor: vi.fn() },
+      ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async (_title: string, choices: string[]) => choices[1]), editor: vi.fn() },
     };
 
     codeDiffExtension(pi as never);
     await commands.get("diff")!.handler("--resume", ctx);
 
-    await vi.waitFor(() => expect(ctx.ui.select).toHaveBeenCalledWith("Resume a parked review", [choice]));
+    await vi.waitFor(() => expect(ctx.ui.select).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(mocks.resolveRemoteReviewTarget).toHaveBeenCalledWith(pi, "/repo", "example/widgets#1", "/repo", expect.any(Function), undefined));
-    await vi.waitFor(() => expect(mocks.loadReviewSession).toHaveBeenCalledWith("pr|github|example/widgets|1", "parked-session"));
+    await vi.waitFor(() => expect(mocks.loadReviewSession).toHaveBeenCalledWith(previousIdentity, "parked-session"));
+    await vi.waitFor(() => expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalledWith("pr|github|example/widgets|1", expect.anything(), expect.objectContaining({ id: "parked-session", previousIdentity, expectedGeneration: 0 })));
   });
 });

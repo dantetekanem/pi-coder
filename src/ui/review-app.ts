@@ -34,14 +34,15 @@ import {
 import { detectPiLanguage, highlightCodeLineWithPi } from "../pi-render.js";
 import { loadReviewPreferences, saveReviewPreference, type ReviewPaneVisibility } from "../preferences.js";
 import { orderNavigatorFiles, type NavigatorFileOrder, type ReviewOrderSignals } from "../review-order.js";
-import type { ReviewSessionData } from "../review-session.js";
+import { createReviewInstanceId, type ReviewSessionData } from "../review-session.js";
+import { COMPOSITION_FLUSH_MS } from "../review-composition.js";
 import { applyResolvedSeedComments, type ResolvedSeedComment } from "../seed-comments.js";
 import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from "../shortcuts.js";
 import { filterFilesBySearch } from "../search.js";
 import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
 import type { ReplyThread } from "../review-replies.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
-import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
+import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewComposition, ReviewCompositionTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
 import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
@@ -85,10 +86,7 @@ type ReplyAnalysisState =
   | { status: "ready"; replyId: string; text: string }
   | { status: "error"; replyId: string; error: string };
 
-type EditTarget =
-  | { kind: "line"; fileId: string; scope: ReviewScope; side: ReviewLineTarget["side"]; startLine: number; endLine: number; initialBody: string; intent: CommentIntent; originalText?: string; captureHash?: DiffReviewComment["captureHash"]; anchorStatus?: DiffReviewComment["anchorStatus"]; existingComment?: DiffReviewComment }
-  | { kind: "file"; fileId: string; scope: ReviewScope; initialBody: string; intent: CommentIntent; fileTarget: FileCommentTarget; label?: string }
-  | { kind: "all"; initialBody: string; intent: CommentIntent };
+type EditTarget = ReviewCompositionTarget;
 
 interface ReanchorCandidate {
   readonly fileId: string;
@@ -133,6 +131,9 @@ interface ReviewAppOptions {
   reviewHeader?: ReviewHeaderInfo;
   initialSession?: ReviewSessionData;
   onSessionChange?: (data: ReviewSessionData) => boolean | void;
+  initialComposition?: ReviewComposition;
+  onCompositionSave?: (data: ReviewComposition) => boolean;
+  onCompositionRemove?: (id: string) => boolean;
   reviewIdentity?: string;
   reviewSessionId?: string;
   reviewScopeFingerprint?: string;
@@ -1509,9 +1510,12 @@ export class ReviewApp {
   private message: string | null = null;
   private navigatorScroll = 0;
   private diffScroll = 0;
+  private diffWheelScrolling = false;
+  private diffMaxScroll = 0;
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
   private contextRequestToken = 0;
+  private contextRequestInFlight = false;
   private contextConversation?: ReviewConversationMetadata;
   private conversation?: ReviewConversationMetadata;
   private repliesRefreshing = false;
@@ -1539,11 +1543,24 @@ export class ReviewApp {
   private relatedFilterAnchorFileId: string | null = null;
   private relatedFilterReturnFileId: string | null = null;
   private mousePaneLayout: MousePaneLayout | null = null;
+  private readonly navigatorFileRows = new Map<number, string>();
+  private ownsMouseReporting = false;
   private lastWidth = 120;
   private diffActionHintCache: { width: number; line: string } | null = null;
   private pendingVimSequence: "g" | null = null;
   private readonly previousHardwareCursor: boolean;
   private sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private compositionTimer: ReturnType<typeof setTimeout> | null = null;
+  private compositionOrigin: ReviewComposition | null = null;
+  private recoveredFrom: string | null = null;
+  private compositionDirty = false;
+  private recoveryEditor = false;
+  private recoveryOnly = false;
+  private recoveringComposition = false;
+  private compositionConflictPending = false;
+  private conflictCopyId: string | null = null;
+  private commentPaste: string | null = null;
+  private commentPastePrefix = "";
   private readonly syntaxLineCache = new Map<string, string>();
   private readonly diffLayoutCache = new Map<string, DiffLayout>();
 
@@ -1601,16 +1618,27 @@ export class ReviewApp {
       : false;
     this.syncCursorMode();
 
+    this.recoveringComposition = options.initialComposition != null;
     queueMicrotask(() => {
       if (this.disposed) return;
-      this.ensureActiveEntry();
+      if (options.initialComposition != null) void this.recoverComposition(options.initialComposition);
+      else this.ensureActiveEntry();
       this.ensureContextPanel();
       this.requestRender();
     });
+    if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
+      this.ownsMouseReporting = true;
+      this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+    }
   }
 
   dispose(): void {
     this.disposed = true;
+    this.flushComposition();
+    if (this.ownsMouseReporting) {
+      this.ownsMouseReporting = false;
+      this.tui.terminal.write("\x1b[?1006l\x1b[?1000l");
+    }
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -1631,7 +1659,7 @@ export class ReviewApp {
     if (typeof this.tui.setShowHardwareCursor === "function") {
       this.tui.setShowHardwareCursor(this.editTarget != null || this.previousHardwareCursor);
     }
-    (this.editor as unknown as { focused?: boolean }).focused = this.editTarget != null && this.editTarget.intent !== "modify";
+    this.editor.focused = this.editTarget != null && !this.usesExactEditor();
   }
 
   private getSessionData(): ReviewSessionData {
@@ -1650,13 +1678,15 @@ export class ReviewApp {
   }
 
   private persistSession(): boolean {
+    if (this.sessionSaveTimer != null) clearTimeout(this.sessionSaveTimer);
+    this.sessionSaveTimer = null;
     return this.options.onSessionChange?.(this.getSessionData()) !== false;
   }
 
-  private requestRender(): void {
+  private requestRender(persist = true): void {
     if (this.disposed) return;
     if (typeof this.tui.requestRender === "function") this.tui.requestRender();
-    if (this.options.onSessionChange == null) return;
+    if (!persist || this.options.onSessionChange == null) return;
     if (this.editTarget != null) {
       if (this.sessionSaveTimer != null) clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -1674,6 +1704,7 @@ export class ReviewApp {
     if (source == null || (options == null && (!this.paneVisibility.context || this.contextPanelState.status !== "idle"))) return;
 
     const token = ++this.contextRequestToken;
+    this.contextRequestInFlight = true;
     const isCurrent = () => !this.disposed && token === this.contextRequestToken;
     let receivedUpdate = false;
     const applyUpdate = (text: string, metadata?: ReviewConversationMetadata) => {
@@ -1706,6 +1737,8 @@ export class ReviewApp {
       if (this.contextPanelState.status !== "ready") this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
       else this.setMessage(`Could not refresh PR context: ${message}`);
       this.requestRender();
+    }).finally(() => {
+      if (isCurrent()) this.contextRequestInFlight = false;
     });
   }
 
@@ -1753,6 +1786,7 @@ export class ReviewApp {
       this.requestRender();
       return;
     }
+    if (options.continuation != null && this.contextRequestInFlight) return;
     this.replyAnalysis = { status: "idle" };
     this.analysisRequestToken += 1;
     if (context != null) this.ensureContextPanel(options);
@@ -2486,15 +2520,154 @@ export class ReviewApp {
     this.requestRender();
   }
 
-  private usesExactEditor(target = this.editTarget): target is Extract<EditTarget, { kind: "line" }> {
-    return target?.kind === "line" && target.intent === "modify";
+  private usesExactEditor(target = this.editTarget): boolean {
+    return this.recoveryEditor || (target?.kind === "line" && target.intent === "modify");
+  }
+
+  private captureComposition(): ReviewComposition | null {
+    if (this.editTarget == null || this.compositionOrigin == null) return null;
+    const view = this.usesExactEditor() ? this.exactEditor.getView() : null;
+    return {
+      ...this.compositionOrigin, target: structuredClone(this.editTarget), text: this.getEditText(),
+      cursor: view == null ? this.editor.getCursor() : { line: view.cursorLine, col: view.cursorColumn },
+    };
+  }
+
+  private compositionChanged(): void {
+    if (this.options.onCompositionSave == null || this.editTarget == null) return;
+    this.compositionDirty = true;
+    // First-change deadline, not a debounce: continuous typing cannot postpone this write.
+    if (this.compositionTimer == null) this.compositionTimer = setTimeout(() => {
+      this.compositionTimer = null;
+      if (!this.flushComposition()) this.compositionChanged();
+    }, COMPOSITION_FLUSH_MS);
+  }
+
+  private flushComposition(): boolean {
+    if (this.compositionTimer != null) clearTimeout(this.compositionTimer);
+    this.compositionTimer = null;
+    if (!this.compositionDirty) return true;
+    const composition = this.captureComposition();
+    if (composition == null) return true;
+    if (this.options.onCompositionSave?.(composition) === false) {
+      this.setMessage("Recovery could not be saved. Keep this editor open; retry or copy the text before leaving.");
+      this.requestRender(false);
+      return false;
+    }
+    this.compositionDirty = false;
+    return true;
+  }
+
+  private async recoverComposition(composition: ReviewComposition): Promise<void> {
+    const target = structuredClone(composition.target);
+    const file = target.kind === "all" ? undefined : this.files.find((candidate) => candidate.id === target.fileId);
+    this.recoveryOnly = composition.repoRoot !== this.repoRoot || (target.kind !== "all" && (file == null
+      || !this.visibleScopes().includes(target.scope) || !getScopedFiles([file], target.scope).length
+      || (composition.path != null && composition.path !== joinReviewPath(file.pathPrefix, file.path))));
+    if (target.kind === "all") await this.ensureActiveEntry();
+    if (!this.recoveryOnly && file != null && target.kind !== "all") {
+      this.state = setScope(this.state, this.files, target.scope);
+      this.state = setActiveFileId(this.state, this.files, file.id);
+      await this.ensureActiveEntry();
+      if (target.kind === "line") {
+        const entry = this.getEntry(file.id, target.scope);
+        target.anchorStatus = validateReviewDraftAnchor({ ...target, id: "recovery", body: composition.text }, file, entry?.status === "ready" ? entry.contents : undefined);
+        this.state = setSelectedLineTarget(this.state, file.id, target.scope, composition.selection ?? { side: target.side, line: target.endLine, endLine: target.startLine });
+      }
+    }
+    if (this.disposed) return;
+    this.recoveryEditor = true;
+    this.recoveredFrom = composition.id;
+    this.openEditor(target, composition);
+    this.exactEditor.setText(composition.text);
+    this.exactEditor.restoreCursor(composition.cursor);
+    this.recoveringComposition = false;
+    this.compositionChanged();
+    // Fork before editing; another explicit resume may consume the source copy.
+    if (!this.flushComposition()) { this.compositionChanged(); return; }
+    this.setMessage(this.recoveryOnly
+      ? "Recovered text: original target unavailable. Copy/manual-reanchor; Ctrl+C parks without applying."
+      : "Recovered editable text; nothing submitted. Enter saves; Ctrl+C parks the buffer.");
+    this.requestRender();
+  }
+
+  private currentEditComment(target: EditTarget): DiffReviewComment | undefined {
+    if (target.kind === "all") return undefined;
+    if (target.kind === "file") return getFileComment(this.state, target.fileId, target.scope, target.fileTarget);
+    return (target.existingComment == null ? undefined : this.state.draft.comments.find((comment) => comment.id === target.existingComment?.id))
+      ?? getLineComment(this.state, target.fileId, target.scope, target.side, target.startLine);
+  }
+
+  private currentEditBody(target: EditTarget): string {
+    return target.kind === "all" ? this.state.draft.allComment : this.currentEditComment(target)?.body ?? "";
+  }
+
+  private captureCurrentVersion(copy: ReviewComposition, body: string): ReviewComposition {
+    let target = copy.target;
+    const comment = this.currentEditComment(target);
+    if (target.kind === "all") target = { ...target, intent: this.state.draft.allIntent };
+    else if (comment != null) {
+      if (target.kind === "file") target = { ...target, intent: comment.intent };
+      else target = { ...target, ...comment, kind: "line", side: comment.side === "file" ? target.side : comment.side,
+        startLine: comment.startLine ?? target.startLine, endLine: comment.endLine ?? target.endLine,
+        anchorStatus: comment.startLine == null || comment.endLine == null ? "stale" : comment.anchorStatus,
+        initialBody: body, existingComment: structuredClone(comment) };
+    }
+    const file = target.kind === "all" ? undefined : this.files.find((file) => file.id === comment?.fileId);
+    return { ...copy, target, text: body, baseBody: copy.text, cursor: { line: 0, col: 0 },
+      path: file == null ? copy.path : joinReviewPath(file.pathPrefix, file.path), selection: undefined };
+  }
+
+  /** Public insertion avoids Pi's opaque collapsed-paste markers, so getCursor indexes persisted text. */
+  private handleEditorTextInput(data: string): void {
+    const start = "\u001b[200~";
+    const end = "\u001b[201~";
+    data = this.commentPastePrefix + data;
+    this.commentPastePrefix = "";
+    if (this.commentPaste == null && data.length > 1 && start.startsWith(data)) {
+      this.commentPastePrefix = data;
+      return;
+    }
+    const input = (text: string) => this.usesExactEditor() ? this.exactEditor.handleInput(text) : this.editor.handleInput(text);
+    if (this.commentPaste == null && data.includes(start)) {
+      const offset = data.indexOf(start);
+      if (offset > 0) input(data.slice(0, offset));
+      this.commentPaste = data.slice(offset + start.length);
+    } else if (this.commentPaste != null) this.commentPaste += data;
+    else { input(data); return; }
+    const offset = this.commentPaste.indexOf(end);
+    if (offset < 0) return;
+    const text = this.commentPaste.slice(0, offset);
+    if (this.usesExactEditor()) this.exactEditor.handleInput(start + text + end);
+    else this.editor.insertTextAtCursor(text);
+    const remaining = this.commentPaste.slice(offset + end.length);
+    this.commentPaste = null;
+    if (remaining.length > 0) this.handleEditorTextInput(remaining);
   }
 
   private getEditText(): string {
     return this.usesExactEditor() ? this.exactEditor.getText() : this.editor.getExpandedText();
   }
 
-  private openEditor(target: EditTarget): void {
+  private openEditor(target: EditTarget, recovered?: ReviewComposition): void {
+    // Establish discoverable snapshot membership once, not on every typed character.
+    if (this.options.onCompositionSave != null) this.persistSession();
+    const fileId = target.kind === "all" ? undefined : target.fileId;
+    const file = this.files.find((candidate) => candidate.id === fileId);
+    if (target.kind === "line" && recovered == null && target.captureHash == null) {
+      const entry = this.getEntry(target.fileId, target.scope);
+      const source = this.getSourceContent(target.fileId, target.scope, target.side);
+      target = { ...target, captureHash: hashTargetSlice(source, target),
+        originalText: target.originalText ?? getSourceLineRangeText(source, target.startLine, target.endLine),
+        anchorStatus: entry?.status === "ready" && (target.side === "added" ? entry.contents.modifiedAvailable : entry.contents.originalAvailable) !== false ? "mapped" : "stale" };
+    }
+    this.compositionOrigin = { id: createReviewInstanceId(), repoRoot: recovered?.repoRoot ?? this.repoRoot,
+      path: recovered?.path ?? (file == null ? undefined : joinReviewPath(file.pathPrefix, file.path)),
+      selection: recovered?.selection ?? (target.kind === "line" ? getSelectedLineTarget(this.state, target.fileId, target.scope) ?? undefined : undefined),
+      target, baseBody: recovered?.baseBody ?? this.currentEditBody(target), text: target.initialBody, cursor: { line: 0, col: 0 } };
+    this.commentPaste = null;
+    this.commentPastePrefix = "";
+    this.conflictCopyId = null;
     this.paneVisibility = { ...this.paneVisibility, diff: true };
     this.state = setFocus(this.state, "diff");
     this.editTarget = target;
@@ -2505,6 +2678,7 @@ export class ReviewApp {
       this.editor.setText(target.initialBody);
     }
     this.syncCursorMode();
+    this.compositionChanged();
     this.requestRender();
   }
 
@@ -2512,6 +2686,12 @@ export class ReviewApp {
     const target = this.editTarget;
     if (target == null || (target.kind !== "line" && intent === "modify")) return;
     const currentText = this.getEditText();
+    if (this.recoveryEditor) {
+      this.editTarget = { ...target, intent };
+      this.compositionChanged();
+      this.requestRender();
+      return;
+    }
     if (intent === "modify" && target.kind === "line") {
       const sourceText = target.originalText
         ?? (target.anchorStatus === "stale" ? "" : this.getSourceLinesText(target.fileId, target.scope, target.side, target.startLine, target.endLine));
@@ -2522,6 +2702,7 @@ export class ReviewApp {
     }
     this.editTarget = { ...target, intent };
     this.syncCursorMode();
+    this.compositionChanged();
     this.requestRender();
   }
 
@@ -2534,10 +2715,45 @@ export class ReviewApp {
     this.setEditIntent(next);
   }
 
-  private saveEditor(): void {
+  private saveEditor(replaceConflict = false): void {
     const target = this.editTarget;
-    if (target == null) return;
+    if (target == null || !this.flushComposition()) return;
+    if (this.recoveryOnly) {
+      this.setMessage("Original target unavailable. Copy the recovered text and manually reanchor; Ctrl+C parks it.");
+      this.requestRender();
+      return;
+    }
     const value = this.getEditText();
+    if (this.recoveredFrom != null && target.kind === "line"
+      && target.anchorStatus !== "stale" && target.existingComment?.anchorStatus !== "stale") {
+      const currentId = this.currentEditComment(target)?.id;
+      // upsertLineComment removes every overlap; the single-comment archive cannot protect extras.
+      const replacesOtherComments = this.state.draft.comments.some((comment) => comment.id !== currentId
+        && comment.fileId === target.fileId && comment.scope === target.scope && comment.side === target.side
+        && comment.startLine != null && comment.startLine <= target.endLine
+        && target.startLine <= (comment.endLine ?? comment.startLine));
+      if (replacesOtherComments) {
+        this.setMessage("Recovered range overlaps other feedback. Merge manually; current comments and editor retained.");
+        this.requestRender(false);
+        return;
+      }
+    }
+    const current = this.currentEditBody(target);
+    if (this.recoveredFrom != null && current !== this.compositionOrigin?.baseBody && current !== value) {
+      if (!replaceConflict) {
+        this.compositionConflictPending = true;
+        this.requestRender(false);
+        return;
+      }
+      const copy = this.captureComposition()!;
+      this.conflictCopyId ??= createReviewInstanceId();
+      if (this.options.onCompositionSave?.(this.captureCurrentVersion({ ...copy, id: this.conflictCopyId }, current)) === false) {
+        this.setMessage("Could not preserve current text. No replacement saved; keep this editor open.");
+        this.requestRender(false);
+        return;
+      }
+    }
+    const previousState = this.state;
     if (target.kind === "line" && target.intent === "modify" && isUnchangedModify(target.originalText, value)) {
       this.setMessage("No code change to save. Type or paste a replacement, or press Esc to cancel.");
       this.requestRender();
@@ -2548,8 +2764,14 @@ export class ReviewApp {
       this.state = setAllComment(this.state, value, target.intent);
     } else if (target.kind === "file") {
       this.state = upsertFileComment(this.state, target.fileId, target.scope, value, target.intent, target.fileTarget);
-    } else if (target.existingComment?.anchorStatus === "stale") {
-      const original = target.existingComment;
+    } else if (target.anchorStatus === "stale" || target.existingComment?.anchorStatus === "stale") {
+      const original: DiffReviewComment = {
+        fileId: target.fileId, scope: target.scope, side: target.side,
+        intent: target.intent, body: "", startLine: target.startLine, endLine: target.endLine,
+        captureHash: target.captureHash, originalText: target.originalText, anchorStatus: "stale",
+        ...target.existingComment,
+        id: this.currentEditComment(target)?.id ?? target.existingComment?.id ?? this.compositionOrigin!.id,
+      };
       const storedBody = target.intent === "modify" ? value : value.trim();
       const hasContent = target.intent === "modify"
         ? storedBody !== original.originalText && (storedBody.length > 0 || (original.originalText?.length ?? 0) > 0)
@@ -2559,9 +2781,9 @@ export class ReviewApp {
             ...this.state,
             draft: {
               ...this.state.draft,
-              comments: this.state.draft.comments.map((comment) => comment.id === original.id
-                ? { ...original, intent: target.intent, body: storedBody }
-                : comment),
+              comments: this.state.draft.comments.some((comment) => comment.id === original.id)
+                ? this.state.draft.comments.map((comment) => comment.id === original.id ? { ...original, intent: target.intent, body: storedBody, anchorStatus: "stale" as const } : comment)
+                : [...this.state.draft.comments, { ...original, intent: target.intent, body: storedBody, anchorStatus: "stale" as const }],
             },
           }
         : deleteComment(this.state, original.id);
@@ -2576,24 +2798,51 @@ export class ReviewApp {
         target.intent,
         target.endLine,
         target.intent === "modify" ? target.originalText : undefined,
-        hashTargetSlice(
-          target.side === "deleted"
-            ? this.getSourceContent(target.fileId, target.scope, "deleted")
-            : this.getSourceContent(target.fileId, target.scope, "added"),
-          { startLine: target.startLine, endLine: target.endLine },
-        ),
+        target.captureHash,
         "mapped",
       );
     }
 
+    if (!this.persistSession()) {
+      this.state = previousState;
+      this.setMessage("Could not commit feedback. Editor and recovery retained; retry when storage is available.");
+      this.requestRender(false);
+      return;
+    }
+    // The generation-checked snapshot is committed before any recovery copy is consumed.
+    if (!this.removeCompositionCopies()) {
+      this.setMessage("Feedback saved, but recovery cleanup failed. The editor remains open; retry cleanup.");
+      this.requestRender(false);
+      return;
+    }
+    this.closeEditor();
+    this.requestRender(false);
+  }
+
+  private removeCompositionCopies(): boolean {
+    for (const id of [this.compositionOrigin?.id, this.recoveredFrom]) {
+      if (id != null && this.options.onCompositionRemove?.(id) === false) return false;
+    }
+    return true;
+  }
+
+  private closeEditor(): void {
+    if (this.compositionTimer != null) clearTimeout(this.compositionTimer);
+    this.compositionTimer = null;
+    this.compositionDirty = false;
+    this.compositionOrigin = null;
+    this.recoveredFrom = null;
+    this.recoveryEditor = false;
+    this.recoveryOnly = false;
+    this.commentPaste = null;
+    this.commentPastePrefix = "";
     this.editTarget = null;
     this.syncCursorMode();
-    this.requestRender();
   }
 
   private cancelEditor(): void {
-    this.editTarget = null;
-    this.syncCursorMode();
+    if (this.recoveredFrom != null ? !this.flushComposition() : !this.removeCompositionCopies()) return;
+    this.closeEditor();
     this.requestRender();
   }
 
@@ -3761,22 +4010,72 @@ export class ReviewApp {
     this.requestRender();
   }
 
-  private handleMouseWheel(data: string): boolean {
-    const event = parseMouseWheelInput(data);
-    if (event == null) return false;
+  // Structural input keeps compatibility with Pi versions predating normalized mouse events.
+  handleMouse(event: {
+    type: string;
+    button?: string;
+    x: number;
+    y: number;
+    screenX?: number;
+    screenY?: number;
+    wheelDelta?: number;
+  }): { handled: true } | undefined {
+    const col = (event.screenX ?? event.x) + 1;
+    const row = (event.screenY ?? event.y) + 1;
+    if (event.type === "wheel") {
+      this.scrollMousePane(col, row, event.wheelDelta ?? 0);
+      return { handled: true };
+    }
+    if (event.type === "press" && event.button === "left" && this.selectNavigatorAtMouse(col, row)) {
+      return { handled: true };
+    }
+    return undefined;
+  }
 
-    const pane = this.getPaneAtMousePosition(event.col, event.row);
+  private handleMouseInput(data: string): boolean {
+    const wheel = parseMouseWheelInput(data);
+    if (wheel != null) return this.scrollMousePane(wheel.col, wheel.row, wheel.direction === "down" ? 1 : -1);
+    const mouse = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+    if (mouse == null) return false;
+    if (mouse[1] === "0" && mouse[4] === "M") {
+      this.selectNavigatorAtMouse(Number(mouse[2]), Number(mouse[3]));
+    }
+    return true;
+  }
+
+  private mouseNavigationBlocked(): boolean {
+    return this.editTarget != null || this.reanchorTarget != null
+      || this.helpMode || this.confirmCancel || this.searchMode || this.shortcutMode;
+  }
+
+  private selectNavigatorAtMouse(col: number, row: number): boolean {
+    if (this.mouseNavigationBlocked() || this.getPaneAtMousePosition(col, row) !== "navigator") return false;
+    const bounds = this.mousePaneLayout?.navigator;
+    if (bounds == null || col - 1 <= bounds.left || col - 1 >= bounds.right || row - 1 >= bounds.bottom) return false;
+    const fileId = this.navigatorFileRows.get(row - 1 - bounds.top);
+    if (fileId == null) return false;
+    this.diffWheelScrolling = false;
+    this.state = setFocus(setActiveFileId(this.state, this.files, fileId), "navigator");
+    void this.ensureActiveEntry();
+    this.requestRender();
+    return true;
+  }
+
+  private scrollMousePane(col: number, row: number, delta: number): boolean {
+    if (delta === 0 || this.mouseNavigationBlocked()) return true;
+    const pane = this.getPaneAtMousePosition(col, row);
     if (pane == null) return true;
-
-    const delta = event.direction === "down" ? 1 : -1;
     if (pane === "navigator") {
+      this.diffWheelScrolling = false;
       this.state = setFocus(this.state, "navigator");
       this.moveNavigatorSelection(delta);
       return true;
     }
     if (pane === "diff") {
       this.state = setFocus(this.state, "diff");
-      this.moveDiffSelection(delta);
+      this.diffWheelScrolling = true;
+      this.diffScroll = Math.max(0, Math.min(this.diffMaxScroll, this.diffScroll + delta));
+      this.requestRender();
       return true;
     }
     if (pane === "comments") {
@@ -3871,15 +4170,33 @@ export class ReviewApp {
 
   handleInput(data: string): void {
     this.inputEpoch += 1;
+    if (this.recoveringComposition) return;
+    if (this.compositionConflictPending) {
+      this.compositionConflictPending = false;
+      if (data === "k") this.saveEditor(true);
+      else this.requestRender(false);
+      return;
+    }
     if (this.reanchorTarget != null) {
       this.handleReanchorInput(data);
       return;
     }
-    if (this.handleMouseWheel(data)) return;
+    if (this.handleMouseInput(data)) return;
+    this.diffWheelScrolling = false;
 
     if (this.editTarget != null) {
+      if (matchesKey(data, Key.ctrl("c"))) {
+        if (this.flushComposition()) this.cancel("park");
+        return;
+      }
       if (matchesKey(data, Key.escape)) {
         this.cancelEditor();
+        return;
+      }
+      if (this.commentPaste != null || this.commentPastePrefix.length > 0) {
+        this.handleEditorTextInput(data);
+        this.compositionChanged();
+        this.requestRender();
         return;
       }
       if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.tab)) {
@@ -3887,8 +4204,8 @@ export class ReviewApp {
         return;
       }
       if (matchesKey(data, Key.shift("enter"))) {
-        if (this.usesExactEditor()) this.exactEditor.handleInput("\n");
-        else this.editor.handleInput("\n");
+        this.handleEditorTextInput("\n");
+        this.compositionChanged();
         this.requestRender();
         return;
       }
@@ -3896,8 +4213,8 @@ export class ReviewApp {
         this.saveEditor();
         return;
       }
-      if (this.usesExactEditor()) this.exactEditor.handleInput(data);
-      else this.editor.handleInput(data);
+      this.handleEditorTextInput(data);
+      this.compositionChanged();
       this.requestRender();
       return;
     }
@@ -4254,6 +4571,7 @@ export class ReviewApp {
   }
 
   private renderNavigator(width: number, height: number): string[] {
+    this.navigatorFileRows.clear();
     const files = this.getNavigatorFiles();
     const lines: string[] = [];
     const relatedAnchor = this.relatedFilterAnchorFile();
@@ -4301,6 +4619,7 @@ export class ReviewApp {
         continue;
       }
       const { file, group } = entry;
+      this.navigatorFileRows.set(lines.length + 1, file.id);
       const active = file.id === this.state.activeFileId;
       const prefix = active ? this.theme.fg("accent", "›") : " ";
       const status = this.theme.fg(active ? "accent" : "muted", getStatusLabel(file, this.state.activeScope));
@@ -4382,13 +4701,15 @@ export class ReviewApp {
       layout?.sideBySideRowOffsets.set(heightKey, rowOffsets);
     }
 
+    this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - viewportHeight);
+    if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
     const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const selectedRowIndex = selectedTarget == null
       ? -1
       : layout?.sideBySideTargetRowIndexes.get(`${selectedTarget.side}:${selectedTarget.line}`) ?? -1;
     let selectedIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 1] ?? 0;
     let selectedEndIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 2] ?? selectedIndex + 1;
-    if (selectedRowIndex >= 0) {
+    if (selectedRowIndex >= 0 && !this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex);
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
@@ -4451,10 +4772,13 @@ export class ReviewApp {
     return { lines, selectedIndex, selectedEndIndex, renderedStartOffset: virtualRange.startOffset };
   }
 
-  private renderExactEditor(width: number): string[] {
+  private renderExactEditor(width: number, height?: number): string[] {
     const safeWidth = Math.max(1, width);
     const view = this.exactEditor.getView();
-    return view.lines.map((rawLine, index) => {
+    const count = Math.max(1, height ?? view.lines.length);
+    const first = Math.max(0, Math.min(view.cursorLine - Math.floor(count / 2), view.lines.length - count));
+    return view.lines.slice(first, first + count).map((rawLine, offset) => {
+      const index = first + offset;
       const renderText = (text: string) => sanitizeTerminalText(text).replace(/\t/g, "    ");
       if (view.selectionArmed) {
         const selectedLine = padLine(this.theme.fg("text", renderText(rawLine)), safeWidth);
@@ -4465,12 +4789,14 @@ export class ReviewApp {
       const prefix = rawCursorColumn < 0 ? rawLine : rawLine.slice(0, rawCursorColumn);
       const suffix = rawCursorColumn < 0 ? "" : rawLine.slice(rawCursorColumn);
       const cursorMarker = rawCursorColumn < 0 ? "" : CURSOR_MARKER;
-      const rendered = this.theme.fg("text", `${renderText(prefix)}${cursorMarker}${renderText(suffix)}`);
+      const before = renderText(prefix);
+      const visiblePrefix = rawCursorColumn < 0 ? before : sliceAnsiByColumn(before, Math.max(0, visibleWidth(before) - safeWidth + 2), visibleWidth(before));
+      const rendered = this.theme.fg("text", `${visiblePrefix}${cursorMarker}${renderText(suffix)}`);
       return padLine(truncateToWidth(rendered, safeWidth, "…", false), safeWidth);
     });
   }
 
-  private buildInlineEditorBlock(width: number): string[] {
+  private buildInlineEditorBlock(width: number, height?: number): string[] {
     const target = this.editTarget;
     if (target == null) return [];
     const label = target.kind === "all"
@@ -4484,10 +4810,7 @@ export class ReviewApp {
       ? " • Type/paste replaces highlighted code"
       : "";
     const hints = `${bar} ${this.theme.fg("dim", `Tab intent • Enter save • Shift+Enter newline • Esc cancel${selectionHint}`)}`;
-    const editorLines = this.usesExactEditor()
-      ? this.renderExactEditor(Math.max(10, width - 4))
-      : this.editor.render(Math.max(10, width - 4));
-    const preview = this.usesExactEditor(target)
+    const preview = (height == null || height >= 10) && target.kind === "line" && target.intent === "modify" && this.usesExactEditor(target)
       && !this.exactEditor.isSelectionArmed()
       && target.originalText != null
       && target.originalText !== this.exactEditor.getText()
@@ -4496,13 +4819,21 @@ export class ReviewApp {
           return `${bar} ${this.theme.fg(color, truncateToWidth(sanitizeTerminalText(line).replace(/\t/g, "    "), Math.max(10, width - 4), "…", false))}`;
         })
       : [];
-    const body = editorLines.map((line) => `${bar} ${line}`);
-    return [header, hints, ...preview, ...body];
+    const conflict = this.compositionConflictPending ? [
+      "Replace with recovered text; keep current text as recovery?", "k replace and preserve current • Esc back",
+    ].map((line) => `${bar} ${this.theme.fg("warning", line)}`) : [];
+    const editorLines = this.usesExactEditor()
+      ? this.renderExactEditor(Math.max(10, width - 4), height == null ? undefined : height - 2 - preview.length - conflict.length)
+      : this.editor.render(Math.max(10, width - 4));
+    return [header, hints, ...conflict, ...preview, ...editorLines.map((line) => `${bar} ${line}`)];
   }
 
   private renderDiff(width: number, height: number): string[] {
     const file = this.activeFile();
     const lines: string[] = [];
+    if (this.editTarget != null && (this.recoveryEditor || file == null || this.getEntry(file.id, this.state.activeScope)?.status === "error")) {
+      return renderBox("Recovered editor · original target unchanged", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
+    }
     if (file == null) {
       lines.push(this.theme.fg("warning", "No file selected."));
       return renderBox("Diff", width, height, this.theme, lines, this.state.focus === "diff");
@@ -4587,6 +4918,8 @@ export class ReviewApp {
         rowOffsets = getRowOffsets(rowHeights);
         layout.unifiedRowOffsets.set(heightKey, rowOffsets);
       }
+      this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - maxBody);
+      if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
       const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       const selectedRowIndex = selectedTarget == null
         ? -1
@@ -4594,7 +4927,7 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
-        this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       renderedStartOffset = virtualRange.startOffset;
@@ -4655,7 +4988,7 @@ export class ReviewApp {
       const anchorTop = Math.max(0, editorStart - 1);
       if (editorEnd >= this.diffScroll + maxBody) this.diffScroll = editorEnd - maxBody + 1;
       if (anchorTop < this.diffScroll && editorEnd - anchorTop < maxBody) this.diffScroll = anchorTop;
-    } else {
+    } else if (!this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
     }
     this.diffScroll = Math.max(0, this.diffScroll);
