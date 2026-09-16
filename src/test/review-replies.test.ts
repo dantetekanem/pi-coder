@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parsePiCodeDiffSettings } from "../provider-settings.js";
+import { parsePiCodeDiffSettings, requireProviderSettings } from "../provider-settings.js";
 import { createConversationRead } from "../conversation.js";
 import {
   analyzeReviewReply,
@@ -12,6 +12,7 @@ import {
   fetchReviewThreads,
   groupFlatReviewComments,
   parseGraphqlReplyThreads,
+  type ReviewThreadRead,
 } from "../review-replies.js";
 
 const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
@@ -206,6 +207,70 @@ describe("review replies", () => {
     } finally {
       read.close();
     }
+  });
+
+  it.each(["complete", "errors", "missing", "repeated", "foreign"])("continues nested comments on outer page two with bounded checkpoints: %s", async (mode) => {
+    const providerId = mode === "complete" ? "github" : "primary";
+    const configured = requireProviderSettings(providerId);
+    const connection = (nodes: unknown[], more = false, cursor?: string) => ({ nodes, pageInfo: { hasNextPage: more, endCursor: cursor } });
+    const wrap = (nodes: unknown[], more = false) => ({ data: { repository: { pullRequest: { reviewThreads: connection(nodes, more, "outer") } } } });
+    const comments = Array.from({ length: 100 }, (_, index) => ({ id: `${index}`, author: { login: "reviewer" }, body: "Question" }));
+    const anonymous = { id: "100", author: null, body: "é".repeat(2000) };
+    const thread = { id: "last", isResolved: null, comments: connection(comments, true, "nested") };
+    let outer = 0;
+    let nested = 0;
+    const exec = vi.fn(async (_command: string, args: string[]) => {
+      const query = args.find((arg) => arg.startsWith("query="))?.slice(6) ?? args.at(-1)!;
+      let payload: unknown;
+      let code = 0;
+      if (query.includes('node(id: "other")')) {
+        payload = { data: { node: { ...thread, id: "other", comments: connection([]) } } };
+      } else if (query.includes("node(id:")) {
+        const first = ++nested === 1;
+        const node = { ...thread, comments: connection([comments[99], anonymous], mode === "repeated", "nested") };
+        payload = { data: { node: first && mode === "missing" ? { id: "last" } : first && mode === "foreign" ? { ...node, id: "wrong" } : node },
+          errors: first && mode === "errors" ? [{ message: "partial" }] : undefined };
+        if (first && mode === "errors") code = 1;
+      } else {
+        payload = ++outer === 1 ? wrap(Array.from({ length: 100 }, (_, index) => ({ id: `outer-${index}`, comments: connection([]) })), true)
+          : wrap([thread, { ...thread, id: "other" }]);
+      }
+      return { code, stderr: "", killed: false, stdout: JSON.stringify(payload) };
+    });
+    let previous: ReviewThreadRead | undefined;
+    const ledger = { bytes: 0 };
+    const step = async () => {
+      const read = createConversationRead({ exec } as never, { maxRequests: 1 }, ledger);
+      try {
+        previous = await fetchReviewThreads(read.pi, target(providerId) as never, configured, "example/widgets", "12",
+          { previous, onPage: (page) => { read.retain(page); } });
+        return previous;
+      } finally { read.close(); }
+    };
+    const first = await step();
+    const original = JSON.stringify(first);
+    await step();
+    let last = await step();
+    expect(exec).toHaveBeenCalledTimes(3);
+    if (["errors", "missing", "foreign"].includes(mode)) {
+      expect(last.coverage).toBe("partial");
+      expect(last.threads.find((thread) => thread.id === "last")?.comments).toHaveLength(mode === "errors" ? 101 : 100);
+      const partial = last;
+      const retained = JSON.stringify(partial);
+      last = await step();
+      expect(JSON.stringify(partial)).toBe(retained);
+    }
+    expect(last.coverage).toBe("partial");
+    last = await step();
+    expect(last.coverage).toBe(mode === "repeated" ? "partial" : "complete");
+    expect(last.threads).toHaveLength(102);
+    const fetched = last.threads.find((thread) => thread.id === "last")!;
+    expect(fetched.comments.map((comment) => comment.id)).toEqual([...comments.map((comment) => comment.id), "100"]);
+    expect(fetched.comments.at(-1)).toMatchObject({ authorUnknown: true, body: anonymous.body });
+    expect(collectRepliesToSelf(last.threads, "reviewer")[0]).toMatchObject({ threadId: "last", author: "unknown", resolved: null });
+    expect(JSON.stringify(first)).toBe(original);
+    expect(outer).toBe(2);
+    expect(nested).toBe(["errors", "missing", "foreign"].includes(mode) ? 2 : 1);
   });
 
   it.each(["errors", "exit errors", "missing connection", "missing comment id", "command failure", "malformed JSON"])("keeps usable fragments and falls back only for unusable queries: %s", async (failure) => {
