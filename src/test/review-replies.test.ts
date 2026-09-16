@@ -225,7 +225,9 @@ describe("review replies", () => {
     const wrap = (nodes: unknown[], more = false) => ({ data: { repository: { pullRequest: { reviewThreads: connection(nodes, more, "outer") } } } });
     const comments = Array.from({ length: 100 }, (_, index) => ({ id: `${index}`, author: { login: "reviewer" }, body: "Question" }));
     const anonymous = { id: "100", author: null, body: "é".repeat(2000) };
-    const thread = { id: "last", isResolved: null, comments: connection(comments, true, "nested") };
+    const thread = { id: "last", isResolved: null, comments: connection(comments, true, "nested"),
+      diffSide: "LEFT", path: "src/app.ts", line: 90,
+      pullRequest: { headRefOid: "a".repeat(40), baseRefOid: "b".repeat(40) } };
     let outer = 0;
     let nested = 0;
     const exec = vi.fn(async (_command: string, args: string[]) => {
@@ -248,10 +250,12 @@ describe("review replies", () => {
     });
     let previous: ReviewThreadRead | undefined;
     const ledger = { bytes: 0 };
+    const remoteTarget = target(providerId);
+    Object.assign(remoteTarget.pullRequest, { headRefOid: "c".repeat(40) });
     const step = async () => {
       const read = createConversationRead({ exec } as never, { maxRequests: 1 }, ledger);
       try {
-        previous = await fetchReviewThreads(read.pi, target(providerId) as never, configured, "example/widgets", "12",
+        previous = await fetchReviewThreads(read.pi, remoteTarget as never, configured, "example/widgets", "12",
           { previous, onPage: (page) => { read.retain(page); } });
         return previous;
       } finally { read.close(); }
@@ -274,6 +278,11 @@ describe("review replies", () => {
     expect(last.coverage).toBe(mode === "repeated" ? "partial" : "complete");
     expect(last.threads).toHaveLength(102);
     const fetched = last.threads.find((thread) => thread.id === "last")!;
+    expect(fetched).toMatchObject({ side: "deleted", headRevision: "a".repeat(40), baseRevision: "b".repeat(40), path: "src/app.ts", line: 90 });
+    for (const [, args] of exec.mock.calls) {
+      expect(args.join(" ")).toContain("diffSide");
+      expect(args.join(" ")).toContain("pullRequest { headRefOid baseRefOid }");
+    }
     expect(fetched.comments.map((comment) => comment.id)).toEqual([...comments.map((comment) => comment.id), "100"]);
     expect(fetched.comments.at(-1)).toMatchObject({ authorUnknown: true, body: anonymous.body });
     expect(collectRepliesToSelf(last.threads, "reviewer")[0]).toMatchObject({ threadId: "last", author: "unknown", resolved: null });
@@ -309,6 +318,18 @@ describe("review replies", () => {
     const raw = await fetchReviewThreads({ exec } as never, target("primary") as never,
       parsePiCodeDiffSettings(settings()).providers.primary!, "example/widgets", "12");
     expect(raw.threads[0]?.id).toBe(partial ? "thread" : "1");
+  });
+
+  it.each(["github", "secondary"])("preserves REST anchor provenance without inventing a base: %s", (id) => {
+    const configured = requireProviderSettings(id);
+    if (id === "secondary") configured.fields = { ...configured.fields, commentSide: ["edge"], commentCommitId: ["revision"] };
+    const row = { id: 1, key: 1, body: "Question", message: "Question", path: "src/app.ts", file: "src/old.ts", line: 90,
+      side: "RIGHT", edge: "LEFT", commit_id: "a".repeat(40), revision: "b".repeat(40), original_commit_id: "c".repeat(40) };
+    const thread = groupFlatReviewComments([row], configured)[0]!;
+    expect(thread).toMatchObject({ line: 90, path: id === "github" ? "src/app.ts" : "src/old.ts",
+      side: id === "github" ? "added" : "deleted", headRevision: (id === "github" ? "a" : "b").repeat(40) });
+    expect(thread.baseRevision).toBeUndefined();
+    expect(groupFlatReviewComments([{ ...row, side: "invalid", edge: "invalid" }], configured)[0]?.side).toBeUndefined();
   });
 
   it("groups configured flat comment fields when thread queries are disabled", async () => {
