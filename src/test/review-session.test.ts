@@ -1,17 +1,20 @@
-import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildReviewFileSignatures,
   createReviewSessionId,
+  createReviewInstanceId,
   deleteReviewSession,
+  hasReviewSessionIdentity,
   getReviewSessionPathForDiagnostics,
   listReviewSessions,
   loadReviewSession,
   rebaseReviewSession,
   REVIEW_SESSION_VERSION,
+  REVIEW_SESSION_TTL_MS,
   saveReviewSession,
   saveReviewSessionWithStatus,
   type PersistedReviewSession,
@@ -103,6 +106,37 @@ afterEach(async () => {
 });
 
 describe("review sessions", () => {
+  it("keeps independent instances discoverable under one target and validates terminal continuation identity", () => {
+    const identity = "pr|github|example/widgets|1";
+    const first = createReviewInstanceId();
+    const second = createReviewInstanceId();
+    expect(first).not.toBe(second);
+    const a = saveReviewSessionWithStatus(identity, sessionData(), { id: first, revision: "head" });
+    const b = saveReviewSessionWithStatus(identity, sessionData(), { id: second, revision: "head" });
+    expect(a).toMatchObject({ saved: true, generation: 1 });
+    expect(b).toMatchObject({ saved: true, generation: 1 });
+    expect(listReviewSessions().map((entry) => entry.id)).toEqual(expect.arrayContaining([first, second]));
+    expect(hasReviewSessionIdentity(identity, first)).toBe(true);
+    expect(hasReviewSessionIdentity("pr|github|another/repo|1", first)).toBe(false);
+    expect(hasReviewSessionIdentity(identity, "missing")).toBe(false);
+    expect(deleteReviewSession(identity, first, 1)).toMatchObject({ deleted: true });
+    expect(loadReviewSession(identity, first)).toBeNull();
+    expect(hasReviewSessionIdentity(identity, first)).toBe(true);
+    expect(hasReviewSessionIdentity("pr|github|another/repo|1", first)).toBe(false);
+    expect(loadReviewSession(identity, second)).toMatchObject({ id: second, generation: 1 });
+  });
+
+  it("migrates a resumed legacy target identity without changing the instance or permitting a stale old-identity writer", () => {
+    const previousIdentity = "/repo|origin/main|old-sha|example/widgets#1";
+    const identity = "pr|github|example/widgets|1";
+    const id = saveReviewSession(previousIdentity, sessionData(), { revision: "old-sha" });
+    const migration = saveReviewSessionWithStatus(identity, sessionData(), { id, revision: "new-sha", expectedGeneration: 1, previousIdentity });
+    expect(migration).toMatchObject({ saved: true, generation: 2 });
+    expect(loadReviewSession(identity, id)).toMatchObject({ id, identity, generation: 2 });
+    expect(saveReviewSessionWithStatus(previousIdentity, sessionData(), { id, revision: "old-sha", expectedGeneration: 1 })).toMatchObject({ saved: false, status: "conflict" });
+    expect(hasReviewSessionIdentity(identity, id)).toBe(true);
+  });
+
   it("persists and restores a versioned review snapshot by identity", () => {
     const identity = "/repo|base|head";
     const id = saveReviewSession(identity, sessionData({
@@ -130,7 +164,7 @@ describe("review sessions", () => {
     });
   });
 
-  it("loads v1 losslessly as v2, recovers its revision, and marks legacy line anchors stale", async () => {
+  it("loads v1 losslessly at the current version, recovers its revision, and marks legacy line anchors stale", async () => {
     const identity = "/repo|origin/main|abc123|local";
     const id = createReviewSessionId(identity);
     const path = getReviewSessionPathForDiagnostics(id);
@@ -190,7 +224,7 @@ describe("review sessions", () => {
       revision: "head",
       fileSignatures: { "src/app.ts": "signature" },
       meta: { kind: "local", label: "/repo", cwd: "/repo" },
-    })).toEqual({ id: createReviewSessionId(identity), saved: true });
+    })).toEqual({ id: createReviewSessionId(identity), saved: true, status: "saved", generation: 1, indexUpdated: true });
     expect(loadReviewSession(identity)).toMatchObject({
       revision: "head",
       fileSignatures: { "src/app.ts": "signature" },
@@ -205,7 +239,7 @@ describe("review sessions", () => {
     await writeFile(invalidParent, "occupied", "utf8");
     process.env.PI_CODE_DIFF_SESSIONS_DIR = invalidParent;
 
-    expect(saveReviewSessionWithStatus(identity, sessionData())).toEqual({ id: createReviewSessionId(identity), saved: false });
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ id: createReviewSessionId(identity), saved: false, status: "error" });
   });
 
   it("rejects corrupted or future-version session data", async () => {
@@ -220,9 +254,109 @@ describe("review sessions", () => {
     const identity = "/repo|base|head";
     saveReviewSession(identity, sessionData(), { revision: "head-sha" });
 
-    deleteReviewSession(identity);
+    deleteReviewSession(identity, undefined, loadReviewSession(identity)!.generation);
     expect(loadReviewSession(identity)).toBeNull();
     expect(listReviewSessions()).toEqual([]);
+  });
+});
+
+describe("expected-generation snapshots", () => {
+  it("preserves both feedback versions when a loaded writer is stale", () => {
+    const identity = "stale-writers";
+    saveReviewSession(identity, sessionData());
+    const first = loadReviewSession(identity)!;
+    const second = loadReviewSession(identity)!;
+    first.state.draft.comments[0]!.body = "First writer's comment";
+    second.state.draft.allComment = "Second writer's note";
+
+    expect(saveReviewSessionWithStatus(identity, first, {
+      revision: "head", expectedGeneration: first.generation,
+    })).toMatchObject({ saved: true, status: "saved", generation: 2 });
+    const conflict = saveReviewSessionWithStatus(identity, second, {
+      revision: "head", expectedGeneration: second.generation,
+    });
+
+    expect(conflict).toMatchObject({
+      saved: false, status: "conflict", reason: "generation-mismatch",
+      expectedGeneration: 1, actualGeneration: 2,
+      current: { state: { draft: { comments: [{ body: "First writer's comment" }] } } },
+      attempted: { state: { draft: { allComment: "Second writer's note" } } },
+    });
+    expect(loadReviewSession(identity)?.state.draft.comments[0]?.body).toBe("First writer's comment");
+  });
+
+  it("requires an explicit loaded generation to replace an existing draft", () => {
+    const identity = "generation-required";
+    saveReviewSession(identity, sessionData());
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({
+      saved: false, status: "conflict", reason: "generation-mismatch", actualGeneration: 1,
+    });
+    expect(() => saveReviewSession(identity, sessionData())).toThrow();
+  });
+
+  it("cannot recreate a deleted draft from either a stale or a create-only save", () => {
+    const identity = "deleted-draft";
+    const id = saveReviewSession(identity, sessionData());
+    const stale = loadReviewSession(identity)!;
+    expect(deleteReviewSession(identity, id, stale.generation)).toMatchObject({ deleted: true, generation: 2 });
+
+    expect(saveReviewSessionWithStatus(identity, stale, {
+      revision: "head", expectedGeneration: stale.generation,
+    })).toMatchObject({ saved: false, status: "conflict", reason: "deleted", actualGeneration: 2 });
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ saved: false, reason: "deleted" });
+    expect(loadReviewSession(identity)).toBeNull();
+    expect(listReviewSessions()).toEqual([]);
+  });
+
+  it("rejects stale deletion and stale feedback after consumption", () => {
+    const identity = "consumed-draft";
+    const id = saveReviewSession(identity, sessionData());
+    const stale = loadReviewSession(identity)!;
+    const consumed = sessionData({ state: { ...state(), draft: { allComment: "", allIntent: "comment", comments: [] } } });
+    expect(saveReviewSessionWithStatus(identity, consumed, {
+      revision: "head", expectedGeneration: stale.generation,
+    })).toMatchObject({ saved: true, generation: 2 });
+    expect(deleteReviewSession(identity, id, stale.generation)).toMatchObject({ deleted: false, status: "conflict" });
+    expect(saveReviewSessionWithStatus(identity, stale, {
+      revision: "head", expectedGeneration: stale.generation,
+    })).toMatchObject({ saved: false, status: "conflict" });
+    expect(loadReviewSession(identity)?.state.draft).toEqual(consumed.state.draft);
+  });
+
+  it.each([1, 2])("loads legacy v%s at generation zero without allowing blind replacement", async (version) => {
+    const identity = `legacy-${version}`;
+    const id = createReviewSessionId(identity);
+    await writeFile(getReviewSessionPathForDiagnostics(id), JSON.stringify({
+      ...sessionData(), version, id, identity, updatedAt: new Date().toISOString(), revision: "head",
+    }));
+    const legacy = loadReviewSession(identity)!;
+    expect(legacy.generation).toBe(0);
+    expect(saveReviewSessionWithStatus(identity, legacy)).toMatchObject({ saved: false, status: "conflict" });
+    expect(saveReviewSessionWithStatus(identity, legacy, {
+      revision: "head", expectedGeneration: 0,
+    })).toMatchObject({ saved: true, generation: 1 });
+  });
+
+  it.each(["index", "INDEX"])("rejects reserved snapshot id %s instead of overwriting feedback with the index", (id) => {
+    const result = saveReviewSessionWithStatus("reserved-id", sessionData(), { id, revision: "head" });
+    expect(result).toMatchObject({ saved: false });
+    expect(loadReviewSession("reserved-id", id)).toBeNull();
+  });
+
+  it("reports a committed generation separately from an index write failure", async () => {
+    await mkdir(join(sessionsDir, "index.json"));
+    const identity = "index-write-failed";
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ saved: true, generation: 1, indexUpdated: false });
+    expect(loadReviewSession(identity)?.state.draft.allComment).toBe("Review note");
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ saved: false, status: "conflict", actualGeneration: 1 });
+  });
+
+  it("does not overwrite corrupt or unsupported snapshot files", async () => {
+    const identity = "corrupt-snapshot";
+    const path = getReviewSessionPathForDiagnostics(createReviewSessionId(identity));
+    await writeFile(path, "{ incomplete");
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ saved: false, status: "conflict", reason: "unreadable" });
+    expect(readFileSync(path, "utf8")).toBe("{ incomplete");
   });
 });
 
@@ -264,6 +398,101 @@ describe("review session index", () => {
     expect(JSON.parse(readFileSync(join(sessionsDir, "index.json"), "utf8")).sessions).toHaveLength(1);
   });
 
+  it.each(["list", "save", "delete"])("repairs valid but incomplete index membership during %s", async (operation) => {
+    const indexPath = join(sessionsDir, "index.json");
+    saveReviewSession("indexed", sessionData());
+    const incomplete = readFileSync(indexPath, "utf8");
+    const recoveredId = saveReviewSession("omitted", sessionData(), { revision: "recovered-head" });
+    await writeFile(indexPath, incomplete);
+
+    if (operation === "list") listReviewSessions();
+    else if (operation === "save") expect(saveReviewSessionWithStatus("new", sessionData())).toMatchObject({ saved: true, indexUpdated: true });
+    else expect(deleteReviewSession("unused")).toMatchObject({ deleted: true, indexUpdated: true });
+
+    const entries = JSON.parse(readFileSync(indexPath, "utf8")).sessions;
+    expect(entries).toHaveLength(operation === "save" ? 3 : 2);
+    expect(entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ identity: "indexed" }),
+      expect.objectContaining({ id: recoveredId, identity: "omitted", revision: "recovered-head", commentCount: 2 }),
+    ]));
+    expect(loadReviewSession("omitted")).toMatchObject({ generation: 1, state: { draft: { allComment: "Review note" } } });
+  });
+
+  it("uses canonical snapshots rather than stale identities, duplicates, or misplaced recovery files", async () => {
+    const previousIdentity = "legacy-target";
+    const id = saveReviewSession(previousIdentity, sessionData());
+    const indexPath = join(sessionsDir, "index.json");
+    const previous = JSON.parse(readFileSync(indexPath, "utf8")).sessions[0];
+    expect(saveReviewSessionWithStatus("canonical-target", sessionData(), {
+      id, revision: "new-head", previousIdentity, expectedGeneration: 1,
+    })).toMatchObject({ saved: true, generation: 2 });
+    const misplaced = JSON.stringify({ ...loadReviewSession("canonical-target", id), identity: previousIdentity });
+    const misplacedPath = join(sessionsDir, "zz-recovery-copy.json");
+    await writeFile(misplacedPath, misplaced);
+    await writeFile(indexPath, JSON.stringify({ version: REVIEW_SESSION_VERSION, sessions: [previous, previous] }));
+
+    expect(listReviewSessions()).toMatchObject([{ id, identity: "canonical-target", revision: "new-head" }]);
+    expect(readFileSync(misplacedPath, "utf8")).toBe(misplaced);
+    expect(loadReviewSession("canonical-target", id)?.generation).toBe(2);
+  });
+
+  it.each([
+    { updatedAt: "unknown" },
+    { version: 99 },
+    { generation: Number.MAX_SAFE_INTEGER + 1 },
+    { generation: Number.MAX_SAFE_INTEGER },
+  ])("preserves snapshots that cannot safely expire: %j", async (fields) => {
+    const identity = "uncertain-retention";
+    const id = saveReviewSession(identity, sessionData());
+    const path = getReviewSessionPathForDiagnostics(id);
+    const contents = JSON.stringify({ ...loadReviewSession(identity), updatedAt: "1970-01-01T00:00:00Z", ...fields });
+    await writeFile(path, contents);
+    const malformedPath = join(sessionsDir, "malformed.json");
+    await writeFile(malformedPath, "{ incomplete");
+    const temporaryPath = `${path}.interrupted.tmp`;
+    await writeFile(temporaryPath, contents);
+
+    expect(listReviewSessions()).toMatchObject([{ id, identity }]);
+    expect(readFileSync(path, "utf8")).toBe(contents);
+    expect(readFileSync(malformedPath, "utf8")).toBe("{ incomplete");
+    expect(readFileSync(temporaryPath, "utf8")).toBe(contents);
+  });
+
+  it("expires omitted snapshots at their current generation and retains terminal identity indefinitely", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    vi.setSystemTime(now - REVIEW_SESSION_TTL_MS - 1);
+    const identity = "omitted-expired";
+    const id = saveReviewSession(identity, sessionData());
+    const loaded = loadReviewSession(identity)!;
+    expect(saveReviewSessionWithStatus(identity, loaded, { revision: "head", expectedGeneration: loaded.generation })).toMatchObject({ generation: 2 });
+    await writeFile(join(sessionsDir, "index.json"), JSON.stringify({ version: REVIEW_SESSION_VERSION, sessions: [] }));
+    vi.setSystemTime(now);
+
+    expect(listReviewSessions()).toEqual([]);
+    const path = getReviewSessionPathForDiagnostics(id);
+    const terminal = readFileSync(path, "utf8");
+    expect(JSON.parse(terminal)).toMatchObject({ id, identity, deleted: true, generation: 3 });
+    vi.setSystemTime(now + 10 * REVIEW_SESSION_TTL_MS);
+    expect(listReviewSessions()).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(terminal);
+    expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ saved: false, reason: "deleted", actualGeneration: 3 });
+  });
+
+  it("does not expire a refreshed snapshot using an old index timestamp", () => {
+    const identity = "refreshed-snapshot";
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    saveReviewSession(identity, sessionData());
+    const previous = loadReviewSession(identity)!;
+    vi.useRealTimers();
+    expect(saveReviewSessionWithStatus(identity, previous, {
+      revision: "head", expectedGeneration: previous.generation,
+    })).toMatchObject({ saved: true, generation: 2 });
+    expect(listReviewSessions()).toHaveLength(1);
+    expect(loadReviewSession(identity)?.generation).toBe(2);
+  });
+
   it("prunes sessions past the retention window", () => {
     vi.useFakeTimers();
     vi.setSystemTime(Date.now() - 40 * 24 * 60 * 60 * 1000);
@@ -272,7 +501,11 @@ describe("review session index", () => {
     vi.useRealTimers();
 
     expect(listReviewSessions()).toEqual([]);
-    expect(existsSync(getReviewSessionPathForDiagnostics(id))).toBe(false);
+    expect(loadReviewSession(identity)).toBeNull();
+    expect(JSON.parse(readFileSync(getReviewSessionPathForDiagnostics(id), "utf8"))).toMatchObject({ deleted: true, generation: 2 });
+    expect(saveReviewSessionWithStatus(identity, sessionData(), { revision: "worktree", expectedGeneration: 1 })).toMatchObject({
+      saved: false, status: "conflict", reason: "deleted",
+    });
   });
 });
 
