@@ -98,31 +98,6 @@ function fullHighlight(text: string): InlineRange[] {
   return length > 0 ? [{ start: 0, end: length }] : [];
 }
 
-function coalesceRanges(ranges: InlineRange[]): InlineRange[] {
-  if (ranges.length <= 1) return ranges;
-
-  const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: InlineRange[] = [];
-
-  for (const range of sorted) {
-    const clamped = {
-      start: Math.max(0, range.start),
-      end: Math.max(0, range.end),
-    };
-    if (clamped.end <= clamped.start) continue;
-
-    const previous = merged[merged.length - 1];
-    if (!previous || clamped.start > previous.end) {
-      merged.push(clamped);
-      continue;
-    }
-
-    previous.end = Math.max(previous.end, clamped.end);
-  }
-
-  return merged;
-}
-
 function computeInlineHighlights(oldText: string, newText: string): { oldHighlights: InlineRange[]; newHighlights: InlineRange[] } {
   if (oldText.length === 0) {
     return { oldHighlights: [], newHighlights: fullHighlight(newText) };

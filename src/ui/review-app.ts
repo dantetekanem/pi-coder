@@ -1,7 +1,7 @@
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { copyToClipboard, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, Editor, type EditorTheme, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { adjustStructuredDiffContext, buildStructuredDiff, getContextExpansionRowIndexes, revealStructuredDiffRows, type ContextExpansionDirection, type StructuredDiff, type StructuredDiffVisibleItem } from "../diff.js";
+import { adjustStructuredDiffContext, buildStructuredDiff, getContextExpansionRowIndexes, revealStructuredDiffRows, type ContextExpansionDirection, type StructuredDiff } from "../diff.js";
 import { filterReviewFilesByLocale } from "../locale-files.js";
 import {
   clampSelectedLineTarget,
@@ -610,15 +610,18 @@ export function getVirtualRowRange(rowHeights: number[], scroll: number, viewpor
 }
 
 function padLine(text: string, width: number): string {
-  const truncated = truncateToWidth(text, width, "", true);
-  const padding = Math.max(0, width - visibleWidth(truncated));
-  return truncated + " ".repeat(padding);
+  const textWidth = visibleWidth(text);
+  if (width > 0 && textWidth <= width) return text + " ".repeat(width - textWidth);
+  return truncateToWidth(text, width, "", true);
 }
 
 function wrapAnsiText(text: string, width: number, wrapLines: boolean): string[] {
   const safeWidth = Math.max(1, width);
   if (!wrapLines) return [truncateToWidth(text, safeWidth, "…", false)];
-  const wrapped = wrapTextWithAnsi(text, safeWidth).map((line) => truncateToWidth(line, safeWidth, "", false));
+  if (!text.includes("\n") && visibleWidth(text) <= safeWidth) return [text];
+  const wrapped = wrapTextWithAnsi(text, safeWidth).map((line) => (
+    visibleWidth(line) <= safeWidth ? line : truncateToWidth(line, safeWidth, "", false)
+  ));
   return wrapped.length > 0 ? wrapped : [""];
 }
 
@@ -807,7 +810,7 @@ export function getCancelAction(state: ReviewState, reviewedCount = 0): "cancel"
 }
 
 function centerText(text: string, width: number): string {
-  const clean = truncateToWidth(text, width, "", false);
+  const clean = visibleWidth(text) <= width ? text : truncateToWidth(text, width, "", false);
   const remaining = Math.max(0, width - visibleWidth(clean));
   const left = Math.floor(remaining / 2);
   return `${" ".repeat(left)}${clean}`;
@@ -1279,6 +1282,7 @@ interface DiffLayout {
   sideBySideRows: SideBySideDisplayRow[];
   commentableTargets: ReviewLineTarget[];
   sideBySideCommentableTargets: ReviewLineTarget[];
+  movementTargets: Map<string, ReviewLineTarget[]>;
   unifiedTargetRowIndexes: Map<string, number>;
   sideBySideTargetRowIndexes: Map<string, number>;
   rowRenderCache: Map<DisplayRow, Map<string, string[]>>;
@@ -1467,21 +1471,6 @@ export function getChangedLineTargets(diff: StructuredDiff): ReviewLineTarget[] 
   ));
 }
 
-function getCommentableLineTargets(diff: StructuredDiff): ReviewLineTarget[] {
-  const seen = new Set<string>();
-  const targets: ReviewLineTarget[] = [];
-
-  for (const row of buildDisplayRows(diff)) {
-    if (row.commentLineNumber == null || row.commentSide == null) continue;
-    const key = `${row.commentSide}:${row.commentLineNumber}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    targets.push({ side: row.commentSide, line: row.commentLineNumber });
-  }
-
-  return targets;
-}
-
 export class ReviewApp {
   focused = false;
 
@@ -1520,8 +1509,12 @@ export class ReviewApp {
   private message: string | null = null;
   private navigatorScroll = 0;
   private diffScroll = 0;
+  private diffWheelScrolling = false;
+  private diffMaxScroll = 0;
   private commentsScroll = 0;
   private contextPanelState: ContextPanelState = { status: "idle" };
+  private contextRequestToken = 0;
+  private disposed = false;
   private repliesPanelState: RepliesPanelState = { status: "idle" };
   private replyAnalysis: ReplyAnalysisState = { status: "idle" };
   /** Only the newest replies request may write state, so an in-flight refresh cannot overwrite it. */
@@ -1539,7 +1532,10 @@ export class ReviewApp {
   private relatedFilterAnchorFileId: string | null = null;
   private relatedFilterReturnFileId: string | null = null;
   private mousePaneLayout: MousePaneLayout | null = null;
+  private readonly navigatorFileRows = new Map<number, string>();
+  private ownsMouseReporting = false;
   private lastWidth = 120;
+  private diffActionHintCache: { width: number; line: string } | null = null;
   private pendingVimSequence: "g" | null = null;
   private readonly previousHardwareCursor: boolean;
   private sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1554,7 +1550,6 @@ export class ReviewApp {
   private conflictCopyId: string | null = null;
   private commentPaste: string | null = null;
   private commentPastePrefix = "";
-  private disposed = false;
   private readonly syntaxLineCache = new Map<string, string>();
   private readonly diffLayoutCache = new Map<string, DiffLayout>();
 
@@ -1620,11 +1615,19 @@ export class ReviewApp {
       this.ensureContextPanel();
       this.requestRender();
     });
+    if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
+      this.ownsMouseReporting = true;
+      this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+    }
   }
 
   dispose(): void {
     this.disposed = true;
     this.flushComposition();
+    if (this.ownsMouseReporting) {
+      this.ownsMouseReporting = false;
+      this.tui.terminal.write("\x1b[?1006l\x1b[?1000l");
+    }
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
       this.sessionSaveTimer = null;
@@ -1638,7 +1641,7 @@ export class ReviewApp {
   invalidate(): void {
     this.syntaxLineCache.clear();
     this.diffLayoutCache.clear();
-    this.message = this.message;
+    this.diffActionHintCache = null;
   }
 
   private syncCursorMode(): void {
@@ -1689,16 +1692,24 @@ export class ReviewApp {
     const source = this.options.contextPanelSource;
     if (source == null || !this.paneVisibility.context || this.contextPanelState.status !== "idle") return;
 
-    this.contextPanelState = { status: "loading" };
-    this.requestRender();
-    void source.load().then((text) => {
+    const token = ++this.contextRequestToken;
+    const isCurrent = () => !this.disposed && token === this.contextRequestToken;
+    let receivedUpdate = false;
+    const applyUpdate = (text: string) => {
+      if (!isCurrent()) return;
+      receivedUpdate = true;
       this.contextPanelState = { status: "ready", text };
-      this.contextScroll = 0;
       this.requestRender();
+    };
+    this.contextPanelState = { status: "loading" };
+    this.contextScroll = 0;
+    this.requestRender();
+    void source.load(applyUpdate).then((text) => {
+      if (!receivedUpdate) applyUpdate(text);
     }).catch((error: unknown) => {
+      if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
       this.contextPanelState = { status: "error", error: sanitizeTerminalText(message) };
-      this.contextScroll = 0;
       this.requestRender();
     });
   }
@@ -1874,6 +1885,7 @@ export class ReviewApp {
     isCurrent: boolean,
     isSearchMatch: boolean,
     lineComment: DiffReviewComment | undefined,
+    measureOnly = false,
   ): string[] {
     let contentText: string;
     let tone: DiffTone = "context";
@@ -1894,6 +1906,7 @@ export class ReviewApp {
     }
 
     const wrapped = wrapAnsiText(contentText, Math.max(1, width - 2), this.state.wrapLines);
+    if (measureOnly) return wrapped;
     return wrapped.map((line) => {
       const paddedLine = padLine(line, Math.max(1, width - 2));
       if (isCurrent) return this.theme.bg("selectedBg", this.theme.fg("accent", paddedLine));
@@ -2063,14 +2076,6 @@ export class ReviewApp {
     return entry;
   }
 
-  private invalidateEntry(fileId: string, scope: ReviewScope): void {
-    const key = this.cacheKey(fileId, scope);
-    this.cache.delete(key);
-    this.expandedContextRows.delete(key);
-    this.syntaxLineCache.clear();
-    this.diffLayoutCache.clear();
-  }
-
   private getDiffLayout(fileId: string | null, scope: ReviewScope): DiffLayout | null {
     if (fileId == null) return null;
     const entry = this.getEntry(fileId, scope);
@@ -2118,6 +2123,7 @@ export class ReviewApp {
       sideBySideCommentableTargets: getSideBySideLineTargets(sideBySideRows),
       unifiedTargetRowIndexes,
       sideBySideTargetRowIndexes,
+      movementTargets: new Map(),
       rowRenderCache: new Map(),
       sideBySideRowRenderCache: new Map(),
       unifiedRowHeights: new Map(),
@@ -2142,10 +2148,13 @@ export class ReviewApp {
 
   private getDiffMovementTargets(fileId: string, scope: ReviewScope): ReviewLineTarget[] {
     const layout = this.getDiffLayout(fileId, scope);
+    if (layout == null) return [];
+    const selectedTarget = getSelectedLineTarget(this.state, fileId, scope);
+    const key = `${this.diffViewMode}:${this.contextLineNavigation}:${this.diffViewMode === "side-by-side" ? selectedTarget?.side ?? "" : ""}`;
+    const cached = layout.movementTargets.get(key);
+    if (cached != null) return cached;
     const visibleTargets = this.getVisibleLineTargets(fileId, scope);
-    const changedTargets = layout == null
-      ? []
-      : this.diffViewMode === "side-by-side"
+    const changedTargets = this.diffViewMode === "side-by-side"
         ? layout.sideBySideRows.flatMap((row) => row.kind === "gap"
             ? []
             : [row.oldCell, row.newCell]
@@ -2156,14 +2165,16 @@ export class ReviewApp {
               ? [{ side: row.commentSide, line: row.commentLineNumber }]
               : []
           ));
-    const movementTargets = this.contextLineNavigation || changedTargets.length === 0 ? visibleTargets : changedTargets;
-    if (this.diffViewMode !== "side-by-side") return movementTargets;
-
-    const selectedTarget = getSelectedLineTarget(this.state, fileId, scope);
-    const selectedSide = selectedTarget?.side ?? movementTargets[0]?.side;
-    if (selectedSide == null) return movementTargets;
-    const sideTargets = movementTargets.filter((target) => target.side === selectedSide);
-    return sideTargets.length > 0 ? sideTargets : movementTargets;
+    let movementTargets = this.contextLineNavigation || changedTargets.length === 0 ? visibleTargets : changedTargets;
+    if (this.diffViewMode === "side-by-side") {
+      const selectedSide = selectedTarget?.side ?? movementTargets[0]?.side;
+      if (selectedSide != null) {
+        const sideTargets = movementTargets.filter((target) => target.side === selectedSide);
+        if (sideTargets.length > 0) movementTargets = sideTargets;
+      }
+    }
+    layout.movementTargets.set(key, movementTargets);
+    return movementTargets;
   }
 
   private relatedFilterAnchorFile(): ReviewFile | null {
@@ -2771,20 +2782,6 @@ export class ReviewApp {
       fileTarget: "all-lines",
       label: "All lines in current file",
     });
-  }
-
-  private editCurrentLineComment(): void {
-    const file = this.activeFile();
-    if (file == null) return;
-    const target = getSelectedLineTarget(this.state, file.id, this.state.activeScope);
-    if (target == null) return;
-    const existing = getLineComment(this.state, file.id, this.state.activeScope, target.side, target.line);
-    if (existing == null) {
-      this.setMessage("No line comment on selected line.");
-      this.requestRender();
-      return;
-    }
-    this.editLineComment();
   }
 
   private deleteCurrentLineComment(): void {
@@ -3839,22 +3836,72 @@ export class ReviewApp {
     this.requestRender();
   }
 
-  private handleMouseWheel(data: string): boolean {
-    const event = parseMouseWheelInput(data);
-    if (event == null) return false;
+  // Structural input keeps compatibility with Pi versions predating normalized mouse events.
+  handleMouse(event: {
+    type: string;
+    button?: string;
+    x: number;
+    y: number;
+    screenX?: number;
+    screenY?: number;
+    wheelDelta?: number;
+  }): { handled: true } | undefined {
+    const col = (event.screenX ?? event.x) + 1;
+    const row = (event.screenY ?? event.y) + 1;
+    if (event.type === "wheel") {
+      this.scrollMousePane(col, row, event.wheelDelta ?? 0);
+      return { handled: true };
+    }
+    if (event.type === "press" && event.button === "left" && this.selectNavigatorAtMouse(col, row)) {
+      return { handled: true };
+    }
+    return undefined;
+  }
 
-    const pane = this.getPaneAtMousePosition(event.col, event.row);
+  private handleMouseInput(data: string): boolean {
+    const wheel = parseMouseWheelInput(data);
+    if (wheel != null) return this.scrollMousePane(wheel.col, wheel.row, wheel.direction === "down" ? 1 : -1);
+    const mouse = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+    if (mouse == null) return false;
+    if (mouse[1] === "0" && mouse[4] === "M") {
+      this.selectNavigatorAtMouse(Number(mouse[2]), Number(mouse[3]));
+    }
+    return true;
+  }
+
+  private mouseNavigationBlocked(): boolean {
+    return this.editTarget != null || this.reanchorTarget != null
+      || this.helpMode || this.confirmCancel || this.searchMode || this.shortcutMode;
+  }
+
+  private selectNavigatorAtMouse(col: number, row: number): boolean {
+    if (this.mouseNavigationBlocked() || this.getPaneAtMousePosition(col, row) !== "navigator") return false;
+    const bounds = this.mousePaneLayout?.navigator;
+    if (bounds == null || col - 1 <= bounds.left || col - 1 >= bounds.right || row - 1 >= bounds.bottom) return false;
+    const fileId = this.navigatorFileRows.get(row - 1 - bounds.top);
+    if (fileId == null) return false;
+    this.diffWheelScrolling = false;
+    this.state = setFocus(setActiveFileId(this.state, this.files, fileId), "navigator");
+    void this.ensureActiveEntry();
+    this.requestRender();
+    return true;
+  }
+
+  private scrollMousePane(col: number, row: number, delta: number): boolean {
+    if (delta === 0 || this.mouseNavigationBlocked()) return true;
+    const pane = this.getPaneAtMousePosition(col, row);
     if (pane == null) return true;
-
-    const delta = event.direction === "down" ? 1 : -1;
     if (pane === "navigator") {
+      this.diffWheelScrolling = false;
       this.state = setFocus(this.state, "navigator");
       this.moveNavigatorSelection(delta);
       return true;
     }
     if (pane === "diff") {
       this.state = setFocus(this.state, "diff");
-      this.moveDiffSelection(delta);
+      this.diffWheelScrolling = true;
+      this.diffScroll = Math.max(0, Math.min(this.diffMaxScroll, this.diffScroll + delta));
+      this.requestRender();
       return true;
     }
     if (pane === "comments") {
@@ -3959,7 +4006,8 @@ export class ReviewApp {
       this.handleReanchorInput(data);
       return;
     }
-    if (this.editTarget == null && this.handleMouseWheel(data)) return;
+    if (this.handleMouseInput(data)) return;
+    this.diffWheelScrolling = false;
 
     if (this.editTarget != null) {
       if (matchesKey(data, Key.ctrl("c"))) {
@@ -4262,7 +4310,6 @@ export class ReviewApp {
     }
 
     if (this.state.focus === "comments") {
-      const items = getCommentPanelItems(this.state, this.state.activeFileId, this.state.activeScope, this.commentsGlobal);
       if (matchesKey(data, Key.down) || data === "j") {
         this.moveCommentSelection(1);
         return;
@@ -4334,6 +4381,7 @@ export class ReviewApp {
   }
 
   private renderNavigator(width: number, height: number): string[] {
+    this.navigatorFileRows.clear();
     const files = this.getNavigatorFiles();
     const lines: string[] = [];
     const relatedAnchor = this.relatedFilterAnchorFile();
@@ -4381,6 +4429,7 @@ export class ReviewApp {
         continue;
       }
       const { file, group } = entry;
+      this.navigatorFileRows.set(lines.length + 1, file.id);
       const active = file.id === this.state.activeFileId;
       const prefix = active ? this.theme.fg("accent", "›") : " ";
       const status = this.theme.fg(active ? "accent" : "muted", getStatusLabel(file, this.state.activeScope));
@@ -4409,7 +4458,7 @@ export class ReviewApp {
     return renderBox("Navigator", width, height, this.theme, lines, this.state.focus === "navigator");
   }
 
-  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>): string[] {
+  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false): string[] {
     if (cell == null) return [" ".repeat(Math.max(1, width))];
 
     const lineComment = lineComments.get(`${cell.side}:${cell.lineNumber}`);
@@ -4424,7 +4473,9 @@ export class ReviewApp {
     const highlightedCode = this.getCachedHighlightedCode(cell.tone, cell.text, language);
     const contentText = `${gutterLine} ${gutterSign} ${commentIndicator} ${highlightedCode}`;
 
-    return wrapAnsiText(contentText, Math.max(1, width), this.state.wrapLines).map((line) => {
+    const wrapped = wrapAnsiText(contentText, Math.max(1, width), this.state.wrapLines);
+    if (measureOnly) return wrapped;
+    return wrapped.map((line) => {
       const paddedLine = padLine(line, Math.max(1, width));
       if (current) return this.theme.bg("selectedBg", this.theme.fg("accent", paddedLine));
       if (selected) return this.theme.bg("selectedBg", paddedLine);
@@ -4446,10 +4497,10 @@ export class ReviewApp {
     const heightKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}`;
     let rowHeights = layout?.sideBySideRowHeights.get(heightKey);
     if (rowHeights == null) {
-      rowHeights = [1, ...rows.map((row) => {
+      rowHeights = !this.state.wrapLines ? new Array<number>(rows.length + 1).fill(1) : [1, ...rows.map((row) => {
         if (row.kind === "gap") return 1;
-        const oldLines = this.renderSideBySideCellLines(row.oldCell, oldWidth, language, false, false, false, lineComments);
-        const newLines = this.renderSideBySideCellLines(row.newCell, newWidth, language, false, false, false, lineComments);
+        const oldLines = this.renderSideBySideCellLines(row.oldCell, oldWidth, language, false, false, false, lineComments, true);
+        const newLines = this.renderSideBySideCellLines(row.newCell, newWidth, language, false, false, false, lineComments, true);
         return Math.max(oldLines.length, newLines.length);
       })];
       layout?.sideBySideRowHeights.set(heightKey, rowHeights);
@@ -4460,13 +4511,15 @@ export class ReviewApp {
       layout?.sideBySideRowOffsets.set(heightKey, rowOffsets);
     }
 
+    this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - viewportHeight);
+    if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
     const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const selectedRowIndex = selectedTarget == null
       ? -1
       : layout?.sideBySideTargetRowIndexes.get(`${selectedTarget.side}:${selectedTarget.line}`) ?? -1;
     let selectedIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 1] ?? 0;
     let selectedEndIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 2] ?? selectedIndex + 1;
-    if (selectedRowIndex >= 0) {
+    if (selectedRowIndex >= 0 && !this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex);
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
@@ -4604,7 +4657,10 @@ export class ReviewApp {
         : "";
     lines.push(this.theme.fg("muted", getScopeDisplayPath(file, this.state.activeScope)));
     lines.push(this.theme.fg("dim", `${formatScopeLabel(this.state.activeScope)} • view ${formatDiffViewModeLabel(this.diffViewMode)} • wrap ${this.state.wrapLines ? "on" : "off"}${this.state.activeScope === "all-files" ? "" : ` • unchanged ${this.state.hideUnchanged ? "hidden" : "shown"}`}${diffSearchLabel}`));
-    lines.push(buildDiffActionHintLine(this.theme, width));
+    if (this.diffActionHintCache?.width !== width) {
+      this.diffActionHintCache = { width, line: buildDiffActionHintLine(this.theme, width) };
+    }
+    lines.push(this.diffActionHintCache.line);
 
     const submodule = getSubmoduleInfo(file, this.state.activeScope);
     if (submodule != null) {
@@ -4663,7 +4719,8 @@ export class ReviewApp {
       const heightKey = `${width}:${wrapFlag}`;
       let rowHeights = layout.unifiedRowHeights.get(heightKey);
       if (rowHeights == null) {
-        rowHeights = displayRows.map((row) => this.buildUnifiedRowLines(row, width, language, false, false, false, undefined).length);
+        rowHeights = !this.state.wrapLines ? new Array<number>(displayRows.length).fill(1)
+          : displayRows.map((row) => this.buildUnifiedRowLines(row, width, language, false, false, false, undefined, true).length);
         layout.unifiedRowHeights.set(heightKey, rowHeights);
       }
       let rowOffsets = layout.unifiedRowOffsets.get(heightKey);
@@ -4671,6 +4728,8 @@ export class ReviewApp {
         rowOffsets = getRowOffsets(rowHeights);
         layout.unifiedRowOffsets.set(heightKey, rowOffsets);
       }
+      this.diffMaxScroll = Math.max(0, rowOffsets[rowOffsets.length - 1]! - maxBody);
+      if (this.diffWheelScrolling) this.diffScroll = Math.min(this.diffScroll, this.diffMaxScroll);
       const initialRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       const selectedRowIndex = selectedTarget == null
         ? -1
@@ -4678,7 +4737,7 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
-        this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       renderedStartOffset = virtualRange.startOffset;
@@ -4739,7 +4798,7 @@ export class ReviewApp {
       const anchorTop = Math.max(0, editorStart - 1);
       if (editorEnd >= this.diffScroll + maxBody) this.diffScroll = editorEnd - maxBody + 1;
       if (anchorTop < this.diffScroll && editorEnd - anchorTop < maxBody) this.diffScroll = anchorTop;
-    } else {
+    } else if (!this.diffWheelScrolling) {
       this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
     }
     this.diffScroll = Math.max(0, this.diffScroll);
@@ -4845,7 +4904,7 @@ export class ReviewApp {
       const location = reply.path == null || reply.path.length === 0
         ? "Pull request"
         : `${sanitizeTerminalText(reply.path)}${reply.line == null ? "" : `:${reply.line}`}`;
-      const resolution = reply.resolved ? "resolved" : "unresolved";
+      const resolution = reply.resolved == null ? "resolution unknown" : reply.resolved ? "resolved" : "unresolved";
       pushWrappedText(block, this.theme, `${location} • ${resolution}`, contentWidth, "dim", "   ");
       block.push(...buildCommentPanelTextLines(this.theme, width, reply.body, "muted", "   ", 4));
 

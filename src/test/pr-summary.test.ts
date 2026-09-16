@@ -119,7 +119,39 @@ afterEach(() => {
 });
 
 describe("remote pull request summary source", () => {
-  it("uses configured details and capability-gated thread operations", async () => {
+  it.each([
+    [{ isDraft: true }, "Status:\nblocked - draft PR"],
+    [{ mergeStateStatus: "DIRTY" }, "Status:\nblocked - merge state dirty"],
+    [{ reviewDecision: "APPROVED" }, "Status:\napproved - review decision approved"],
+    [{ url: "https://github.com/example/renamed/pull/12" }, "URL:\nhttps://github.com/example/renamed/pull/12"],
+    [{ statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }, "Validation:\nFailing: build"],
+    [{ statusCheckRollup: [{ name: "unit", status: "IN_PROGRESS" }] }, "Validation:\nPending: unit"],
+    [{ comments: [
+      { author: { login: "bob" }, body: "First comment", createdAt: "2026-06-25T10:00:00Z" },
+      { author: { login: "carol" }, body: "Latest comment", createdAt: "2026-06-25T11:00:00Z" },
+    ] }, "Open comments:\ncarol: Latest comment; bob: First comment"],
+    [{ reviews: [{ author: { login: "bob" }, state: "CHANGES_REQUESTED", body: "Keep compatibility" }] }, "Open comments:\nbob changes requested: Keep compatibility"],
+  ])("loads built-in GitHub context without provider configuration: %j", async (details, expected) => {
+    rmSync(settingsPath);
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "gh" && args[0] === "pr") {
+        expect(args.slice(0, 6)).toEqual(["pr", "view", "12", "--repo", "example/widgets", "--json"]);
+        const requestedFields = args[6]!.split(",");
+        const payload = Object.fromEntries(Object.entries(details).filter(([field]) => requestedFields.includes(field)));
+        return { code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false };
+      }
+      if (command === "gh" && args[1] === "graphql") {
+        return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }), stderr: "", killed: false };
+      }
+      return { code: 1, stdout: "", stderr: "model unavailable", killed: false };
+    });
+
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target("github"))!.load();
+
+    expect(summary).toContain(expected);
+  });
+
+  it.each([false, undefined])("uses configured details and reported thread resolution: %s", async (resolved) => {
     const exec = vi.fn(async (command: string, args: string[]) => {
       if (command === "cli-one" && args[0] === "change") {
         return {
@@ -130,8 +162,8 @@ describe("remote pull request summary source", () => {
             mergeState: "clean",
             decision: "APPROVED",
             conversation: [{ author: { name: "bob" }, text: "Looks good.", created: "2026-06-25T10:00:00Z" }],
-            decisions: [{ author: { name: "bob" }, state: "APPROVED", submitted: "2026-06-25T10:01:00Z" }],
-            checks: [],
+            decisions: [{ author: { name: "bob" }, state: "APPROVED", text: "Passed verification.", submitted: "2026-06-25T10:01:00Z" }],
+            checks: [{ name: "unit", status: "COMPLETED", result: "SUCCESS" }],
           }),
           stderr: "",
           killed: false,
@@ -147,11 +179,12 @@ describe("remote pull request summary source", () => {
                 pullRequest: {
                   reviewThreads: {
                     nodes: [{
-                      isResolved: false,
+                      id: "thread-1",
+                      isResolved: resolved,
                       isOutdated: false,
                       path: "src/app.ts",
                       line: 42,
-                      comments: { nodes: [{ author: { login: "carol" }, body: "Can compatibility remain?", createdAt: "2026-06-25T10:02:00Z" }] },
+                      comments: { nodes: [{ id: "comment-1", author: { login: "carol" }, body: "Can compatibility remain?", createdAt: "2026-06-25T10:02:00Z" }] },
                     }],
                   },
                 },
@@ -184,7 +217,12 @@ describe("remote pull request summary source", () => {
     expect(summary).toContain("URL:\nhttps://primary.code.example/example/widgets/change/12");
     expect(summary).toContain("Author:\nalice");
     expect(summary).toContain("Diff:\n2 files touched | +3/-9");
-    expect(summary).toContain("Status:\npending - open review comments");
+    expect(summary).toContain(`Status:\npending - ${resolved === false ? "open review comments" : "review resolution unknown"}`);
+    expect(summary).toContain("Can compatibility remain?");
+    expect(summary).toContain("Validation:\nNo failing checks found.");
+    const prompt = exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1);
+    expect(prompt).toContain("Looks good.");
+    expect(prompt).toContain("Passed verification.");
     expect(summary).not.toContain("\\x0a");
     expect(exec).toHaveBeenCalledWith("cli-one", ["change", "show", "example/widgets", "12"], expect.objectContaining({ cwd: "/repo" }));
     expect(exec).toHaveBeenCalledWith("pi", expect.arrayContaining(["--model", "model-vendor/model-one"]), expect.objectContaining({ cwd: "/repo" }));
@@ -241,18 +279,106 @@ describe("remote pull request summary source", () => {
       checks: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
     };
 
-    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, { ...target(), handoff: handoff as never })!.load();
+    const update = vi.fn();
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, { ...target(), handoff: handoff as never })!.load(update);
 
     expect(exec).not.toHaveBeenCalled();
     expect(summary).toContain("Title:\nRemove old checkout path");
     expect(summary).toContain("Diff:\n2 files touched | +3/-9");
-    expect(summary).toContain("Problem:\nRemove the old path.");
+    expect(summary).toContain("Problem:\nIntent Remove the old path. Tested Unit tests pass.");
+    expect(summary).toContain("Validation:\nFailing: build");
+    expect(update.mock.lastCall?.[0]).toContain(`${summary}\n\nGenerated explanation (optional):\nTitle:\nStale title`);
   });
 
-  it("fails closed when the configured provider response is malformed", async () => {
-    const exec = vi.fn(async () => ({ code: 0, stdout: "not-json", stderr: "", killed: false }));
+  it("returns authoritative facts before optional model enrichment", async () => {
+    let finish!: (text: string) => void;
+    const model = new Promise<string>((resolve) => { finish = resolve; });
+    const exec = vi.fn(async (command: string) => ({
+      code: 0, stdout: command === "pi" ? await model : "{}", stderr: "", killed: false,
+    }));
+    const update = vi.fn();
     const source = createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!;
+    let facts: string | undefined;
+    const first = source.load(update).then((text) => { facts = text; });
+    try {
+      await vi.waitFor(() => expect(facts).toContain("Head:\nfeature @ abc123"));
+      expect(facts).toContain("Title:\nRemove old checkout path");
+      expect(facts).toContain("Validation:\nNo failing checks found.");
+      expect(update).not.toHaveBeenCalled();
+      finish("Status: approved - invented\nAn optional explanation.");
+      await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      expect(update.mock.lastCall?.[0]).toBe(`${facts}\n\nGenerated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.`);
+    } finally {
+      finish("");
+      await first;
+    }
+  });
 
-    await expect(source.load()).rejects.toThrow("Malformed Primary code host response for PR #12.");
+  it.each([0, 1])("keeps target facts when details fail with exit %s", async (code) => {
+    const exec = vi.fn(async () => ({ code, stdout: "not-json", stderr: "unavailable", killed: false }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Title:\nRemove old checkout path");
+    expect(summary).toContain("URL:\nhttps://primary.code.example/example/widgets/change/12");
+    expect(summary).toContain("Head:\nfeature @ abc123");
+    expect(summary).toMatch(/Status:\npending - .*unavailable/);
+    expect(summary).toContain("Check details unavailable");
+    expect(summary).toMatch(/Open comments:\nUnavailable: /);
+  });
+
+  it("retains known checks and comments when reviews and threads fail", async () => {
+    const exec = vi.fn(async (command: string, args: string[]) => args[0] === "change"
+      ? { code: 0, stdout: JSON.stringify({ checks: [{ name: "unit", result: "FAILURE" }],
+        conversation: [{ author: { name: "bob" }, text: "Known comment" }], decisions: {} }), stderr: "", killed: false }
+      : { code: 1, stdout: "", stderr: "unavailable", killed: false });
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Status:\nblocked - 1 failing check");
+    expect(summary).toContain("Validation:\nFailing: unit");
+    expect(summary).toContain("bob: Known comment; Unavailable:");
+    expect(summary).toContain("reviews");
+    expect(summary).toContain("review threads");
+    expect(exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1)).toContain("Known comment");
+  });
+
+  it.each(["conversation", "decisions", "threads"] as const)("preserves separate sections when %s fails", async (failed) => {
+    const labels = { conversation: "PR comments", decisions: "reviews", threads: "review threads" };
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      const operation = args[0]!;
+      const payload = operation === "change" ? { approved: true }
+        : [{ author: { name: "bob" }, text: `Known ${operation}`, resolved: true }];
+      return command === "pi" || operation === failed
+        ? { code: 1, stdout: "", stderr: "denied", killed: false }
+        : { code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false };
+    });
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target("secondary"))!.load();
+    expect(summary).toContain(`Unavailable: ${labels[failed]}`);
+    expect(summary).toMatch(/Status:\npending - .*unavailable/);
+    const prompt = exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1);
+    for (const section of ["conversation", "decisions"].filter((name) => name !== failed)) expect(prompt).toContain(`Known ${section}`);
+  });
+
+  it("labels malformed checks unavailable while retaining comments", async () => {
+    const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0, stderr: "", killed: false,
+      stdout: JSON.stringify(args[0] === "query" ? { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }
+        : { decision: "APPROVED", checks: {}, conversation: [{ author: { name: "bob" }, text: "Known comment" }] }),
+    }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Status:\npending - checks unavailable");
+    expect(summary).toContain("Check details unavailable");
+    expect(summary).toContain("Open comments:\nbob: Known comment");
+  });
+
+  it.each(["outer", "missing comments", "non-array comments"])("labels a GraphQL failure unavailable without a REST fallback: %s", async (failure) => {
+    const config = settings();
+    const { reviewComments, ...operations } = config.providers.primary.operations;
+    writeFileSync(settingsPath, JSON.stringify({ ...config, providers: { primary: { ...config.providers.primary, operations } } }));
+    const payload = failure === "outer" ? { errors: [{ message: "denied" }] }
+      : { data: { repository: { pullRequest: { reviewThreads: { nodes: [{
+        isResolved: false, comments: failure === "missing comments" ? undefined : { nodes: {} },
+      }] } } } } };
+    const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0,
+      stdout: JSON.stringify(args[0] === "query" ? payload : { decision: "APPROVED" }), stderr: "", killed: false }));
+    const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
+    expect(summary).toContain("Open comments:\nUnavailable: review threads");
+    expect(summary).toMatch(/Status:\npending - .*unavailable/);
   });
 });

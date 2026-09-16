@@ -10,6 +10,7 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
+import { parseGraphqlReplyThreads } from "./review-replies.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -29,7 +30,7 @@ interface PullRequestComment {
 interface PullRequestThread {
   path?: string;
   line?: number | null;
-  isResolved?: boolean;
+  isResolved: boolean | null;
   isOutdated?: boolean;
   comments?: PullRequestComment[];
 }
@@ -42,6 +43,7 @@ interface PullRequestCheck {
 }
 
 interface PullRequestDetails {
+  unavailable?: string[];
   url?: string;
   isDraft?: boolean;
   checksUnavailable?: boolean;
@@ -60,7 +62,7 @@ interface StatusSummary {
   reason: string;
 }
 
-const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
+const SUMMARY_LABELS = new Set(["Title", "URL", "Author", "Head", "Diff", "Status", "Problem", "Changes", "Validation", "Open comments", "Stack"]);
 
 const QUERY_OPEN_TOKEN = "__CODE_DIFF_QUERY_OPEN__";
 const QUERY_CLOSE_TOKEN = "__CODE_DIFF_QUERY_CLOSE__";
@@ -71,12 +73,15 @@ query PullRequestOpenThreads($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       reviewThreads(first: 50) {
         nodes {
+          id
           isResolved
           isOutdated
           path
           line
           comments(first: 20) {
             nodes {
+              id
+              databaseId
               author { login }
               body
               createdAt
@@ -170,7 +175,8 @@ function formatThreadLocation(thread: PullRequestThread, comment?: PullRequestCo
 function formatThreadSummary(thread: PullRequestThread, maxLength: number): string {
   const comment = latestThreadComment(thread);
   const author = comment?.author?.login ?? "unknown";
-  return `${author} at ${formatThreadLocation(thread, comment)}: ${compact(comment?.body, maxLength)}`;
+  const resolution = thread.isResolved == null ? " (resolution unknown)" : "";
+  return `${author} at ${formatThreadLocation(thread, comment)}${resolution}: ${compact(comment?.body, maxLength)}`;
 }
 
 function hasChangesRequested(details: PullRequestDetails): boolean {
@@ -209,12 +215,15 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
   const failed = failingChecks(details);
   if (failed.length > 0) return { status: "blocked", reason: `${failed.length} failing check${failed.length === 1 ? "" : "s"}` };
 
-  if (openReviewThreads(details, 1).length > 0) return { status: "pending", reason: "open review comments" };
+  const threads = openReviewThreads(details, Number.POSITIVE_INFINITY);
+  if (threads.some((thread) => thread.isResolved == null)) return { status: "pending", reason: "review resolution unknown" };
+  if (threads.length > 0) return { status: "pending", reason: "open review comments" };
   if (hasStackBlocker(details)) return { status: "blocked", reason: "stack or merge blocker called out in comments" };
 
   const mergeState = String(details.mergeStateStatus ?? "").toUpperCase();
   if (["BLOCKED", "DIRTY", "UNKNOWN", "UNSTABLE"].includes(mergeState)) return { status: "blocked", reason: `merge state ${mergeState.toLowerCase()}` };
 
+  if (details.unavailable?.length) return { status: "pending", reason: `${details.unavailable.join(", ")} unavailable` };
   if (String(details.reviewDecision ?? "").toUpperCase() === "APPROVED") return { status: "approved", reason: "review decision approved" };
 
   const pending = pendingChecks(details);
@@ -262,35 +271,10 @@ function formatReadableSummary(value: string): string {
   return readable.join("\n").trim();
 }
 
-function replaceSummaryField(summary: string, label: string, value: string): string {
-  const field = `${label}:`;
-  const cleanValue = stripMarkup(value);
-  const lines = summary.split("\n");
-  const index = lines.findIndex((line) => line.trim() === field);
-  if (index < 0) return `${field}\n${cleanValue}\n\n${summary}`.trim();
-
-  let end = index + 1;
-  while (end < lines.length && lines[end]!.trim().length === 0) end += 1;
-  if (end < lines.length) lines[end] = cleanValue;
-  else lines.push(cleanValue);
-  return lines.join("\n").trim();
-}
-
 function formatDiffStats(target: RemoteReviewTarget): string {
   const pr = target.pullRequest!;
   const fileLabel = pr.changedFiles === 1 ? "file" : "files";
   return `${pr.changedFiles} ${fileLabel} touched | +${pr.additions}/-${pr.deletions}`;
-}
-
-function enforceIdentityFields(summary: string, target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
-  const pr = target.pullRequest!;
-  const url = details.url ?? pullRequestUrl(target, provider);
-  return [
-    ["Diff", formatDiffStats(target)],
-    ["Author", pr.authorLogin],
-    ["URL", url],
-    ["Title", pr.title],
-  ].reduce((current, [label, value]) => replaceSummaryField(current, label, value), summary);
 }
 
 function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails, provider: ProviderSettings): string {
@@ -302,17 +286,21 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
   const comments = latestSubstantiveItems(details.comments, 3)
     .map((comment) => `${comment.author?.login ?? "unknown"}: ${compact(comment.body, 160)}`);
   const bodySignal = extractBodySignal(pr.body);
+  const missing = (details.unavailable ?? []).filter((section) => !["PR details", "checks"].includes(section));
+  const conversation = threads.length ? threads.join("; ") : reviews.length ? reviews.join("; ") : comments.join("; ");
+  const coverage = missing.length ? `Unavailable: ${missing.join(", ")}` : "";
 
   return [
     `Title: ${pr.title}`,
     `URL: ${details.url ?? pullRequestUrl(target, provider)}`,
     `Author: ${pr.authorLogin}`,
+    `Head: ${pr.headRefName} @ ${pr.headRefOid}`,
     `Diff: ${formatDiffStats(target)}`,
     `Status: ${status.status} - ${status.reason}`,
     `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
-    "Changes: Not summarized by the model; read the diff for implementation details.",
+    "Changes: Read the diff for implementation details.",
     `Validation: ${formatChecks(details, provider)}`,
-    `Open comments: ${threads.length > 0 ? threads.join("; ") : reviews.length > 0 ? reviews.join("; ") : comments.length > 0 ? comments.join("; ") : "None found."}`,
+    `Open comments: ${[conversation, coverage].filter(Boolean).join("; ") || "None found."}`,
     pr.stackParent != null ? `Stack: parent #${pr.stackParent.number} ${pr.stackParent.title}` : undefined,
   ].filter((line): line is string => line != null).join("\n");
 }
@@ -346,13 +334,13 @@ function formatSummaryInput(target: RemoteReviewTarget, details: PullRequestDeta
     compact(pr.body, 6000) || "No body.",
     "",
     "Open review comments:",
-    openThreads || "No unresolved review threads found.",
+    openThreads || (details.unavailable?.includes("review threads") ? "Review threads unavailable." : "No unresolved review threads found."),
     "",
     "Reviews:",
-    reviews || "No review bodies found.",
+    reviews || (details.unavailable?.includes("reviews") ? "Reviews unavailable." : "No review bodies found."),
     "",
     "PR conversation comments:",
-    comments || "No PR conversation comments found.",
+    comments || (details.unavailable?.includes("PR comments") ? "PR comments unavailable." : "No PR conversation comments found."),
   ].join("\n");
 }
 
@@ -442,23 +430,28 @@ function parseGraphqlReviewThreads(value: unknown): PullRequestThread[] {
         pullRequest?: {
           reviewThreads?: {
             nodes?: Array<{
-              isResolved?: boolean;
-              isOutdated?: boolean;
-              path?: string;
-              line?: number | null;
-              comments?: { nodes?: PullRequestComment[] };
+              comments?: { nodes?: unknown[] };
             }>;
           };
         };
       };
     };
   };
-  return (parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []).map((thread) => ({
-    isResolved: thread.isResolved,
-    isOutdated: thread.isOutdated,
+  const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(nodes)) throw new Error("Review threads unavailable.");
+  for (const thread of nodes) {
+    if (!Array.isArray(thread?.comments?.nodes)) throw new Error("Review threads unavailable.");
+  }
+  const threads = parseGraphqlReplyThreads(value);
+  if (threads.length !== nodes.length || threads.some((thread, index) => thread.comments.length !== nodes[index]!.comments!.nodes!.length)) {
+    throw new Error("Review threads unavailable.");
+  }
+  return threads.map((thread) => ({
+    isResolved: thread.resolved,
+    isOutdated: thread.outdated,
     path: thread.path,
     line: thread.line,
-    comments: thread.comments?.nodes ?? [],
+    comments: thread.comments.map((comment) => ({ ...comment, author: { login: comment.author } })),
   }));
 }
 
@@ -480,8 +473,8 @@ async function fetchOpenReviewThreads(
         query: encodeProviderQuery(OPEN_REVIEW_THREADS_QUERY.replace(/\s+/g, " ").trim()),
       }, `PR #${number} review threads`);
       return parseGraphqlReviewThreads(payload);
-    } catch {
-      if (provider.operations.reviewComments == null) return [];
+    } catch (error) {
+      if (provider.operations.reviewComments == null) throw error;
     }
   }
 
@@ -492,7 +485,7 @@ async function fetchOpenReviewThreads(
     return {
       path: comment.path,
       line: comment.line,
-      isResolved: providerBoolean(provider, "commentResolved", row) === true,
+      isResolved: providerBoolean(provider, "commentResolved", row) ?? null,
       isOutdated: providerBoolean(provider, "commentOutdated", row) === true,
       comments: [comment],
     };
@@ -506,18 +499,36 @@ async function fetchPullRequestDetails(
 ): Promise<PullRequestDetails> {
   const pr = target.pullRequest!;
   const repo = target.repo ?? pr.repo;
-  if (repo == null) throw new Error(`Could not fetch ${provider.label} PR #${pr.number} context without a repository.`);
-
-  const detailsPayload = await fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`);
+  if (repo == null) return {
+    unavailable: ["PR details", "checks", "PR comments", "reviews", "review threads"],
+    checksUnavailable: true,
+  };
+  const unavailable: string[] = [];
+  async function readSection<T>(name: string, read: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await read();
+    } catch {
+      unavailable.push(name);
+      return fallback;
+    }
+  }
+  const detailsPayload = await readSection("PR details", () => fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`), undefined);
   const separateContext = getProviderCapability(provider, "separatePullRequestContext");
-  const [commentsPayload, reviewsPayload, openReviewThreads] = await Promise.all([
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestComments", { repo, number: pr.number }, `PR #${pr.number} comments`)
-      : Promise.resolve(detailsPayload),
-    separateContext
-      ? fetchProviderOperation(pi, target, provider, "pullRequestReviews", { repo, number: pr.number }, `PR #${pr.number} reviews`)
-      : Promise.resolve(detailsPayload),
-    fetchOpenReviewThreads(pi, target, provider, repo, pr.number),
+  const readComments = async (field: string) => {
+    const payload = separateContext
+      ? await fetchProviderOperation(pi, target, provider, field, { repo, number: pr.number }, `PR #${pr.number} ${field}`)
+      : detailsPayload;
+    if (payload == null) throw new Error("Context section unavailable.");
+    return providerRows(provider, field, payload, separateContext).map((row) => providerComment(provider, row));
+  };
+  const [comments, reviews, openReviewThreads, checks] = await Promise.all([
+    readSection("PR comments", () => readComments("pullRequestComments"), []),
+    readSection("reviews", () => readComments("pullRequestReviews"), []),
+    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), []),
+    readSection("checks", async () => {
+      if (detailsPayload == null) throw new Error("Check details unavailable.");
+      return providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
+    }, []),
   ]);
 
   const directDecision = providerString(provider, "pullRequestReviewDecision", detailsPayload);
@@ -525,18 +536,18 @@ async function fetchPullRequestDetails(
     ?? (providerBoolean(provider, "pullRequestChangesRequested", detailsPayload) === true
       ? "CHANGES_REQUESTED"
       : providerBoolean(provider, "pullRequestApproved", detailsPayload) === true ? "APPROVED" : undefined);
-  const checks = providerRows(provider, "pullRequestChecks", detailsPayload, false).map((row) => providerCheck(provider, row));
 
   return {
+    unavailable: unavailable.sort(),
     url: providerString(provider, "pullRequestUrl", detailsPayload) ?? pullRequestUrl(target, provider),
     isDraft: providerBoolean(provider, "pullRequestDraft", detailsPayload),
     mergeStateStatus: providerString(provider, "pullRequestMergeState", detailsPayload)?.toUpperCase(),
     reviewDecision,
-    comments: providerRows(provider, "pullRequestComments", commentsPayload, separateContext).map((row) => providerComment(provider, row)),
-    reviews: providerRows(provider, "pullRequestReviews", reviewsPayload, separateContext).map((row) => providerComment(provider, row)),
+    comments,
+    reviews,
     openReviewThreads,
     statusCheckRollup: checks,
-    checksUnavailable: !getProviderCapability(provider, "pullRequestChecks"),
+    checksUnavailable: !getProviderCapability(provider, "pullRequestChecks") || unavailable.includes("checks"),
     createdAt: providerString(provider, "pullRequestCreatedAt", detailsPayload),
     updatedAt: providerString(provider, "pullRequestUpdatedAt", detailsPayload),
   };
@@ -544,20 +555,12 @@ async function fetchPullRequestDetails(
 
 function buildAgentPrompt(summaryInput: string): string {
   return [
-    "Summarize this pull request for a reviewer already looking at the diff.",
+    "Write an optional reviewer-focused explanation for a pull request whose facts are shown separately.",
     "Output plain text only, no markdown table, no preamble, no emoji, ASCII only.",
-    "Do not mention these instructions or use phrases like 'what matters most'.",
-    "The reviewer needs only the important context, focused on the problem this PR solves.",
-    "Keep implementation details short unless they explain reviewer risk or the problem.",
-    "Required labels: Title, URL, Author, Diff, Status, Problem, Changes, Validation, Open comments. Add Stack only if relevant.",
-    "Title, URL, Author, and Diff must exactly match the input values.",
-    "Problem must explain the user, merchant, developer, or system pain being solved in one or two sentences.",
-    "Open comments must summarize unresolved review threads only. If none exist, write None found.",
-    "Use PR comments and reviews only when they affect review readiness, validation, blockers, or unresolved questions.",
-    "Put each label on its own line with the value on the following line.",
-    "Status must be exactly one of pending, blocked, approved, followed by a short reason using an ASCII hyphen separator.",
-    "Use readable section blocks separated by blank lines, not one dense paragraph.",
-    "Limit the whole response to roughly 180 words.",
+    "Do not restate title, URL, author, diff counts, status, checks, or other factual fields.",
+    "Focus on the problem this PR solves, the important implementation choice, and reviewer risk.",
+    "Use PR comments and reviews only when they affect review readiness, blockers, or unresolved questions.",
+    "Limit the response to roughly 120 words.",
     "",
     summaryInput,
   ].join("\n");
@@ -603,7 +606,7 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
     openReviewThreads: (handoff.threads ?? []).map((thread) => ({
       path: thread.path,
       line: thread.line ?? null,
-      isResolved: thread.resolved === true,
+      isResolved: thread.resolved ?? null,
       isOutdated: thread.outdated === true,
       comments: thread.comments.map((comment) => ({
         author: { login: comment.author },
@@ -619,32 +622,26 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   };
 }
 
-async function loadRemotePullRequestSummary(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  target: RemoteReviewTarget,
-  provider: ProviderSettings,
-): Promise<string> {
-  const supplied = suppliedPullRequestDetails(target, provider);
-  const details = supplied ?? await fetchPullRequestDetails(pi, target, provider);
-  const suppliedSummary = target.handoff?.summary;
-  if (suppliedSummary != null) return enforceIdentityFields(formatReadableSummary(suppliedSummary), target, details, provider);
-  const fallback = fallbackSummary(target, details, provider);
-  try {
-    const generated = await summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
-    return enforceIdentityFields(formatReadableSummary(generated ?? fallback), target, details, provider);
-  } catch {
-    return enforceIdentityFields(formatReadableSummary(fallback), target, details, provider);
-  }
-}
-
 export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined): ReviewContextPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
+  let requestToken = 0;
   return {
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
-    load: () => loadRemotePullRequestSummary(pi, ctx, target, provider),
+    load: async (onUpdate) => {
+      const token = ++requestToken;
+      const details = suppliedPullRequestDetails(target, provider) ?? await fetchPullRequestDetails(pi, target, provider);
+      const facts = formatReadableSummary(fallbackSummary(target, details, provider));
+      const explanation = target.handoff?.summary != null
+        ? Promise.resolve(target.handoff.summary)
+        : summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
+      void explanation.then((text) => {
+        const clean = text == null ? "" : cleanAgentOutput(text);
+        if (token === requestToken && clean.length > 0) onUpdate?.(`${facts}\n\nGenerated explanation (optional):\n${clean}`);
+      }).catch(() => undefined);
+      return facts;
+    },
     url: pullRequestUrl(target, provider),
   };
 }
