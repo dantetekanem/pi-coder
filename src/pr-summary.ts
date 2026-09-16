@@ -393,14 +393,7 @@ async function fetchProviderOperation(
   return parseProviderJson(provider, result.stdout.trim(), label);
 }
 
-async function fetchOpenReviewThreads(
-  pi: ExtensionAPI,
-  target: RemoteReviewTarget,
-  provider: ProviderSettings,
-  repo: string,
-  number: string,
-): Promise<{ threads: PullRequestThread[]; coverage?: ReviewThreadCoverage; read?: ReviewThreadRead }> {
-  const read = await fetchReviewThreads(pi, target, provider, repo, number);
+function projectReviewThreads(read: ReviewThreadRead, provider: ProviderSettings): Partial<PullRequestDetails> {
   const threads = read.contextRows == null
     ? read.threads.map((thread) => ({
       isResolved: thread.resolved,
@@ -419,7 +412,7 @@ async function fetchOpenReviewThreads(
         comments: [comment],
       };
     });
-  return { threads, coverage: read.coverage, read };
+  return { openReviewThreads: threads, threadCoverage: read.coverage, threadRead: read };
 }
 
 async function fetchPullRequestDetails(
@@ -436,7 +429,8 @@ async function fetchPullRequestDetails(
     unavailable: ["PR details", "checks", "PR comments", "reviews", "review threads"],
     checksUnavailable: true,
   };
-  let unavailable: string[] = [];
+  const continuingThreads = previous?.threadRead?.pagination?.done === false;
+  let unavailable: string[] = continuingThreads ? [...(previous?.unavailable ?? [])] : [];
   const retain = read.retain;
   async function readSection<T>(name: string, read: () => Promise<T>, fallback: T): Promise<T> {
     try {
@@ -448,8 +442,9 @@ async function fetchPullRequestDetails(
       return fallback;
     }
   }
-  const detailsPayload = await readSection("PR details", () => fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`), undefined);
-  const separateContext = getProviderCapability(provider, "separatePullRequestContext");
+  const detailsPayload = continuingThreads ? undefined
+    : await readSection("PR details", () => fetchProviderOperation(pi, target, provider, "pullRequestDetails", { repo, number: pr.number }, `PR #${pr.number}`), undefined);
+  const separateContext = getProviderCapability(provider, "separatePullRequestContext") && !continuingThreads;
   const readComments = async (field: string, embedded = false) => {
     const payload = separateContext && !embedded
       ? await fetchProviderOperation(pi, target, provider, field, { repo, number: pr.number }, `PR #${pr.number} ${field}`)
@@ -457,7 +452,8 @@ async function fetchPullRequestDetails(
     if (payload == null) throw new Error("Context section unavailable.");
     return providerRows(provider, field, payload, separateContext && !embedded).map((row) => providerComment(provider, row));
   };
-  const [embeddedComments, embeddedReviews, checks] = await Promise.all([
+  const [embeddedComments, embeddedReviews, checks] = continuingThreads
+    ? [previous?.comments ?? [], previous?.reviews ?? [], previous?.statusCheckRollup ?? []] : await Promise.all([
     readSection("PR comments", () => readComments("pullRequestComments", true), previous?.comments ?? []),
     readSection("reviews", () => readComments("pullRequestReviews", true), previous?.reviews ?? []),
     readSection("checks", async () => {
@@ -497,9 +493,9 @@ async function fetchPullRequestDetails(
   await Promise.all([
     separateContext && readSection("PR comments", () => readComments("pullRequestComments"), details.comments ?? []).then((comments) => update("PR comments", { comments })),
     separateContext && readSection("reviews", () => readComments("pullRequestReviews"), details.reviews ?? []).then((reviews) => update("reviews", { reviews })),
-    readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number),
-      { threads: previous?.openReviewThreads ?? [], coverage: previous?.threadCoverage, read: previous?.threadRead }).then((threadRead) => update("review threads",
-        { openReviewThreads: threadRead.threads, threadCoverage: threadRead.coverage, threadRead: threadRead.read })),
+    readSection("review threads", () => fetchReviewThreads(pi, target, provider, repo, pr.number,
+      { previous: previous?.threadRead, onPage: (page) => update("review threads", projectReviewThreads(page, provider)) }), previous?.threadRead)
+      .then((page) => update("review threads", page == null ? {} : projectReviewThreads(page, provider))),
   ]);
   return retain(details);
 }
