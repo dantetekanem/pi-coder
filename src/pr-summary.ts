@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewContextPanelSource, ReviewThreadCoverage } from "./types.js";
+import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewThreadCoverage } from "./types.js";
 import { hasHandoffContext } from "./pr-handoff.js";
 import {
   getProviderCapability,
@@ -10,8 +10,8 @@ import {
   type ProviderSettings,
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
-import { fetchReviewThreads } from "./review-replies.js";
-import { createConversationRead } from "./conversation.js";
+import { collectRepliesToSelf, createRemoteReviewRepliesSource, fetchReviewThreads, getSelfLogin, type ReviewThreadRead } from "./review-replies.js";
+import { createConversationRead, createConversationReader } from "./conversation.js";
 
 interface PullRequestAuthor {
   login?: string;
@@ -43,7 +43,8 @@ interface PullRequestCheck {
   conclusion?: string;
 }
 
-interface PullRequestDetails {
+export interface PullRequestDetails {
+  threadRead?: ReviewThreadRead;
   unavailable?: string[];
   pending?: string[];
   url?: string;
@@ -398,7 +399,7 @@ async function fetchOpenReviewThreads(
   provider: ProviderSettings,
   repo: string,
   number: string,
-): Promise<{ threads: PullRequestThread[]; coverage?: ReviewThreadCoverage }> {
+): Promise<{ threads: PullRequestThread[]; coverage?: ReviewThreadCoverage; read?: ReviewThreadRead }> {
   const read = await fetchReviewThreads(pi, target, provider, repo, number);
   const threads = read.contextRows == null
     ? read.threads.map((thread) => ({
@@ -418,7 +419,7 @@ async function fetchOpenReviewThreads(
         comments: [comment],
       };
     });
-  return { threads, coverage: read.coverage };
+  return { threads, coverage: read.coverage, read };
 }
 
 async function fetchPullRequestDetails(
@@ -491,7 +492,7 @@ async function fetchPullRequestDetails(
     readSection("review threads", () => fetchOpenReviewThreads(pi, target, provider, repo, pr.number), { threads: [] }),
   ]);
   return retain({ ...details, pending: undefined, unavailable: [...new Set(unavailable)].sort(), comments, reviews,
-    openReviewThreads: threadRead.threads, threadCoverage: threadRead.coverage });
+    openReviewThreads: threadRead.threads, threadCoverage: threadRead.coverage, threadRead: threadRead.read });
 }
 
 function buildAgentPrompt(summaryInput: string): string {
@@ -563,37 +564,67 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   };
 }
 
-export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined): ReviewContextPanelSource | undefined {
+export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined) {
+  if (target?.pullRequest == null) return {};
+  const provider = providerForTarget(target);
+  const pr = target.pullRequest;
+  const repo = target.repo ?? pr.repo;
+  const reader = createConversationReader(pi, target, async (read, onProgress) => {
+    const [details, selfLogin] = await Promise.all([
+      fetchPullRequestDetails(read, target, provider, (details) => onProgress({ details })),
+      repo == null ? null : getSelfLogin(read.pi, target, provider, repo, pr.number).then(read.retain).then((selfLogin) => {
+        onProgress({ selfLogin });
+        return selfLogin;
+      }).catch(() => null),
+    ]);
+    const replies = details.threadRead != null && selfLogin != null
+      ? collectRepliesToSelf(details.threadRead.threads, selfLogin) : undefined;
+    return { details, selfLogin, replies };
+  }, suppliedPullRequestDetails(target, provider));
+  return { contextPanelSource: createRemotePullRequestSummarySource(pi, ctx, target, reader), repliesSource: createRemoteReviewRepliesSource(pi, ctx, target, reader) };
+}
+
+export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined, reader?: ReturnType<typeof createConversationReader>): ReviewContextPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
   let requestToken = 0;
+  let useHandoff = true;
   return {
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
-    load: async (onUpdate) => {
+    load: async (onUpdate, options) => {
       const token = ++requestToken;
-      const supplied = suppliedPullRequestDetails(target, provider);
-      const read = supplied == null ? createConversationRead(pi) : undefined;
+      const shared = reader?.load(options);
+      if (options?.refresh) useHandoff = false;
+      let metadata: ReviewConversationMetadata | undefined;
+      let supplied = shared == null && useHandoff ? suppliedPullRequestDetails(target, provider) : undefined;
+      const read = shared == null && supplied == null ? createConversationRead(pi) : undefined;
       let known: PullRequestDetails = { checksUnavailable: true, pending: ["PR details", "checks", "PR comments", "reviews", "review threads"] };
       let resolveFacts!: (details: PullRequestDetails) => void;
       const early = new Promise<PullRequestDetails>((resolve) => { resolveFacts = resolve; });
-      const complete = (read == null ? Promise.resolve(supplied!) : fetchPullRequestDetails(read, target, provider, (details) => {
+      void shared?.facts.then((details) => { known = details; resolveFacts(details); });
+      const complete = (shared != null ? shared.snapshot.then((snapshot) => {
+        metadata = snapshot.metadata;
+        supplied = snapshot.supplied ? snapshot.details : undefined;
+        return snapshot.details;
+      }) : read == null ? Promise.resolve(supplied!) : fetchPullRequestDetails(read, target, provider, (details) => {
         known = details;
         resolveFacts(details);
       })).catch(() => ({ ...known, pending: undefined, unavailable: [...(known.unavailable ?? []), ...(known.pending ?? [])] }))
         .finally(() => read?.close());
       void complete.then(resolveFacts);
       const format = (details: PullRequestDetails) => formatReadableSummary(fallbackSummary(target, details, provider));
+      const isCurrent = () => token === requestToken && (metadata == null || reader!.isCurrent(metadata));
       void complete.then((details) => {
-        if (token !== requestToken) return;
+        if (!isCurrent()) return;
         const facts = format(details);
-        if (supplied == null) onUpdate?.(facts);
-        const explanation = target.handoff?.summary != null
+        if (supplied == null || metadata != null) onUpdate?.(facts, metadata);
+        const explanation = supplied != null && target.handoff?.summary != null
           ? Promise.resolve(target.handoff.summary)
           : summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
         void explanation.then((text) => {
           const clean = text == null ? "" : cleanAgentOutput(text);
-          if (token === requestToken && clean.length > 0) onUpdate?.(`${facts}\n\nGenerated explanation (optional):\n${clean}`);
+          if (isCurrent() && clean.length > 0) onUpdate?.(`${facts}\n\nGenerated explanation (optional):\n${clean}`, metadata);
         }).catch(() => undefined);
       }).catch(() => undefined);
       return format(await (onUpdate == null ? complete : early));

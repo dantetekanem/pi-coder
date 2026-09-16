@@ -1815,7 +1815,7 @@ describe("code diff extension", () => {
       body: "General review comment\n\nExisting review-wide note",
       comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Keep this inline comment" }],
     }), expect.any(Object));
-    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ repo: "example/widgets" }));
+    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
 
   });
@@ -1896,7 +1896,7 @@ describe("code diff extension", () => {
         { path: "src/app.ts", subject_type: "file", body: "File note" },
       ],
     }), expect.any(Object));
-    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ provider: "secondary", repo: "example/widgets" }));
+    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ provider: "secondary", repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
   });
 

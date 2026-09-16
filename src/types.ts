@@ -54,11 +54,20 @@ export interface ReviewFileContents {
   modifiedAvailable?: boolean;
 }
 
+export interface ReviewConversationMetadata {
+  identity: string;
+  generation: number;
+  fetchedAt: string | null;
+  coverage: Record<"details" | "comments" | "reviews" | "threads" | "checks" | "identity", "pending" | "complete" | "partial" | "unavailable">;
+}
+
+export interface ReviewConversationLoadOptions { refresh?: boolean }
+
 export interface ReviewContextPanelSource {
   title: string;
   loadingText: string;
   /** Returns usable context; optional later updates replace its text without resetting the pane. */
-  load: (onUpdate?: (text: string) => void) => Promise<string>;
+  load: (onUpdate?: (text: string, conversation?: ReviewConversationMetadata) => void, options?: ReviewConversationLoadOptions) => Promise<string>;
   /** Canonical http(s) URL opened from the PR context pane. */
   url?: string;
 }
@@ -85,13 +94,14 @@ export interface ReviewRepliesSnapshot {
   selfLogin: string;
   fetchedAt: string;
   threadCoverage?: ReviewThreadCoverage;
+  conversation?: ReviewConversationMetadata;
 }
 
 export interface ReviewRepliesPanelSource {
   title: string;
   loadingText: string;
   /** Reads only the current pull request; the pane never queues a second one. */
-  load: () => Promise<ReviewRepliesSnapshot>;
+  load: (options?: ReviewConversationLoadOptions) => Promise<ReviewRepliesSnapshot>;
   /** On-demand, read-only analysis. Never posts anything back to the provider. */
   analyze?: (reply: ReviewReplyItem) => Promise<string>;
 }

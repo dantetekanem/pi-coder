@@ -8,7 +8,8 @@ import {
 } from "./provider-settings.js";
 import type { RemoteReviewTarget } from "./remote.js";
 import { sanitizeTerminalText } from "./sanitize.js";
-import { createConversationRead } from "./conversation.js";
+import { createConversationRead, type createConversationReader } from "./conversation.js";
+import { hasHandoffContext } from "./pr-handoff.js";
 import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewThreadCoverage } from "./types.js";
 
 const MAX_REPLY_BODY_LENGTH = 1200;
@@ -294,7 +295,7 @@ function providerRows(provider: ProviderSettings, value: unknown): unknown[] {
   return rows;
 }
 
-async function getSelfLogin(
+export async function getSelfLogin(
   pi: ExtensionAPI,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
@@ -455,13 +456,29 @@ export function createRemoteReviewRepliesSource(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   target: RemoteReviewTarget | undefined,
+  reader?: ReturnType<typeof createConversationReader>,
 ): ReviewRepliesPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
+  let live = !hasHandoffContext(target.handoff);
   return {
     title: `${provider.label} replies`,
     loadingText: `Reading ${provider.label} replies to your review comments...`,
-    load: () => fetchBoundedReplies(pi, target, provider),
+    load: async (options) => {
+      if (options?.refresh) live = true;
+      if (reader == null) {
+        if (!live) throw new Error("Supplied context has no authenticated viewer or stable thread IDs. Press r to refresh replies.");
+        return fetchBoundedReplies(pi, target, provider);
+      }
+      const snapshot = await reader.load(options).snapshot;
+      if (!reader.isCurrent(snapshot.metadata)) throw new Error("Replies read was superseded. Press r to refresh.");
+      if (snapshot.supplied || snapshot.metadata.fetchedAt == null) throw new Error("Supplied context has no authenticated viewer or stable thread IDs. Press r to refresh replies.");
+      if (snapshot.selfLogin == null) throw new Error(`Could not resolve your ${provider.label} identity; replies need it to tell your threads apart.`);
+      const threads = snapshot.details.threadRead;
+      if (threads == null || snapshot.replies == null) throw new Error("Review threads unavailable. Press r to refresh replies.");
+      return { replies: snapshot.replies, selfLogin: snapshot.selfLogin,
+        fetchedAt: snapshot.metadata.fetchedAt, threadCoverage: threads.coverage, conversation: snapshot.metadata };
+    },
     analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
   };
 }

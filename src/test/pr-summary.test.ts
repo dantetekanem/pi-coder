@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRemotePullRequestSummarySource } from "../pr-summary.js";
+import { createRemotePullRequestSources, createRemotePullRequestSummarySource } from "../pr-summary.js";
+import { createRemoteReviewRepliesSource } from "../review-replies.js";
 import type { RemoteReviewTarget } from "../remote.js";
 
 const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
@@ -473,5 +474,116 @@ describe("remote pull request summary source", () => {
     const summary = await createRemotePullRequestSummarySource({ exec } as never, {} as never, target())!.load();
     expect(summary).toContain("Open comments:\nUnavailable: review threads");
     expect(summary).toMatch(/Status:\npending - .*unavailable/);
+  });
+});
+
+describe("shared pull request sources", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
+    return { promise, resolve, reject };
+  }
+  const graph = (body = "Current reply") => ({ data: { repository: { pullRequest: { reviewThreads: {
+    pageInfo: { hasNextPage: false }, nodes: [{ id: "thread", isResolved: false, comments: {
+      pageInfo: { hasNextPage: false }, nodes: [{ id: "self", author: { login: "reviewer" }, body: `Question about ${body}` },
+        { id: "reply", author: { login: "other" }, body }],
+    } }],
+  } } } } });
+  const executor = (threads: () => Promise<unknown>, model = async () => "") => vi.fn(async (command: string, args: string[], options?: { signal?: AbortSignal }) => ({
+    code: 0, stderr: "", killed: false, stdout: command === "pi" ? await model() : JSON.stringify(args[0] === "query" ? await threads()
+      : args[0] === "identity" ? { actor: { name: "reviewer" } } : { conversation: [], decisions: [], checks: [] }),
+  }));
+
+  it("coalesces pending loads, shares metadata, isolates targets and fences an older model after a fresh load", async () => {
+    const thread = deferred<ReturnType<typeof graph>>();
+    const model = deferred<string>();
+    let reads = 0;
+    const exec = executor(async () => ++reads === 1 ? thread.promise : graph(), () => model.promise);
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    try {
+      const context = sources.contextPanelSource!.load(update);
+      const replies = sources.repliesSource!.load();
+      expect(await context).toContain("Pending: review threads");
+      expect(exec.mock.calls.filter(([, args]) => args[0] === "query")).toHaveLength(1);
+      thread.resolve(graph());
+      const first = await replies;
+      await vi.waitFor(() => expect(update.mock.lastCall?.[1]).toEqual(first.conversation));
+      expect(first.conversation).toMatchObject({ generation: 1, fetchedAt: expect.any(String),
+        coverage: { details: "complete", checks: "complete", threads: "complete", identity: "complete", comments: "partial", reviews: "partial" } });
+      const providerCalls = exec.mock.calls.filter(([command]) => command !== "pi");
+      expect(providerCalls).toHaveLength(3);
+      expect(new Set(providerCalls.map(([, , options]) => options?.signal)).size).toBe(1);
+      const second = await sources.repliesSource!.load();
+      expect(second.conversation?.generation).toBe(2);
+      const previous = update.mock.lastCall;
+      model.resolve("Outdated explanation");
+      await new Promise(setImmediate);
+      expect(update.mock.lastCall).toBe(previous);
+      const other = await createRemotePullRequestSources({ exec } as never, {} as never, target("primary", { number: "13" })).repliesSource!.load();
+      expect(other.conversation?.generation).toBe(1);
+      expect(other.conversation?.identity).not.toBe(first.conversation?.identity);
+    } finally {
+      thread.resolve(graph());
+      model.resolve("");
+    }
+  });
+
+  it.each(["resolve", "reject"])("supersedes pending reads at the same head without stranding their waiters (%s)", async (outcome) => {
+    const old = deferred<ReturnType<typeof graph>>();
+    let reads = 0;
+    const exec = executor(async () => ++reads === 1 ? old.promise : graph());
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    try {
+      await sources.contextPanelSource!.load(update);
+      let joined: Awaited<ReturnType<NonNullable<typeof sources.repliesSource>["load"]>> | undefined;
+      const waiting = sources.repliesSource!.load().then((value) => { joined = value; });
+      const fresh = await sources.repliesSource!.load({ refresh: true });
+      expect(fresh.conversation?.generation).toBe(2);
+      await vi.waitFor(() => expect(joined?.conversation).toEqual(fresh.conversation));
+      await waiting;
+      await vi.waitFor(() => expect(update.mock.lastCall?.[1]).toEqual(fresh.conversation));
+      if (outcome === "reject") old.reject(new Error("Old failure"));
+      else old.resolve(graph("Old reply"));
+      await new Promise(setImmediate);
+      expect(update.mock.lastCall?.[0]).toContain("Current reply");
+    } finally {
+      old.resolve(graph());
+    }
+  });
+
+  it("preserves known identity and facts when the shared output budget rejects threads", async () => {
+    const exec = executor(async () => graph("x".repeat(2_000_000)));
+    const sources = createRemotePullRequestSources({ exec } as never, {} as never, target());
+    const update = vi.fn();
+    const context = sources.contextPanelSource!.load(update);
+    const replies = expect(sources.repliesSource!.load()).rejects.toThrow("Review threads unavailable");
+    expect(await context).toContain("Remove old checkout path");
+    await replies;
+    expect(update.mock.lastCall?.[1]).toMatchObject({ coverage: { identity: "complete", details: "complete", threads: "unavailable" } });
+    expect(exec.mock.calls.filter(([command]) => command !== "pi")).toHaveLength(3);
+  });
+
+  it.each(["shared", "standalone"])("keeps supplied %s context read-free and enables truthful Replies only after explicit refresh", async (mode) => {
+    const exec = executor(async () => graph());
+    const supplied = { ...target(), provider: undefined, handoff: { ...target().pullRequest, provider: "primary", url: target().remote,
+      summary: "Supplied explanation", reviews: [], checks: [] } as never };
+    const sources = mode === "shared" ? createRemotePullRequestSources({ exec } as never, {} as never, supplied)
+      : { contextPanelSource: createRemotePullRequestSummarySource({ exec } as never, {} as never, supplied),
+        repliesSource: createRemoteReviewRepliesSource({ exec } as never, {} as never, supplied) };
+    const update = vi.fn();
+    await sources.contextPanelSource!.load(update);
+    await expect(sources.repliesSource!.load()).rejects.toThrow(/refresh/i);
+    expect(exec).not.toHaveBeenCalled();
+    if (mode === "shared") expect(update.mock.lastCall?.[1]).toMatchObject({ fetchedAt: null, coverage: { identity: "unavailable" },
+      identity: JSON.stringify(["primary", "example/widgets", "12", "abc123"]) });
+    const fresh = await sources.repliesSource!.load({ refresh: true });
+    expect(fresh.replies[0]?.body).toBe("Current reply");
+    expect(fresh.fetchedAt).toEqual(expect.any(String));
+    expect(exec.mock.calls.filter(([command]) => command !== "pi")).toHaveLength(mode === "shared" ? 3 : 2);
+    await sources.contextPanelSource!.load(update, { refresh: true });
+    await vi.waitFor(() => expect(exec.mock.calls.find(([command]) => command === "pi")?.[1].at(-1)).toContain("Current reply"));
   });
 });
