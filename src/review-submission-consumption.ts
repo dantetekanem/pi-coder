@@ -53,7 +53,8 @@ export function consumeConfirmedSubmissionDraft(attempt: SubmissionAttempt): Sub
     const complete = attempt.steps.every((step) => step.status === "submitted");
     const changed = retained !== draft;
     // A completed retry may retire the empty snapshot left by an earlier partial cleanup.
-    const terminal = complete && remainingItems === 0 && (changed || capturedSource);
+    const hasLocalHistory = session.story != null || (session.discussions?.length ?? 0) > 0;
+    const terminal = complete && remainingItems === 0 && (changed || capturedSource) && !hasLocalHistory;
     if (!changed && !terminal) return { status: "retained", remainingItems };
 
     // Retain the prior checkpoint until its projected snapshot is committed, including on retries.

@@ -47,7 +47,9 @@ import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmo
 import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
 import { ExactTextEditor } from "./exact-text-editor.js";
-import { fullScreenOverlayOptions } from "./full-screen-overlay.js";
+import { restoreStoryNavigation, storyAnchor, storyAnchors, storyViewportKey, type StoryMember, type StorySessionData } from "../diff-story/navigation.js";
+import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
+import { edgeToEdgeOverlayOptions, fullScreenOverlayOptions } from "./full-screen-overlay.js";
 import { hashTargetSlice, logicalLineCount } from "../workbench/target.js";
 import { validateReviewDraftAnchor } from "../adapters/pi/review-bridge.js";
 
@@ -127,6 +129,7 @@ interface ReviewAppOptions {
   seedComments?: ResolvedSeedComment[];
   contextPanelSource?: ReviewContextPanelSource;
   repliesSource?: ReviewRepliesPanelSource;
+  story?: { plan: DiffStory; snapshot: StorySnapshot };
   orderSignals?: ReviewOrderSignals;
   reviewHeader?: ReviewHeaderInfo;
   initialSession?: ReviewSessionData;
@@ -1294,10 +1297,18 @@ interface DiffLayout {
   sideBySideRowOffsets: Map<string, number[]>;
 }
 
-function applyLineBackground(theme: Theme, text: string, tone: DiffTone): string {
-  if (tone === "added") return theme.bg("toolSuccessBg", text);
-  if (tone === "removed") return theme.bg("toolErrorBg", text);
-  return text;
+function applyLineBackground(theme: Theme, text: string, tone: DiffTone, selected = false): string {
+  if (tone === "context") return selected ? theme.bg("selectedBg", text) : text;
+  const backgroundToken = selected ? "selectedBg" : tone === "added" ? "toolSuccessBg" : "toolErrorBg";
+  const background = /\x1b\[48;2;(\d+);(\d+);(\d+)m/.exec(theme.getBgAnsi?.(backgroundToken) ?? "");
+  const foreground = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(theme.getFgAnsi?.(tone === "added" ? "success" : "error") ?? "");
+  if (background == null || foreground == null) return theme.bg(backgroundToken, text);
+
+  const rgb = [1, 2, 3].map((channel) => Math.round(
+    Number(background[channel]) * 0.96 + Number(foreground[channel]) * 0.04,
+  ));
+  const tint = `\x1b[48;2;${rgb.join(";")}m`;
+  return `${tint}${text.replace(/\x1b\[(?:0|49)m/g, `$&${tint}`)}\x1b[49m`;
 }
 
 function highlightCodeLine(theme: Theme, _tone: DiffTone, text: string, language: string | undefined): string {
@@ -1307,7 +1318,7 @@ function highlightCodeLine(theme: Theme, _tone: DiffTone, text: string, language
   return highlightCodeLineWithPi(text, language);
 }
 
-export function buildDisplayRows(diff: StructuredDiff): DisplayRow[] {
+export function buildDisplayRows(diff: StructuredDiff, contextSide: ReviewLineTarget["side"] = "added"): DisplayRow[] {
   const rows: DisplayRow[] = [];
 
   const pushLine = (
@@ -1338,7 +1349,8 @@ export function buildDisplayRows(diff: StructuredDiff): DisplayRow[] {
 
     const row = item.row;
     if (row.kind === "equal") {
-      pushLine(" ", row.newLineNumber, row.newLineNumber, "added", row.newText, "context");
+      const number = contextSide === "deleted" ? row.oldLineNumber : row.newLineNumber;
+      pushLine(" ", number, number, contextSide, row.newText, "context");
       continue;
     }
     if (row.kind === "delete") {
@@ -1535,6 +1547,12 @@ export class ReviewApp {
   private inputEpoch = 0;
   private readonly responseDrafts = new Map<string, string>();
   private editingResponse: string | null = null;
+  private story?: StorySessionData;
+  private renderingStoryAnchor?: StoryAnchor;
+  private alignStoryAnchor = false;
+  private storyInventory = false;
+  private storyBrowsingDiff = false;
+  private storyInventoryScroll = 0;
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
   private contextLineCount = 0;
@@ -1602,6 +1620,21 @@ export class ReviewApp {
     this.ensureActiveNavigatorFile(options.initialSession == null);
     this.ensureVisibleFocus();
     this.searchBuffer = this.state.searchQuery;
+    if (options.story != null) {
+      const completePlan = completeDiffStory(options.story.plan, options.story.snapshot);
+      this.story = restoreStoryNavigation(completePlan, options.initialSession?.story);
+      this.diffViewMode = "unified";
+      for (const file of options.story.snapshot.files) {
+        const baseDiff = buildStructuredDiff(file.contents.originalContent, file.contents.modifiedContent, DEFAULT_CONTEXT_LINES);
+        this.cache.set(this.cacheKey(file.fileId, file.scope), { status: "ready", contents: file.contents, baseDiff });
+        const anchors = completePlan.steps.flatMap((step) => [...step.implementation, ...step.tests]).filter((anchor) => anchor.fileId === file.fileId);
+        this.expandedContextRows.set(this.cacheKey(file.fileId, file.scope), new Set(baseDiff.rows.flatMap((row, index) => anchors.some((anchor) => {
+          const line = anchor.side === "deleted" ? row.oldLineNumber : row.newLineNumber;
+          return line != null && line >= anchor.startLine - 3 && line <= anchor.endLine + 3;
+        }) ? [index] : [])));
+      }
+      this.activateStoryMember(this.story.member);
+    }
 
     const editorTheme: EditorTheme = {
       borderColor: (text) => this.theme.fg("accent", text),
@@ -1668,6 +1701,8 @@ export class ReviewApp {
   private getSessionData(): ReviewSessionData {
     return {
       state: this.state,
+      ...(this.options.initialSession?.discussions == null ? {} : { discussions: this.options.initialSession.discussions }),
+      ...(this.story == null ? {} : { story: this.captureStorySession() }),
       diffViewMode: this.diffViewMode,
       navigatorTreeMode: this.navigatorTreeMode,
       contextLineNavigation: this.contextLineNavigation,
@@ -2082,7 +2117,7 @@ export class ReviewApp {
     } else {
       tone = row.kind === "added" ? "added" : row.kind === "removed" ? "removed" : "context";
       const lineLabel = row.displayLineNumber == null ? "    " : String(row.displayLineNumber).padStart(4, " ");
-      const gutterLine = this.theme.fg("borderMuted", lineLabel);
+      const gutterLine = this.theme.fg(this.renderingStoryAnchor != null && isCurrent ? "accent" : "borderMuted", lineLabel);
       const gutterSign = row.sign === "+"
         ? this.theme.fg("success", row.sign)
         : row.sign === "-"
@@ -2097,11 +2132,9 @@ export class ReviewApp {
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
       const paddedLine = padLine(line, Math.max(1, width - 2));
-      if (isCurrent) return this.theme.bg("selectedBg", this.theme.fg("accent", paddedLine));
-      if (isSelected) return this.theme.bg("selectedBg", paddedLine);
+      if (isSelected || isCurrent && this.renderingStoryAnchor == null) return applyLineBackground(this.theme, paddedLine, tone, true);
       if (isSearchMatch) return this.theme.bg("toolPendingBg", paddedLine);
-      if (row.kind === "added" || row.kind === "removed") return applyLineBackground(this.theme, paddedLine, tone);
-      return paddedLine;
+      return applyLineBackground(this.theme, paddedLine, tone);
     });
   }
 
@@ -2268,7 +2301,8 @@ export class ReviewApp {
     if (fileId == null) return null;
     const entry = this.getEntry(fileId, scope);
     if (entry?.status !== "ready") return null;
-    const key = `${scope}\u001f${fileId}\u001f${this.state.hideUnchanged ? 1 : 0}`;
+    const contextSide = getSelectedLineTarget(this.state, fileId, scope)?.side ?? this.renderingStoryAnchor?.side ?? (this.story == null || this.storyBrowsingDiff ? undefined : storyAnchor(this.story)?.side) ?? "added";
+    const key = `${scope}\u001f${fileId}\u001f${this.state.hideUnchanged ? 1 : 0}\u001f${contextSide}`;
     const cached = this.diffLayoutCache.get(key);
     if (cached != null) {
       setBoundedMapEntry(this.diffLayoutCache, key, cached, MAX_DIFF_LAYOUT_ENTRIES);
@@ -2282,7 +2316,7 @@ export class ReviewApp {
     const displayDiff = expandedRows == null || expandedRows.size === 0
       ? contextAdjustedDiff
       : revealStructuredDiffRows(contextAdjustedDiff, expandedRows);
-    const unifiedRows = buildDisplayRows(displayDiff);
+    const unifiedRows = buildDisplayRows(displayDiff, contextSide);
     const sideBySideRows = buildSideBySideDisplayRows(displayDiff);
 
     const seen = new Set<string>();
@@ -3491,7 +3525,7 @@ export class ReviewApp {
   }
 
   private requestCancel(): void {
-    if (getCancelAction(this.state, this.reviewedFileIds.size) === "cancel") {
+    if (getCancelAction(this.state, this.reviewedFileIds.size) === "cancel" && !(this.options.initialSession?.discussions?.length) && this.story == null) {
       this.cancel("discard");
       return;
     }
@@ -3804,7 +3838,42 @@ export class ReviewApp {
     const file = this.activeFile();
     if (file == null) return;
     const visibleTargets = this.getDiffMovementTargets(file.id, this.state.activeScope);
+    const current = getSelectedLineTarget(this.state, file.id, this.state.activeScope);
+    if (current != null && !visibleTargets.some((target) => target.side === current.side && target.line === current.line)) {
+      const displayed = this.getVisibleLineTargets(file.id, this.state.activeScope);
+      const positions = new Map(displayed.map((target, index) => [`${target.side}:${target.line}`, index]));
+      const index = positions.get(`${current.side}:${current.line}`) ?? -1;
+      const next = (delta > 0 ? visibleTargets : [...visibleTargets].reverse()).find((target) => {
+        const candidate = positions.get(`${target.side}:${target.line}`) ?? -1;
+        return delta > 0 ? candidate > index : candidate < index;
+      });
+      if (next == null) return;
+      this.state = setSelectedLineTarget(this.state, file.id, this.state.activeScope, next);
+      delta -= Math.sign(delta);
+    }
     this.state = moveSelectedLineTarget(this.state, file.id, this.state.activeScope, visibleTargets, delta);
+    this.requestRender();
+  }
+
+  private moveThroughContext(delta: number, extend = false): void {
+    const file = this.activeFile();
+    const scope = this.state.activeScope;
+    const current = getSelectedLineTarget(this.state, file?.id ?? null, scope);
+    const entry = this.getEntry(file?.id ?? "", scope);
+    if (file == null || current == null || entry?.status !== "ready") return;
+    const total = current.side === "deleted" ? entry.baseDiff.totalOldLines : entry.baseDiff.totalNewLines;
+    if (total === 0) return;
+    const line = Math.max(1, Math.min(total, current.line + delta));
+    const endLine = extend ? current.endLine ?? current.line : undefined;
+    const key = this.cacheKey(file.id, scope);
+    const expanded = new Set(this.expandedContextRows.get(key) ?? []);
+    entry.baseDiff.rows.forEach((row, index) => {
+      const number = current.side === "deleted" ? row.oldLineNumber : row.newLineNumber;
+      if (number != null && number >= Math.min(line, endLine ?? line) && number <= Math.max(line, endLine ?? line)) expanded.add(index);
+    });
+    this.expandedContextRows.set(key, expanded);
+    this.diffLayoutCache.clear();
+    this.state = setSelectedLineTarget(this.state, file.id, scope, { side: current.side, line, ...(endLine == null ? {} : { endLine }) });
     this.requestRender();
   }
 
@@ -4206,7 +4275,7 @@ export class ReviewApp {
       this.handleReanchorInput(data);
       return;
     }
-    if (this.handleMouseInput(data)) return;
+    if ((this.story == null || this.storyBrowsingDiff) && this.handleMouseInput(data)) return;
     this.diffWheelScrolling = false;
 
     if (this.editTarget != null) {
@@ -4274,6 +4343,21 @@ export class ReviewApp {
       }
     }
 
+    if (this.story != null && this.handleStoryInput(data)) return;
+    if (this.state.focus === "diff") {
+      const movement = [
+        ["up", -1], ["down", 1], ["pageUp", -this.diffPageSize], ["pageDown", this.diffPageSize],
+        ["home", -Infinity], ["end", Infinity],
+        ["u", -getHalfPageStep(this.diffPageSize)], ["d", getHalfPageStep(this.diffPageSize)],
+        ["b", -this.diffPageSize], ["f", this.diffPageSize],
+      ] as const;
+      for (const [key, delta] of movement) {
+        if (matchesKey(data, Key.alt(key)) || matchesKey(data, Key.altShift(key))) {
+          this.moveThroughContext(delta, matchesKey(data, Key.altShift(key)));
+          return;
+        }
+      }
+    }
     if (matchesReviewAction("help", data)) { this.toggleHelpMode(); return; }
     if (this.helpMode && matchesKey(data, Key.escape)) { this.helpMode = false; this.requestRender(); return; }
 
@@ -4693,8 +4777,7 @@ export class ReviewApp {
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
       const paddedLine = padLine(line, Math.max(1, width));
-      if (current) return this.theme.bg("selectedBg", this.theme.fg("accent", paddedLine));
-      if (selected) return this.theme.bg("selectedBg", paddedLine);
+      if (current || selected) return applyLineBackground(this.theme, paddedLine, cell.tone, true);
       if (searchMatched) return this.theme.bg("toolPendingBg", paddedLine);
       if (cell.tone === "added" || cell.tone === "removed") return applyLineBackground(this.theme, paddedLine, cell.tone);
       return paddedLine;
@@ -4854,7 +4937,7 @@ export class ReviewApp {
     return [header, hints, ...conflict, ...preview, ...editorLines.map((line) => `${bar} ${line}`)];
   }
 
-  private renderDiff(width: number, height: number): string[] {
+  private renderDiff(width: number, height: number, storyTitle?: string): string[] {
     const file = this.activeFile();
     const lines: string[] = [];
     if (this.editTarget != null && (this.recoveryEditor || file == null || this.getEntry(file.id, this.state.activeScope)?.status === "error")) {
@@ -4876,7 +4959,7 @@ export class ReviewApp {
     if (this.diffActionHintCache?.width !== width) {
       this.diffActionHintCache = { width, line: buildDiffActionHintLine(this.theme, width) };
     }
-    lines.push(this.diffActionHintCache.line);
+    lines.push(storyTitle == null ? this.diffActionHintCache.line : "");
 
     const submodule = getSubmoduleInfo(file, this.state.activeScope);
     if (submodule != null) {
@@ -4914,7 +4997,15 @@ export class ReviewApp {
     const selectedTarget = getSelectedLineTarget(this.state, file.id, this.state.activeScope);
     const lineComments = getLineCommentIndex(this.state, file.id, this.state.activeScope);
     lines[1] = this.theme.fg("dim", `${formatScopeLabel(this.state.activeScope)} • view ${formatDiffViewModeLabel(this.diffViewMode)} • ${formatSelectedLineTargetLabel(selectedTarget)} • nav ${this.contextLineNavigation ? "all lines" : "changes"} • wrap ${this.state.wrapLines ? "on" : "off"}${this.state.activeScope === "all-files" ? "" : ` • unchanged ${this.state.hideUnchanged ? "hidden" : "shown"}`}${diffSearchLabel}`);
-    const maxBody = Math.max(1, height - 5);
+    const selectedRow = selectedTarget == null ? -1 : diff.rows.findIndex((row) => (
+      selectedTarget.side === "deleted" ? row.oldLineNumber === selectedTarget.line : row.newLineNumber === selectedTarget.line
+    ));
+    const hunk = diff.hunks.find((candidate) => candidate.displayStartRow <= selectedRow && selectedRow <= candidate.displayEndRow);
+    if (hunk != null) {
+      const counts = `${this.theme.fg("success", `+${hunk.additions}`)} ${this.theme.fg("error", `−${hunk.deletions}`)}`;
+      lines[1] = `Hunk ${hunk.index + 1}/${diff.hunks.length} · ${counts} · ${lines[1]}`;
+    }
+    const maxBody = Math.max(1, height - lines.length - 2);
     let rendered: string[];
     let renderedStartOffset = 0;
     let selectedIndex = 0;
@@ -4953,6 +5044,7 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
+        if (this.alignStoryAnchor) this.diffScroll = Math.max(0, selectedIndex - 2);
         if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
@@ -4964,7 +5056,8 @@ export class ReviewApp {
           && row.commentSide != null
           && selectedTarget?.line === row.commentLineNumber
           && selectedSide === row.commentSide;
-        const isSelected = row.commentLineNumber != null
+        const isSelected = (this.renderingStoryAnchor == null || selectedTarget?.endLine != null)
+          && row.commentLineNumber != null
           && row.commentSide != null
           && selectedRange != null
           && selectedSide === row.commentSide
@@ -4975,7 +5068,8 @@ export class ReviewApp {
           : undefined;
         const isSearchMatch = diffTextMatchesSearch(row.codeText, this.diffSearchQuery);
 
-        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${lineComment?.intent ?? "-"}`;
+        const renderMode = this.renderingStoryAnchor == null ? "diff" : "story";
+        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${lineComment?.intent ?? "-"}\u001f${renderMode}`;
         let memo = rowRenderCache.get(row);
         if (memo == null) {
           memo = new Map();
@@ -5021,7 +5115,213 @@ export class ReviewApp {
     const visibleStart = Math.max(0, this.diffScroll - renderedStartOffset);
     lines.push(...rendered.slice(visibleStart, visibleStart + maxBody));
 
-    return renderBox(`Diff ${diff.hunks.length > 0 ? `(${diff.hunks.length} hunk${diff.hunks.length === 1 ? "" : "s"})` : ""}`.trim(), width, height, this.theme, lines, this.state.focus === "diff");
+    return renderBox(storyTitle ?? `Diff ${diff.hunks.length > 0 ? `(${diff.hunks.length} hunk${diff.hunks.length === 1 ? "" : "s"})` : ""}`.trim(), width, height, this.theme, lines, this.state.focus === "diff");
+  }
+
+  private captureStorySession(): StorySessionData {
+    const story = this.story!;
+    const anchor = storyAnchor(story);
+    if (!this.storyBrowsingDiff && anchor?.fileId === this.state.activeFileId) {
+      story.viewports[storyViewportKey(story)] = {
+        ...story.viewports[storyViewportKey(story)],
+        scroll: this.diffScroll,
+        selection: getSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope) ?? undefined,
+      };
+    }
+    return story;
+  }
+
+  private activateStoryMember(member: StoryMember): void {
+    const story = this.story!;
+    story.member = member;
+    const anchor = storyAnchor(story);
+    const file = this.options.story?.snapshot.files.find((file) => file.fileId === anchor?.fileId);
+    this.state = {
+      ...this.state,
+      activeFileId: anchor?.fileId ?? null,
+      activeScope: file?.scope ?? this.state.activeScope,
+      focus: "diff",
+    };
+    if (anchor != null) {
+      const view = story.viewports[storyViewportKey(story)];
+      this.state = setSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope, view?.selection ?? { side: anchor.side, line: anchor.startLine });
+      this.diffScroll = Number.isFinite(view?.scroll) ? Math.max(0, view!.scroll) : 0;
+      void this.ensureActiveEntry();
+    }
+  }
+
+  private handleStoryInput(data: string): boolean {
+    const story = this.story!;
+    if (data === "F") {
+      this.captureStorySession();
+      this.storyBrowsingDiff = !this.storyBrowsingDiff;
+      if (this.storyBrowsingDiff) {
+        this.ensureActiveNavigatorFile();
+        this.state = setFocus(this.state, "navigator");
+      } else {
+        this.diffViewMode = "unified";
+        this.activateStoryMember(story.member);
+      }
+      this.setMessage(this.storyBrowsingDiff ? "Full diff · F returns to the story; comments stay in this review." : "Returned to the story.");
+    } else if (data === "o" || data === "e" && this.state.focus !== "comments" || this.activeSubmodule() != null && matchesKey(data, Key.enter)) {
+      this.setMessage("Captured story bytes are read-only. Open a separate /code session to edit files.");
+    } else if (this.storyBrowsingDiff) return false;
+    else if (this.storyInventory) {
+      if (matchesKey(data, Key.escape) || data === "i") this.storyInventory = false;
+      else if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) this.storyInventoryScroll += matchesKey(data, Key.pageDown) ? 10 : 1;
+      else if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) this.storyInventoryScroll = Math.max(0, this.storyInventoryScroll - (matchesKey(data, Key.pageUp) ? 10 : 1));
+    } else if (matchesKey(data, Key.shift("right")) || matchesKey(data, Key.shift("left"))) {
+      const next = Math.max(0, Math.min(story.plan.steps.length - 1, story.step + (matchesKey(data, Key.shift("right")) ? 1 : -1)));
+      if (next === story.step) return true;
+      this.captureStorySession();
+      story.step = next;
+      story.related = { implementation: 0, tests: 0 };
+      this.activateStoryMember(storyAnchor(story, story.member) == null ? "implementation" : story.member);
+    } else if (matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+      this.captureStorySession();
+      this.activateStoryMember(matchesKey(data, Key.left) ? "implementation" : "tests");
+    } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || data === "h") {
+      this.captureStorySession();
+      if (this.state.focus === "comments") this.activateStoryMember("implementation");
+      else if (story.member === "implementation" && data !== "h") this.activateStoryMember("tests");
+      else {
+        this.commentsGlobal = true;
+        this.state = setFocus(this.state, "comments");
+      }
+    } else if (data === "R") {
+      const id = story.plan.steps[story.step]?.id;
+      if (id != null) story.viewedStepIds = story.viewedStepIds.includes(id) ? story.viewedStepIds.filter((entry) => entry !== id) : [...story.viewedStepIds, id];
+    } else if (data === "[" || data === "]") {
+      this.captureStorySession();
+      const count = storyAnchors(story, story.member).length;
+      story.related[story.member] = Math.max(0, Math.min(count - 1, story.related[story.member] + (data === "]" ? 1 : -1)));
+      this.activateStoryMember(story.member);
+    } else if (data === "i") {
+      this.storyInventory = true;
+      this.storyInventoryScroll = 0;
+    } else if (data === "v" || /^[1-5]$/.test(data) || ["T", "O", "L"].includes(data)) {
+      this.setMessage("Story uses paired read-only diffs. F opens the full diff; Shift+←/→ moves steps.");
+    } else return false;
+    this.requestRender();
+    return true;
+  }
+
+  private needsStoryEditorOverlay(): boolean {
+    const target = this.editTarget;
+    if (this.story == null || target == null) return false;
+    return target.kind === "all" || target.fileId !== storyAnchor(this.story)?.fileId;
+  }
+
+  private renderStoryMember(member: StoryMember, width: number, height: number): string[] {
+    const story = this.story!;
+    const anchor = storyAnchor(story, member);
+    const title = member === "implementation" ? "Implementation" : "Related changed tests";
+    if (anchor == null) {
+      const message = member === "tests" ? "No related changed tests" : "No implementation anchor";
+      return renderBox(title, width, height, this.theme, [this.theme.fg("muted", message)], story.member === member);
+    }
+    const previous = {
+      state: this.state,
+      editTarget: this.editTarget,
+      scroll: this.diffScroll,
+      max: this.diffMaxScroll,
+      page: this.diffPageSize,
+    };
+    const active = story.member === member && this.state.focus === "diff" && !this.needsStoryEditorOverlay();
+    const view = story.viewports[storyViewportKey(story, member)];
+    try {
+      this.renderingStoryAnchor = anchor;
+      this.alignStoryAnchor = !view?.initialized;
+      this.state = { ...this.state, activeFileId: anchor.fileId, focus: active ? "diff" : "navigator" };
+      this.state = setSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope, view?.selection ?? { side: anchor.side, line: anchor.startLine });
+      this.diffScroll = Number.isFinite(view?.scroll) ? Math.max(0, view!.scroll) : 0;
+      if (!active) this.editTarget = null;
+      const count = storyAnchors(story, member).length;
+      const lines = this.renderDiff(width, height, `${title}${count > 1 ? ` ${story.related[member] + 1}/${count}` : ""}`);
+      story.viewports[storyViewportKey(story, member)] = {
+        scroll: this.diffScroll,
+        initialized: true,
+        selection: getSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope) ?? undefined,
+      };
+      if (active) {
+        previous.scroll = this.diffScroll;
+        previous.max = this.diffMaxScroll;
+        previous.page = this.diffPageSize;
+        previous.state = this.state;
+      }
+      return lines;
+    } finally {
+      this.renderingStoryAnchor = undefined;
+      this.alignStoryAnchor = false;
+      this.state = previous.state;
+      this.editTarget = previous.editTarget;
+      this.diffScroll = previous.scroll;
+      this.diffMaxScroll = previous.max;
+      this.diffPageSize = previous.page;
+    }
+  }
+
+  private renderStory(width: number): string[] {
+    this.lastWidth = width;
+    this.mousePaneLayout = null;
+    const height = Math.max(1, this.tui.terminal?.rows ?? 32);
+    const inner = Math.max(1, width - 2);
+    if (width < 40 || height < 27) {
+      let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
+      if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
+      if (this.confirmCancel) compact = renderCenteredOverlay(compact, this.renderCancelConfirmation(), width, height);
+      return compact;
+    }
+    const story = this.captureStorySession();
+    const snapshot = this.options.story!.snapshot;
+    const step = story.plan.steps[story.step];
+    const header = [
+      `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} · ${story.viewedStepIds.length}/${story.plan.steps.length} steps seen`,
+      "",
+      centerText(`${story.step > 0 ? "‹ Previous" : "Start"}  ·  ${story.step + 1}/${story.plan.steps.length}  ·  ${story.step + 1 < story.plan.steps.length ? `Next: ${sanitizeTerminalText(story.plan.steps[story.step + 1]!.title)} ›` : "End"}`, inner),
+      "",
+      this.theme.fg("accent", `◆ ${sanitizeTerminalText(step?.title ?? "Overview")}${step != null && story.viewedStepIds.includes(step.id) ? " · seen" : ""}`),
+      "",
+    ];
+    const footer = [
+      "",
+      ...(this.message ? [this.theme.fg("warning", this.message)] : []),
+      this.theme.fg("dim", "Shift+←/→ step · ←/→ pane · [/] related"),
+      this.theme.fg("dim", "c comment · d discuss · R seen · s finish"),
+      this.theme.fg("dim", "h comments · i story/files · F full diff"),
+    ];
+    const bodyHeight = height - header.length - footer.length - 2;
+    const stacked = inner < 100;
+    const leftWidth = stacked ? inner : Math.floor((inner - 1) / 2);
+    const leftHeight = stacked ? Math.floor((bodyHeight - 1) / 2) : bodyHeight;
+    const left = this.renderStoryMember("implementation", leftWidth, leftHeight);
+    const right = this.renderStoryMember("tests", stacked ? inner : inner - leftWidth - 1, stacked ? bodyHeight - leftHeight - 1 : bodyHeight);
+    const body = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
+    let rendered = renderBox("diff-story", width, height, this.theme, [...header, ...body, ...footer], true);
+    if (this.storyInventory) {
+      const inventory = [
+        "Captured files:",
+        ...snapshot.files.map((file) => file.path),
+        "",
+        "Story steps:",
+        story.plan.summary,
+        ...story.plan.steps.flatMap((entry) => [entry.title, entry.explanation]),
+      ].flatMap((line) => wrapTextWithAnsi(sanitizeTerminalText(line), inner - 2));
+      this.storyInventoryScroll = Math.min(this.storyInventoryScroll, Math.max(0, inventory.length - height + 4));
+      rendered = renderBox("Story inventory · ↑↓ scroll · Esc back", width, height, this.theme, inventory.slice(this.storyInventoryScroll), true);
+    } else if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderHelpPanel(width - 4, height - 4), width, height);
+    else if (this.state.focus === "comments") rendered = renderCenteredOverlay(rendered, this.renderComments(width - 4, height - 4), width, height);
+    if (this.needsStoryEditorOverlay()) {
+      const target = this.editTarget!;
+      const file = target.kind === "all" ? undefined : this.files.find((file) => file.id === target.fileId);
+      const title = file == null || target.kind === "all" ? "Review note" : getReviewFileDisplayPath(file, target.scope);
+      const editorWidth = Math.min(width - 4, 100);
+      const editorHeight = height - 4;
+      const editor = renderBox(sanitizeTerminalText(title), editorWidth, editorHeight, this.theme, this.buildInlineEditorBlock(editorWidth - 2, editorHeight - 2), true);
+      rendered = renderCenteredOverlay(rendered, editor, width, height);
+    }
+    if (this.confirmCancel) rendered = renderCenteredOverlay(rendered, this.renderCancelConfirmation(), width, height);
+    return rendered;
   }
 
   private renderHelpPanel(width: number, height: number): string[] {
@@ -5341,9 +5641,10 @@ export class ReviewApp {
   }
 
   render(width: number): string[] {
+    if (this.story != null && !this.storyBrowsingDiff) return this.renderStory(width);
     this.lastWidth = Math.max(40, width);
     const terminalRows = this.tui?.terminal?.rows ?? 28;
-    const totalHeight = Math.max(20, terminalRows - 4);
+    const totalHeight = this.story != null ? Math.max(1, terminalRows) : Math.max(20, terminalRows - 4);
     const frameColor = "accent" as const;
     const frameInnerWidth = Math.max(20, this.lastWidth - 2 - MODAL_INNER_PADDING_X * 2);
     const frameInnerHeight = Math.max(10, totalHeight - 2 - MODAL_INNER_PADDING_Y * 2);
@@ -5463,6 +5764,6 @@ export async function runReviewApp(
 ): Promise<ReviewResult> {
   return ctx.ui.custom<ReviewResult>(
     (tui, theme, _kb, done) => new ReviewApp(tui, theme, done, { ...options, notify: ctx.ui.notify.bind(ctx.ui) }),
-    fullScreenOverlayOptions,
+    options.story != null ? edgeToEdgeOverlayOptions : fullScreenOverlayOptions,
   );
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 - 2026-09-21
+
+### Added
+
+- Walk through local diffs, ranges, and pull requests with `/diff-story`, pairing implementation and changed tests in ordered steps. Changed units are prepared locally; one metadata-only model request orders them, while the extension supplies exact ranges, complete coverage, and unique test visits.
+- Choose the story model and thinking level independently, follow generation progress, and resume paired panes, step marks, and saved feedback.
+- Hold Option/Alt with movement keys to navigate unchanged source in `/diff` and `/diff-story`; add Shift to select a range for feedback.
+
+### Fixed
+
+- Preserve story progress and historical discussion records when accepted review feedback is consumed.
+- Preserve syntax colors across selected, wrapped diff lines, with subtle added/removed backgrounds and per-hunk change counts.
+
 ## 0.7.0 - 2026-09-16
 
 ### Added

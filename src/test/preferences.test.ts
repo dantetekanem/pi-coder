@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_REVIEW_PANE_VISIBILITY, DEFAULT_REVIEW_PREFERENCES, loadReviewPreferences, saveReviewPreference } from "../preferences.js";
+import { DEFAULT_STORY_AGENT } from "../review-agent.js";
 
 const originalEnvPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
 let tempDir: string;
@@ -48,6 +49,7 @@ describe("review preferences", () => {
       contextLineNavigation: true,
       commentsGlobal: true,
       lastReviewVerdict: null,
+      storyAgent: DEFAULT_STORY_AGENT,
       paneVisibility: {
         navigator: false,
         diff: true,
@@ -74,6 +76,27 @@ describe("review preferences", () => {
     saveReviewPreference({ lastReviewVerdict: "approve" });
 
     expect(loadReviewPreferences()).toMatchObject({ navigatorFileOrder: "alphabetical", lastReviewVerdict: "approve" });
+  });
+
+  it("persists story agent selection independently from the active discussion model", () => {
+    saveReviewPreference({ storyAgent: { provider: "anthropic", model: "claude-opus", thinking: "high" } });
+
+    expect(loadReviewPreferences().storyAgent).toEqual({ provider: "anthropic", model: "claude-opus", thinking: "high" });
+  });
+
+  it("retains provider-qualified catalogue model IDs rather than silently restoring the default", () => {
+    const selection = { provider: "openrouter", model: "anthropic/claude-opus:extended", thinking: "high" };
+    saveReviewPreference({ storyAgent: selection });
+
+    expect(loadReviewPreferences().storyAgent).toEqual(selection);
+  });
+
+  it("falls back to the story agent default for invalid persisted selection values", async () => {
+    await writeFile(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, JSON.stringify({
+      storyAgent: { provider: "", model: "gpt", thinking: 4 },
+    }), "utf8");
+
+    expect(loadReviewPreferences().storyAgent).toEqual(DEFAULT_STORY_AGENT);
   });
 
   it("falls back to defaults for unknown order and verdict values", async () => {

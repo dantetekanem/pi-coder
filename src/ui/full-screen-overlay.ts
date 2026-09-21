@@ -9,6 +9,15 @@ export const fullScreenOverlayOptions = {
   },
 };
 
+export const edgeToEdgeOverlayOptions = {
+  ...fullScreenOverlayOptions,
+  overlayOptions: {
+    ...fullScreenOverlayOptions.overlayOptions,
+    anchor: "top-left" as const,
+    margin: 0,
+  },
+};
+
 interface HerdrCommandResult {
   code: number;
   stdout: string;

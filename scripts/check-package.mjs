@@ -16,6 +16,8 @@ const required = [
   "docs/access.md",
   "docs/remote-providers.md",
   "docs/workbench.md",
+  "prompts/diff-story.md",
+  "skills/diff-story/SKILL.md",
   "LICENSE",
   "README.md",
 ];

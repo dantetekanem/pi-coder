@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   composeReviewPrompt: vi.fn(),
   composeDiscussionPrompt: vi.fn(),
   runReviewApp: vi.fn(),
+  prepareDiffStory: vi.fn(),
+  selectStoryAgent: vi.fn(),
   resolveRemoteReviewTarget: vi.fn(),
   createReviewSessionId: vi.fn(() => "automatic-session"),
   createReviewInstanceId: vi.fn(() => "automatic-session"),
@@ -110,6 +112,7 @@ vi.mock("../review-composition.js", () => ({
 vi.mock("../ui/review-app.js", () => ({
   runReviewApp: mocks.runReviewApp,
 }));
+vi.mock("../ui/diff-story.js", () => ({ prepareDiffStory: mocks.prepareDiffStory, selectStoryAgent: mocks.selectStoryAgent }));
 
 vi.mock("../ui/full-screen-overlay.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../ui/full-screen-overlay.js")>()),
@@ -336,6 +339,54 @@ describe("code diff extension", () => {
     codeDiffExtension(pi as never);
     return { ctx, open: (args = "", extra = {}) => tools.get("open_code_diff").execute("draft-test", { args, ...extra }, new AbortController().signal, vi.fn(), ctx) };
   }
+
+  it("prepares /diff-story before mounting, serves the captured bytes, and keeps ordinary /diff generation-free", async () => {
+    const commands = new Map<string, any>();
+    const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", modelRegistry: {}, ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    const file = remoteReviewFile();
+    const snapshot = {
+      fingerprint: "captured",
+      files: [{
+        fileId: file.id,
+        path: file.path,
+        scope: "all-files",
+        contents: { originalContent: "old", modifiedContent: "captured new" },
+      }],
+    };
+    const prepared = { snapshot, plan: { version: 1, snapshot: "captured", summary: "Purpose", steps: [] } };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.prepareDiffStory.mockResolvedValue(prepared);
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    codeDiffExtension(pi as never);
+    expect(commands.has("diff-story")).toBe(true);
+    await commands.get("diff-story").handler("", ctx);
+    await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalled());
+    const options = mocks.runReviewApp.mock.calls[0]![1];
+    expect(options.story).toBe(prepared);
+    await expect(options.loadFileContents("/repo", file, "all-files")).resolves.toEqual(snapshot.files[0]!.contents);
+    expect(mocks.loadReviewFileContents).not.toHaveBeenCalled();
+    await commands.get("diff").handler("", ctx);
+    await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalledTimes(2));
+    expect(mocks.prepareDiffStory).toHaveBeenCalledTimes(1);
+    await commands.get("diff-story").handler("agent", ctx);
+    expect(mocks.selectStoryAgent).toHaveBeenCalledWith(ctx);
+  });
+
+  it("does not mount or submit when story preparation is cancelled", async () => {
+    const commands = new Map<string, any>();
+    const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.prepareDiffStory.mockResolvedValue(undefined);
+    mocks.runReviewApp.mockClear();
+    codeDiffExtension(pi as never);
+    await commands.get("diff-story").handler("", ctx);
+    await vi.waitFor(() => expect(mocks.prepareDiffStory).toHaveBeenCalled());
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
+    expect(mocks.submitPullRequestReview).not.toHaveBeenCalled();
+  });
 
   it("offers editor recovery only for explicit resume, including when the source diff is now empty", async () => {
     const session = { ...reviewSessionData({ allComment: "current", allIntent: "comment", comments: [] }), id: "selected", identity: "/repo|working|local", generation: 7, revision: "worktree" };
@@ -1283,6 +1334,7 @@ describe("code diff extension", () => {
         select: vi.fn(async () => "Start discussion with agents"),
         editor: vi.fn(),
       },
+      modelRegistry: {},
     };
 
     codeDiffExtension(pi as never);

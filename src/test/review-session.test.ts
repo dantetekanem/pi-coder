@@ -106,6 +106,17 @@ afterEach(async () => {
 });
 
 describe("review sessions", () => {
+  it("preserves historical discussion records while rebasing review feedback", () => {
+    const data = sessionData({ discussions: [{ context: "Captured source", messages: [{ role: "user", content: "Why this change?" }], draft: "A follow-up for later" }] });
+    const id = saveReviewSession("discussion-target", data, { revision: "head" });
+    const saved = loadReviewSession("discussion-target", id)!;
+    expect(saved.discussions).toEqual(data.discussions);
+    expect(rebaseReviewSession(saved, [reviewFile("src/app.ts", 5)], ["git-diff"], {}).data.discussions).toEqual(data.discussions);
+    expect(saved.state.draft.comments.map(({ body, intent }) => ({ body, intent }))).toEqual([
+      { body: "Keep this covered.", intent: "comment" },
+    ]);
+  });
+
   it("keeps independent instances discoverable under one target and validates terminal continuation identity", () => {
     const identity = "pr|github|example/widgets|1";
     const first = createReviewInstanceId();

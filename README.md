@@ -1,9 +1,10 @@
 # pi-coder
 
-`pi-coder` adds two full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono):
+`pi-coder` adds full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono):
 
 - `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
 - `/code` browses and edits a workspace without leaving Pi.
+- `/diff-story` arranges a change as ordered code steps with linked implementation and test diffs.
 
 It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews.
 
@@ -58,11 +59,51 @@ In Herdr, `/diff` zooms the current pane while the review is open and restores t
 
 The review UI supports line, file, and review-wide feedback. Feedback can be marked as:
 
-- `DISCUSS` — send the question back to the agent.
+- `DISCUSS` — save a question for the main agent. Press `d` on code to add a note at the selected range.
 - `COMMENT` — keep review feedback for a local or remote review.
 - `MODIFY` — propose or apply an exact code change.
 
 GitHub pull requests work by default through the authenticated [`gh`](https://cli.github.com/) CLI. Confirmed reviews receive a grammar-safety pass before submission, and saved drafts are revalidated when the reviewed revision changes.
+
+### Follow a diff story
+
+```text
+/diff-story                        # walk through the selected local diff
+/diff-story main...HEAD            # walk through a range
+/diff-story remote <branch-or-url>
+/diff-story --resume               # resume a saved review/story
+/diff-story agent                  # choose the story model and thinking level
+```
+
+The story agent starts as `openai-codex/gpt-5.6-luna` with `max` thinking. Its selection is saved independently of the main conversation. Model selection validates support for the chosen thinking level.
+
+A full-screen preparation view shows the captured files, change counts, and generation phase. The extension extracts changed functions, individual tests, and supporting hunks locally, then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. The extension supplies the exact ranges, complete changed-line coverage, and file/symbol titles. Each paired test appears once beside its implementation.
+
+During preparation, a centered five-line strip shows public output, errors, and progress as they arrive, including the final ordering JSON. Gray text uses the normal terminal background, with the newest line at the bottom and older lines fading upward through 100% / 80% / 60% / 40% / 20%, approximated with terminal colors. The strip spans up to 120 columns. `Space` pauses/resumes the strip while generation and the running spinner continue. Elapsed time remains visible. The strip disappears when preparation ends. On generation failure, `r` explicitly retries against the same captured files.
+
+File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
+
+| Key | Story action |
+| --- | --- |
+| `Shift+Left` / `Shift+Right` | Previous / next step |
+| `Left` / `Right` | Focus implementation / tests |
+| `[` / `]` | Previous / next related range in the focused member |
+| `R` | Mark the current step seen |
+| `c` / `d` | Comment / discuss at the selected range |
+| `h` / `Tab` | Reach comments or the paired panes |
+| `i` | View captured files, story steps, and saved notes |
+| `F` | Inspect the full captured diff, or return to the story |
+| `s` | Finish through the normal review flow |
+
+In either review mode, diff movement follows changed lines by default. Hold `Option` (`Alt`) with movement keys to reach unchanged code; `Option+Shift+↑/↓` selects a context range for a note. Cursor keys stay with an active editor. Steps with no related changed test show an empty test pane. `F` opens the full diff with the same saved comments.
+
+Resume retains the active step, per-member selections/scroll, marks, and comments. Changed bytes invalidate the saved story: explicitly rebuild it, use the ordinary diff, or cancel. Existing feedback remains subject to its usual anchor validation.
+
+The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. Full captured code stays available in the review panes. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
+
+### Discuss saved review notes
+
+In `/diff` and `/diff-story`, `d` opens the normal comment editor with DISCUSS intent. Save the note with `Enter` and continue reviewing. Finish with `s` to hand feedback to the main agent; remote reviews offer “Start discussion with agents” when DISCUSS notes exist. COMMENT and MODIFY items stay saved for the PR author. After the discussion, confirm “Good to continue the review?” to reopen the saved review.
 
 ### Review submission and recovery
 
@@ -74,7 +115,7 @@ UI and tool submissions share draft cleanup. Only confirmed items whose saved ID
 
 ### Drafts and interrupted typing
 
-A normal `/diff` opens a fresh review instance, even for a target with saved feedback. Use `/diff --resume` to pick an existing instance, or add `--resume <id>` after a local, range, or remote target. Picker labels include the instance ID; legacy drafts remain explicitly resumable. Discarded and fully consumed IDs cannot be reused.
+A normal `/diff` opens a fresh review instance, even for a target with saved feedback. Use `/diff --resume` to pick an existing instance, or add `--resume <id>` after a local, range, or remote target. Picker labels include the instance ID; legacy drafts remain explicitly resumable. Discarded and retired draft-only IDs cannot be reused. Reviews with story or historical discussion data remain resumable after accepted feedback is consumed.
 
 Snapshot saves compare the last loaded generation under a process-safe local store lock. A stale writer does not overwrite another review's feedback. On a conflict or storage error, keep the review open and copy or resolve its text; the UI does not reload a newer generation and replay stale edits. Picker membership is rebuilt from valid snapshots, including after an interrupted index update. Snapshots expire after 30 days without a snapshot update; terminal tombstones are retained indefinitely.
 
@@ -100,7 +141,8 @@ Common review controls:
 
 | Key | Action |
 | --- | --- |
-| Arrow keys | Navigate files and diff lines |
+| Arrow keys | Navigate files and changed diff lines by default |
+| `Option`/`Alt` + `↑` / `↓` / `PgUp` / `PgDn` / `Home` / `End` | Reach any code line, revealing collapsed context as needed; add `Shift` to select a range |
 | `c` / `d` | Add a comment / discussion |
 | `Enter` or `m` | Edit the selected line |
 | `v` | Toggle unified and side-by-side views; from an opened PR thread, jump to its verified code location |

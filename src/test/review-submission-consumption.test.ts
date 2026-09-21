@@ -48,6 +48,19 @@ describe("confirmed submission draft consumption", () => {
     expect(consumeConfirmedSubmissionDraft(createSubmissionJournal().load(attempt.id)!)).toMatchObject({ status: "unavailable" });
   });
 
+  it("consumes accepted feedback without deleting historical discussion records or replaying them on retry", () => {
+    const attempt = fixture();
+    const data = current();
+    data.discussions = [{ context: "Exact captured context", messages: [{ role: "user", content: "Why this change?" }] }];
+    save(data);
+    expect(consumeConfirmedSubmissionDraft(attempt)).toMatchObject({ status: "saved", remainingItems: 0 });
+    expect(current()?.discussions).toEqual(data.discussions);
+    expect(current()?.state.draft).toMatchObject({ allComment: "", comments: [] });
+    const saved = current();
+    expect(consumeConfirmedSubmissionDraft(createSubmissionJournal().load(attempt.id)!)).toMatchObject({ status: "retained", remainingItems: 0 });
+    expect(current()).toEqual(saved);
+  });
+
   it("keeps an empty partial session and its full snapshot metadata, with a resumable journal alias", () => {
     const attempt = fixture(true), before = current();
     expect(consumeConfirmedSubmissionDraft(attempt)).toMatchObject({ status: "saved", remainingItems: 0 });

@@ -111,6 +111,54 @@ function createHarness(
 }
 
 describe("ReviewApp interaction", () => {
+  it.each(["unified", "side-by-side"])("uses Option movement for hidden context in %s without changing the normal changed-line mode", async (mode) => {
+    const before = Array.from({ length: 30 }, (_, i) => `line${i + 1}()`);
+    const after = before.map((line, i) => i === 4 || i === 24 ? `changed${i + 1}()` : line);
+    const { app, loadFileContents } = createHarness({ originalContent: before.join("\n"), modifiedContent: after.join("\n") });
+    try {
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      (app as any).diffViewMode = mode;
+      (app as any).state.focus = "diff";
+      app.render(120);
+      const selected = () => getSelectedLineTarget((app as any).state, makeFile().id, "git-diff");
+      app.handleInput("\x1b[B");
+      if (selected()?.line === 5) app.handleInput("\x1b[B");
+      expect(selected()?.line).toBe(25);
+      app.handleInput("\x1b[1;3A");
+      expect(selected()?.line).toBe(24);
+      for (let i = 0; i < 5; i += 1) app.handleInput("\x1b[1;3A");
+      expect(selected()?.line).toBe(19);
+      app.render(120);
+      expect(selected()?.line).toBe(19);
+      expect((app as any).getVisibleLineTargets(makeFile().id, "git-diff")).toContainEqual(selected());
+      app.handleInput("\x1b[1;4A");
+      app.handleInput("d");
+      app.handleInput("Inspect this context");
+      app.handleInput("\r");
+      expect((app as any).state.draft.comments[0]).toMatchObject({ intent: "discuss", startLine: 18, endLine: 19 });
+      app.handleInput("\x1b[B");
+      expect(selected()?.line).toBe(25);
+      app.handleInput("\x1b[1;3H");
+      expect(selected()?.line).toBe(1);
+      app.handleInput("\x1b[6;3~");
+      expect(selected()?.line).toBe(Math.min(30, 1 + (app as any).diffPageSize));
+      app.handleInput("\x1b[5;3~");
+      expect(selected()?.line).toBe(1);
+      app.handleInput("\x1b[1;3F");
+      expect(selected()?.line).toBe(30);
+      app.handleInput("\x1b[1;3H");
+      const side = selected()?.side;
+      app.handleInput("\x1bd");
+      expect(selected()).toMatchObject({ side, line: 1 + getHalfPageStep((app as any).diffPageSize) });
+      app.handleInput("\x1bu");
+      expect(selected()?.line).toBe(1);
+      app.handleInput("\x1bf");
+      expect(selected()?.line).toBe(1 + (app as any).diffPageSize);
+      app.handleInput("\x1bb");
+      expect(selected()?.line).toBe(1);
+    } finally { app.dispose(); }
+  });
+
   it("reuses the action hint at the same width and rebuilds it after resize or invalidation", async () => {
     const { app, loadFileContents, theme } = createHarness();
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
@@ -157,6 +205,33 @@ describe("ReviewApp interaction", () => {
       app.invalidate();
       app.handleInput("\x1b[A");
       expect(getSelectedLineTarget((app as any).state, fileId, "git-diff")).toEqual({ side: "added", line: 2 });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each(["unified", "side-by-side"])("preserves syntax foreground across every selected wrapped %s row", async (mode) => {
+    const text = "- A compact progress widget keeps ordinary text and `inline code` readable across several wrapped terminal rows.";
+    const file = makeFile("README.md");
+    const { app, loadFileContents, theme } = createHarness({ originalContent: "", modifiedContent: `${text}\n` }, [file]);
+    const colors: Record<string, number> = { accent: 35, borderMuted: 90, success: 32, mdListBullet: 35, mdCode: 36 };
+    theme.fg = (color, value) => `\x1b[${colors[color] ?? 37}m${value}\x1b[39m`;
+    theme.bg = (color, value) => `\x1b[${color === "selectedBg" ? 44 : 40}m${value}\x1b[49m`;
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    try {
+      (app as any).state.wrapLines = true;
+      const layout = (app as any).getDiffLayout(file.id, "git-diff");
+      const render = (current: boolean): string[] => mode === "unified"
+        ? (app as any).buildUnifiedRowLines(layout.unifiedRows[0], 42, "markdown", current, current, false, undefined)
+        : (app as any).renderSideBySideCellLines(layout.sideBySideRows[0].newCell, 40, "markdown", current, current, false, new Map());
+      const normal = render(false);
+      const selected = render(true);
+      const withoutBackground = (lines: string[]) => lines.map((line) => line.replace(/\x1b\[(?:40|44|49)m/g, ""));
+
+      expect(selected.length).toBeGreaterThan(1);
+      expect(withoutBackground(selected)).toEqual(withoutBackground(normal));
+      expect(selected.every((line) => line.startsWith("\x1b[44m") && line.endsWith("\x1b[49m"))).toBe(true);
+      expect(selected.join("")).toContain("\x1b[36m");
     } finally {
       app.dispose();
     }

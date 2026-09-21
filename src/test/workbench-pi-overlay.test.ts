@@ -57,6 +57,16 @@ describe("Pi full-screen workbench presentation", () => {
     expect(reviewCustom).toHaveBeenCalledWith(expect.any(Function), fullScreenOptions);
   });
 
+  it("mounts the story at the terminal origin without margins", async () => {
+    const custom = vi.fn(async () => ({ type: "cancel" as const }));
+    await runReviewApp({ ui: { custom } } as never, { story: {} } as never);
+
+    expect(custom).toHaveBeenCalledWith(expect.any(Function), {
+      ...fullScreenOptions,
+      overlayOptions: { ...fullScreenOptions.overlayOptions, anchor: "top-left", margin: 0 },
+    });
+  });
+
   it("injects Pi's clipboard writer without coupling the shared component to Pi", async () => {
     const copyText = vi.fn(async (_text: string) => undefined);
     let injectedClipboard: { writeText(text: string): Promise<void> } | undefined;

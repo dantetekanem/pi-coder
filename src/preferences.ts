@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getShortcutConfigPath } from "./shortcuts.js";
+import { DEFAULT_STORY_AGENT, type ReviewAgentSelection } from "./review-agent.js";
 import { DEFAULT_SHIKI_THEME } from "./workbench/node/shiki.js";
 
 export type PersistedDiffViewMode = "unified" | "side-by-side";
@@ -29,6 +30,7 @@ export interface ReviewPreferences {
   commentsGlobal: boolean;
   paneVisibility: ReviewPaneVisibility;
   lastReviewVerdict: PersistedReviewVerdict | null;
+  storyAgent: ReviewAgentSelection;
 }
 
 export const DEFAULT_REVIEW_PANE_VISIBILITY: ReviewPaneVisibility = {
@@ -49,6 +51,7 @@ export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
   commentsGlobal: false,
   paneVisibility: DEFAULT_REVIEW_PANE_VISIBILITY,
   lastReviewVerdict: null,
+  storyAgent: DEFAULT_STORY_AGENT,
 };
 
 function getPreferencesPath(): string {
@@ -71,10 +74,19 @@ function isPersistedReviewVerdict(value: unknown): value is PersistedReviewVerdi
   return value === "approve" || value === "request_changes" || value === "comment";
 }
 
+function isReviewAgentSelection(value: unknown): value is ReviewAgentSelection {
+  if (value == null || typeof value !== "object") return false;
+  const selection = value as Record<string, unknown>;
+  return [selection.provider, selection.model, selection.thinking].every((part) =>
+    typeof part === "string" && part.trim().length > 0 && part.length <= 512
+      && !/[\u0000-\u001f\u007f]/.test(part));
+}
+
 function defaultReviewPreferences(): ReviewPreferences {
   return {
     ...DEFAULT_REVIEW_PREFERENCES,
     paneVisibility: { ...DEFAULT_REVIEW_PANE_VISIBILITY },
+    storyAgent: { ...DEFAULT_STORY_AGENT },
   };
 }
 
@@ -107,6 +119,7 @@ export function loadReviewPreferences(): ReviewPreferences {
       contextLineNavigation: typeof record.contextLineNavigation === "boolean" ? record.contextLineNavigation : DEFAULT_REVIEW_PREFERENCES.contextLineNavigation,
       commentsGlobal: typeof record.commentsGlobal === "boolean" ? record.commentsGlobal : DEFAULT_REVIEW_PREFERENCES.commentsGlobal,
       paneVisibility: loadPaneVisibility(record.paneVisibility),
+      storyAgent: isReviewAgentSelection(record.storyAgent) ? record.storyAgent : { ...DEFAULT_STORY_AGENT },
     };
   } catch {
     return defaultReviewPreferences();
@@ -122,6 +135,7 @@ export function saveReviewPreference(patch: Partial<ReviewPreferences>): void {
     paneVisibility: patch.paneVisibility == null
       ? current.paneVisibility
       : { ...current.paneVisibility, ...patch.paneVisibility },
+    storyAgent: isReviewAgentSelection(patch.storyAgent) ? patch.storyAgent : current.storyAgent,
   };
 
   try {

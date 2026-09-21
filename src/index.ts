@@ -24,6 +24,8 @@ import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComm
 import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
+import { prepareDiffStory, selectStoryAgent, type PreparedDiffStory } from "./ui/diff-story.js";
+import { getDefaultScope, getScopedFiles } from "./state.js";
 import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
@@ -38,6 +40,7 @@ import { hasExactSubmoduleRange, type ReviewComposition, type ReviewFile, type R
 type InteractiveReviewMode = "working" | "staged" | "branch" | "custom";
 
 interface InteractiveReviewParams {
+  story?: boolean;
   mode?: InteractiveReviewMode;
   ref?: string;
   resume?: string;
@@ -883,7 +886,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     data: ReviewWindowData,
     remoteTarget?: RemoteReviewTarget,
     seedComments?: SeedReviewComment[],
-    sessionOptions?: { resumeId?: string; resumeIdentity?: string; discard?: boolean },
+    sessionOptions?: { resumeId?: string; resumeIdentity?: string; discard?: boolean; story?: boolean },
     localReview?: { scopeFingerprint: string; refresh: () => Promise<ReviewWindowData> },
   ): Promise<ReviewRunStatus> {
     if (activeReview) {
@@ -899,7 +902,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       let branchBaseRevision = data.branchBaseRevision;
       let modifiedRevision = data.modifiedRevision;
       let visibleScopes = data.visibleScopes;
-      const loadFileContentsForReview = (activeRepoRoot: string, file: ReviewFile, scope: ReviewScope) => activeRepoRoot === repoRoot
+      let loadFileContentsForReview = (activeRepoRoot: string, file: ReviewFile, scope: ReviewScope) => activeRepoRoot === repoRoot
         ? loadReviewFileContents(pi, activeRepoRoot, file, scope, branchBaseRevision, modifiedRevision)
         : loadReviewFileContents(pi, activeRepoRoot, file, scope);
       const shortcutConfig = loadCommentShortcuts();
@@ -1009,7 +1012,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         }
         latestSession = retainedSession;
         latestSessionDurable = true;
-        if (remainingItems === 0) return { remainingItems, message: deleteSession() };
+        if (remainingItems === 0) {
+          const hasLocalHistory = retainedSession.story != null || (retainedSession.discussions?.length ?? 0) > 0;
+          return { remainingItems, message: hasLocalHistory ? undefined : deleteSession() };
+        }
         const message = `${remainingItems} unresolved draft ${remainingItems === 1 ? "item remains" : "items remain"} saved in review session ${sessionId}.`;
         ctx.ui.notify(message, "warning");
         return { remainingItems, message };
@@ -1033,6 +1039,27 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             ...(handoffThreads == null ? {} : { openThreads: handoffThreads.open, awaitingReply: handoffThreads.awaitingReply }),
           };
 
+      let story: PreparedDiffStory | undefined;
+      if (sessionOptions?.story || initialSession?.story != null) {
+        const scope = initialSession?.state.activeScope ?? getDefaultScope(files);
+        const prepared = await prepareDiffStory(
+          ctx,
+          getScopedFiles(files, scope),
+          scope,
+          (file, selectedScope) => loadFileContentsForReview(repoRoot, file, selectedScope),
+          initialSession?.story,
+        );
+        if (prepared == null) return { started: false, message: "Story preparation cancelled; saved feedback was not changed." };
+        if (prepared !== "diff") {
+          story = prepared;
+          const originalLoader = loadFileContentsForReview;
+          loadFileContentsForReview = (root, file, selectedScope) => {
+            const captured = root === repoRoot ? story!.snapshot.files.find((entry) => entry.fileId === file.id && entry.scope === selectedScope) : undefined;
+            return captured == null ? originalLoader(root, file, selectedScope) : Promise.resolve(captured.contents);
+          };
+          visibleScopes = [scope];
+        } else if (initialSession != null) initialSession = { ...initialSession, story: undefined };
+      }
       const seed = resolveSeedComments(files, visibleScopes, seedComments ?? []);
       const partitionedSeed = initialSession == null
         ? { applicable: seed.resolved, conflicts: [] }
@@ -1078,6 +1105,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           ...createRemotePullRequestSources(pi, ctx, remoteTarget),
           orderSignals: buildReviewOrderSignals(handoff),
           reviewHeader,
+          story,
           initialSession: initialSession ?? undefined,
           reviewIdentity: sessionIdentity,
           reviewSessionId: sessionId,
@@ -1381,7 +1409,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     cwd = ctx.cwd,
     comments?: SeedReviewComment[],
     options?: ReviewWindowOptions,
-    sessionOptions?: { resumeId?: string; resumeIdentity?: string; discard?: boolean },
+    sessionOptions?: { resumeId?: string; resumeIdentity?: string; discard?: boolean; story?: boolean },
   ): Promise<ReviewRunStatus> {
     const reviewCwd = normalizeReviewCwd(cwd, ctx.cwd);
     const refresh = () => options == null
@@ -1469,7 +1497,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         // A fully consumed continuation names a terminal instance; start a fresh one for that target.
         const continuationId = params.continuation?.priorSessionId;
         const resumeId = continuationId != null && loadReviewSession(pullRequestSessionIdentity(target), continuationId) != null ? continuationId : params.resume;
-        const status = await openReviewData(ctx, data, target, comments, { resumeId, resumeIdentity: params.resumeIdentity, discard: params.discardResume });
+        const status = await openReviewData(ctx, data, target, comments, { resumeId, resumeIdentity: params.resumeIdentity, discard: params.discardResume, story: params.story });
         return offerNextReview(ctx, status, target.gitRoot);
       } catch (error) {
         setRemoteProgress(ctx, undefined);
@@ -1499,7 +1527,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         data,
         undefined,
         comments,
-        { resumeId: params.resume, resumeIdentity: params.resumeIdentity, discard: params.discardResume },
+        { resumeId: params.resume, resumeIdentity: params.resumeIdentity, discard: params.discardResume, story: params.story },
         { scopeFingerprint, refresh },
       );
     }
@@ -1509,7 +1537,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       reviewCwd ?? fallbackCwd,
       comments,
       hasReviewOptions ? reviewOptions : undefined,
-      { resumeId: params.resume, resumeIdentity: params.resumeIdentity, discard: params.discardResume },
+      { resumeId: params.resume, resumeIdentity: params.resumeIdentity, discard: params.discardResume, story: params.story },
     );
   }
 
@@ -1520,6 +1548,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     comments?: SeedReviewComment[],
     handoff?: PullRequestHandoff,
     continuation?: RemoteDiscussContinuation,
+    story = false,
   ): Promise<ReviewRunStatus> {
     if (!ctx.hasUI) return { started: false, message: "Interactive review requires a TUI session." };
 
@@ -1529,10 +1558,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     if (handoff != null) {
       const remote = extractRemoteArgs(trimmed, fallbackCwd);
       if (remote == null) return unsupported("Supplied pull request metadata requires a remote review target, for example: remote <url>.", ctx);
-      return runInteractiveReview({ ...parseInteractiveReviewArgs(trimmed), remote, handoff, continuation }, ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(trimmed), remote, handoff, continuation, story }, ctx, fallbackCwd, comments);
     }
 
-    if (trimmed.length === 0) return openReview(ctx, fallbackCwd, comments);
+    if (trimmed.length === 0) return openReview(ctx, fallbackCwd, comments, undefined, { story });
 
     const tokens = trimmed.split(/\s+/);
     const firstToken = tokens[0]!;
@@ -1540,20 +1569,20 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     if (firstToken.toLowerCase() === "remote") {
       const target = tokens[1];
       if (target == null) return unsupported("Usage: /diff remote <url | branch>", ctx);
-      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(2).join(" ")), remote: target, continuation }, ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(2).join(" ")), remote: target, continuation, story }, ctx, fallbackCwd, comments);
     }
 
     if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) {
-      return runInteractiveReview(parseInteractiveReviewArgs(trimmed), ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(trimmed), story }, ctx, fallbackCwd, comments);
     }
 
     const localCwd = resolveLocalReviewCwdArg(trimmed, fallbackCwd);
-    if (localCwd != null) return openReview(ctx, localCwd, comments);
+    if (localCwd != null) return openReview(ctx, localCwd, comments, undefined, { story });
 
     if (trimmed.includes("..")) {
-      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), mode: "custom", ref: firstToken }, ctx, fallbackCwd, comments);
+      return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), mode: "custom", ref: firstToken, story }, ctx, fallbackCwd, comments);
     }
-    return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), remote: firstToken, continuation }, ctx, fallbackCwd, comments);
+    return runInteractiveReview({ ...parseInteractiveReviewArgs(tokens.slice(1).join(" ")), remote: firstToken, continuation, story }, ctx, fallbackCwd, comments);
   }
 
   function formatOpenCodeDiffToolText(status: ReviewRunStatus, args: string, cwd: string): string {
@@ -1592,10 +1621,10 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     starting: () => ({ started: true, message: "Review is starting." }),
   });
 
-  function startDiff(args: string, ctx: ExtensionContext): ReviewRunStatus {
+  function startDiff(args: string, ctx: ExtensionContext, story = false): ReviewRunStatus {
     return reviewInvocations.runDetached(
       ctx,
-      () => runDiff(args, ctx),
+      () => runDiff(args, ctx, ctx.cwd, undefined, undefined, undefined, story),
       (status) => stageDirectReviewPrompt(status, ctx),
     );
   }
@@ -1726,6 +1755,17 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerCommand("code", codeCommand);
   pi.registerCommand("diff", reviewCommand);
   pi.registerCommand("review", reviewCommand);
+  pi.registerCommand("diff-story", {
+    description: "Follow a change as a linked code/test story. Same targets as /diff; agent selects the independent model/thinking.",
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI || ("mode" in ctx && ctx.mode !== "tui")) {
+        ctx.ui.notify("Diff stories require a TUI session.", "error");
+        return;
+      }
+      if (args.trim() === "agent") await selectStoryAgent(ctx);
+      else startDiff(args, ctx, true);
+    },
+  });
 
   pi.registerTool({
     name: "open_code",
