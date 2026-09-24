@@ -47,7 +47,7 @@ import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmo
 import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
 import { ExactTextEditor } from "./exact-text-editor.js";
-import { restoreStoryNavigation, storyAnchor, storyAnchors, storyViewportKey, type StoryMember, type StorySessionData } from "../diff-story/navigation.js";
+import { restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
 import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
 import { edgeToEdgeOverlayOptions, fullScreenOverlayOptions } from "./full-screen-overlay.js";
 import { hashTargetSlice, logicalLineCount } from "../workbench/target.js";
@@ -1549,6 +1549,7 @@ export class ReviewApp {
   private editingResponse: string | null = null;
   private story?: StorySessionData;
   private renderingStoryAnchor?: StoryAnchor;
+  private renderingStoryPage?: StoryPage;
   private alignStoryAnchor = false;
   private storyInventory = false;
   private storyBrowsingDiff = false;
@@ -2302,7 +2303,8 @@ export class ReviewApp {
     const entry = this.getEntry(fileId, scope);
     if (entry?.status !== "ready") return null;
     const contextSide = getSelectedLineTarget(this.state, fileId, scope)?.side ?? this.renderingStoryAnchor?.side ?? (this.story == null || this.storyBrowsingDiff ? undefined : storyAnchor(this.story)?.side) ?? "added";
-    const key = `${scope}\u001f${fileId}\u001f${this.state.hideUnchanged ? 1 : 0}\u001f${contextSide}`;
+    const page = this.storyPageFor(fileId);
+    const key = `${scope}\u001f${fileId}\u001f${this.state.hideUnchanged ? 1 : 0}\u001f${contextSide}\u001f${page?.key ?? ""}`;
     const cached = this.diffLayoutCache.get(key);
     if (cached != null) {
       setBoundedMapEntry(this.diffLayoutCache, key, cached, MAX_DIFF_LAYOUT_ENTRIES);
@@ -2313,9 +2315,11 @@ export class ReviewApp {
       ? entry.baseDiff
       : adjustStructuredDiffContext(entry.baseDiff, this.state.hideUnchanged ? 0 : DEFAULT_CONTEXT_LINES);
     const expandedRows = this.expandedContextRows.get(this.cacheKey(fileId, scope));
-    const displayDiff = expandedRows == null || expandedRows.size === 0
-      ? contextAdjustedDiff
-      : revealStructuredDiffRows(contextAdjustedDiff, expandedRows);
+    const displayDiff = page != null
+      ? storyPageDiff(entry.baseDiff, page.anchors, DEFAULT_CONTEXT_LINES)
+      : expandedRows == null || expandedRows.size === 0
+        ? contextAdjustedDiff
+        : revealStructuredDiffRows(contextAdjustedDiff, expandedRows);
     const unifiedRows = buildDisplayRows(displayDiff, contextSide);
     const sideBySideRows = buildSideBySideDisplayRows(displayDiff);
 
@@ -2355,6 +2359,12 @@ export class ReviewApp {
     };
     setBoundedMapEntry(this.diffLayoutCache, key, layout, MAX_DIFF_LAYOUT_ENTRIES);
     return layout;
+  }
+
+  private storyPageFor(fileId: string): StoryPage | undefined {
+    if (this.story == null || this.storyBrowsingDiff) return undefined;
+    const page = this.renderingStoryPage ?? storyPage(this.story);
+    return page?.fileId === fileId ? page : undefined;
   }
 
   private getDisplayDiff(fileId: string | null, scope: ReviewScope): StructuredDiff | null {
@@ -3863,8 +3873,18 @@ export class ReviewApp {
     if (file == null || current == null || entry?.status !== "ready") return;
     const total = current.side === "deleted" ? entry.baseDiff.totalOldLines : entry.baseDiff.totalNewLines;
     if (total === 0) return;
-    const line = Math.max(1, Math.min(total, current.line + delta));
     const endLine = extend ? current.endLine ?? current.line : undefined;
+    if (this.storyPageFor(file.id) != null) {
+      const lines = this.getVisibleLineTargets(file.id, scope).filter((target) => target.side === current.side).map((target) => target.line);
+      const next = delta > 0
+        ? lines.filter((line) => line > current.line).slice(0, delta).at(-1)
+        : lines.filter((line) => line < current.line).slice(delta).at(0);
+      if (next == null) return;
+      this.state = setSelectedLineTarget(this.state, file.id, scope, { side: current.side, line: next, ...(endLine == null ? {} : { endLine }) });
+      this.requestRender();
+      return;
+    }
+    const line = Math.max(1, Math.min(total, current.line + delta));
     const key = this.cacheKey(file.id, scope);
     const expanded = new Set(this.expandedContextRows.get(key) ?? []);
     entry.baseDiff.rows.forEach((row, index) => {
@@ -5193,7 +5213,7 @@ export class ReviewApp {
       if (id != null) story.viewedStepIds = story.viewedStepIds.includes(id) ? story.viewedStepIds.filter((entry) => entry !== id) : [...story.viewedStepIds, id];
     } else if (data === "[" || data === "]") {
       this.captureStorySession();
-      const count = storyAnchors(story, story.member).length;
+      const count = storyPages(story, story.member).length;
       story.related[story.member] = Math.max(0, Math.min(count - 1, story.related[story.member] + (data === "]" ? 1 : -1)));
       this.activateStoryMember(story.member);
     } else if (data === "i") {
@@ -5214,7 +5234,8 @@ export class ReviewApp {
 
   private renderStoryMember(member: StoryMember, width: number, height: number): string[] {
     const story = this.story!;
-    const anchor = storyAnchor(story, member);
+    const page = storyPage(story, member);
+    const anchor = page?.anchor;
     const title = member === "implementation" ? "Implementation" : "Related changed tests";
     if (anchor == null) {
       const message = member === "tests" ? "No related changed tests" : "No implementation anchor";
@@ -5231,12 +5252,13 @@ export class ReviewApp {
     const view = story.viewports[storyViewportKey(story, member)];
     try {
       this.renderingStoryAnchor = anchor;
+      this.renderingStoryPage = page;
       this.alignStoryAnchor = !view?.initialized;
       this.state = { ...this.state, activeFileId: anchor.fileId, focus: active ? "diff" : "navigator" };
       this.state = setSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope, view?.selection ?? { side: anchor.side, line: anchor.startLine });
       this.diffScroll = Number.isFinite(view?.scroll) ? Math.max(0, view!.scroll) : 0;
       if (!active) this.editTarget = null;
-      const count = storyAnchors(story, member).length;
+      const count = storyPages(story, member).length;
       const lines = this.renderDiff(width, height, `${title}${count > 1 ? ` ${story.related[member] + 1}/${count}` : ""}`);
       story.viewports[storyViewportKey(story, member)] = {
         scroll: this.diffScroll,
@@ -5252,6 +5274,7 @@ export class ReviewApp {
       return lines;
     } finally {
       this.renderingStoryAnchor = undefined;
+      this.renderingStoryPage = undefined;
       this.alignStoryAnchor = false;
       this.state = previous.state;
       this.editTarget = previous.editTarget;

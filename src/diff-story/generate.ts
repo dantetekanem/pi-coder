@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type DiffStory, type StorySnapshot, validateDiffStory } from "./plan.js";
-import { pairStoryTests, prepareStoryUnits, type StoryUnit } from "./units.js";
+import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, type StoryUnit } from "./units.js";
 
 export type DiffStoryGenerate = (system: string, prompt: string, signal: AbortSignal) => Promise<string>;
 export type DiffStoryProgress = (phase: "Preparing code and test units" | "Generating story" | "Validating story") => void;
@@ -36,18 +36,26 @@ function orderedStory(snapshot: StorySnapshot, units: StoryUnit[], pairs: Map<st
     if (source.test || !test.test) throw new Error("Diff story pairs must link code to tests.");
     pairs.set(test.id, source.id);
   }
+  attachUnpairedTests(units, pairs);
   const ordered = [...new Set([...result.order.map((id) => unitFor(id)), ...units])];
+  const independentTests = new Map<string, StoryUnit[]>();
+  for (const unit of ordered) {
+    if (unit.test && !pairs.has(unit.id)) independentTests.set(unit.path, [...independentTests.get(unit.path) ?? [], unit]);
+  }
   return validateDiffStory({
     version: 1,
     snapshot: snapshot.fingerprint,
     summary: "",
-    steps: ordered.filter((unit) => !pairs.has(unit.id)).map((unit) => ({
-      id: unit.id,
-      title: `${unit.path} · ${unit.symbol}`,
-      explanation: "",
-      implementation: unit.anchors,
-      tests: units.filter((test) => pairs.get(test.id) === unit.id).flatMap((test) => test.anchors),
-    })),
+    steps: ordered.filter((unit) => !pairs.has(unit.id) && (!unit.test || independentTests.get(unit.path)![0] === unit)).map((unit) => {
+      const group = unit.test ? independentTests.get(unit.path)! : [unit];
+      return {
+        id: unit.id,
+        title: `${unit.path} · ${unit.symbol}${group.length > 1 ? ` and ${group.length - 1} more` : ""}`,
+        explanation: "",
+        implementation: group.flatMap((member) => member.anchors),
+        tests: units.filter((test) => pairs.get(test.id) === unit.id).flatMap((test) => test.anchors),
+      };
+    }),
   }, snapshot);
 }
 

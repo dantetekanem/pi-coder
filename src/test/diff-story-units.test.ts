@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { generateDiffStory } from "../diff-story/generate.js";
 import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, type StoryFile } from "../diff-story/plan.js";
-import { restoreStoryNavigation, storyAnchors } from "../diff-story/navigation.js";
+import { restoreStoryNavigation, storyAnchors, storyPages } from "../diff-story/navigation.js";
 import { prepareStoryUnits } from "../diff-story/units.js";
 
 function file(path: string, before: string, after: string): StoryFile {
@@ -143,6 +143,39 @@ end
     expect(units[0]!.anchors[0]).toMatchObject({ startLine: 1, endLine: 4 });
   });
 
+  it("folds loose changes into the nearest declaration and keeps a file without declarations in one unit", () => {
+    const captured = createStorySnapshot([
+      file("lib/order.rb", "class Order\n  LIMIT = 1\n\n  def total\n    1\n  end\nend\n", "class Order\n  LIMIT = 2\n\n  def total\n    2\n  end\nend\n"),
+      file("config/app.yml", "a: 1\nb: 2\nc: 3\nd: 4\ne: 5\nf: 6\ng: 7\n", "a: 0\nb: 2\nc: 3\nd: 4\ne: 5\nf: 6\ng: 0\n"),
+    ]);
+
+    const units = prepareStoryUnits(captured);
+
+    expect(units.map((unit) => unit.symbol)).toEqual(["total", "lines 1–7"]);
+    expect(units[0]!.anchors.map(({ side, startLine, endLine }) => [side, startLine, endLine])).toEqual([
+      ["added", 2, 2], ["deleted", 2, 2], ["added", 4, 6], ["deleted", 4, 6],
+    ]);
+    expect(units[1]!.anchors).toHaveLength(4);
+  });
+
+  it("attaches setup and helpers to the nearest paired test's step and gives an unpaired test file one step", async () => {
+    const captured = createStorySnapshot([
+      file("lib/parser.rb", "", "def parse\n  1\nend\n\ndef print\n  2\nend\n"),
+      file("test/parser_test.rb", "", "def setup\n  @value = 1\nend\n\ntest 'parses' do\n  assert parse\nend\n\ndef helper\n  2\nend\n"),
+      file("test/other_test.rb", "", "test 'first' do\n  assert true\nend\n\ntest 'second' do\n  assert true\nend\n"),
+    ]);
+
+    const story = await generateDiffStory(captured, async () => '{"order":[],"pairs":[]}', new AbortController().signal, () => {});
+
+    expect(story.steps.map((step) => step.title)).toEqual([
+      "lib/parser.rb · parse", "lib/parser.rb · print", "test/other_test.rb · first and 1 more",
+    ]);
+    expect(story.steps[0]!.tests.map(({ startLine, endLine }) => [startLine, endLine])).toEqual([[1, 4], [5, 8], [9, 11]]);
+    expect(story.steps[1]!.tests).toEqual([]);
+    expect(story.steps[2]!.implementation.map(({ startLine, endLine }) => [startLine, endLine])).toEqual([[1, 4], [5, 7]]);
+    expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+  });
+
   it("handles Ruby methods, test blocks, deletion-only units and supporting changes", async () => {
     const captured = createStorySnapshot([
       file("lib/order.rb", "class Order\n  def total\n    1\n  end\n  def legacy\n    0\n  end\nend\n", "class Order\n  def total\n    2\n  end\nend\n"),
@@ -180,8 +213,12 @@ end
     const navigation = restoreStoryNavigation(story);
     expect(storyAnchors(navigation)).toHaveLength(1);
     navigation.step = 1;
-    expect(storyAnchors(navigation, "tests").map((anchor) => anchor.unitId)).toEqual(["u3", "u4"]);
-    expect(storyAnchors(navigation, "tests").every((anchor) => anchor.side === "added")).toBe(true);
+    const pages = storyPages(navigation, "tests");
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.anchors.map((anchor) => [anchor.unitId, anchor.side])).toEqual([
+      ["u3", "added"], ["u3", "deleted"], ["u4", "added"], ["u4", "deleted"],
+    ]);
+    expect(pages[0]!.anchor).toMatchObject({ unitId: "u3", side: "added" });
     expect(uncoveredStoryChanges(story, captured)).toEqual([]);
   });
 

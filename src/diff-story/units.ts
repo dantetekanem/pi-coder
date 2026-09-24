@@ -1,4 +1,4 @@
-import { buildStructuredDiff } from "../diff.js";
+import { buildStructuredDiff, type StructuredDiffRow } from "../diff.js";
 import type { StoryAnchor, StorySnapshot } from "./plan.js";
 
 export interface StoryUnit {
@@ -57,7 +57,54 @@ function functionOwners(source: string[]): Array<string | undefined> {
   return owners;
 }
 
-/** Extracts navigation ranges locally; unfamiliar syntax remains a changed-hunk unit. */
+function foldLooseChanges(
+  bySymbol: Map<string, StoryUnit>,
+  rows: readonly StructuredDiffRow[],
+  sourceLines: Record<StoryAnchor["side"], string[]>,
+): StoryUnit[] {
+  const rowOf = { added: new Map<number, number>(), deleted: new Map<number, number>() };
+  rows.forEach((row, index) => {
+    if (row.newLineNumber != null) rowOf.added.set(row.newLineNumber, index);
+    if (row.oldLineNumber != null) rowOf.deleted.set(row.oldLineNumber, index);
+  });
+  const span = (anchor: Omit<StoryAnchor, "hash">) =>
+    [rowOf[anchor.side].get(anchor.startLine) ?? 0, rowOf[anchor.side].get(anchor.endLine) ?? 0] as const;
+  const declared = [...bySymbol].filter(([key]) => !key.startsWith("hunk:")).map(([, unit]) => unit);
+  const loose = [...bySymbol].filter(([key]) => key.startsWith("hunk:")).map(([, unit]) => unit);
+  const ownSpans = new Map(declared.map((unit) => [unit, unit.anchors.map(span)]));
+  const kept = declared.length > 0 ? declared : loose.slice(0, 1);
+  for (const unit of declared.length > 0 ? loose : loose.slice(1)) {
+    for (const anchor of unit.anchors) {
+      const [start, end] = span(anchor);
+      let target = kept[0]!;
+      let best = Infinity;
+      for (const candidate of declared) {
+        for (const [first, last] of ownSpans.get(candidate)!) {
+          const distance = first > end ? first - end : Math.max(0, start - last);
+          // On a tie the declaration below wins: comments and constants usually introduce what follows.
+          const score = distance * 2 + (first > end ? 0 : 1);
+          if (score < best) {
+            best = score;
+            target = candidate;
+          }
+        }
+      }
+      target.anchors.push(anchor);
+      target.code += sourceLines[anchor.side].slice(anchor.startLine - 1, anchor.endLine).join("\n") + "\n";
+    }
+  }
+  for (const unit of kept) {
+    unit.anchors.sort((a, b) => span(a)[0] - span(b)[0] || Number(a.side === "deleted") - Number(b.side === "deleted"));
+  }
+  if (declared.length === 0 && kept[0] != null) {
+    const side = kept[0].anchors[0]!.side;
+    const ranges = kept[0].anchors.filter((anchor) => anchor.side === side);
+    kept[0].symbol = `lines ${ranges[0]!.startLine}–${Math.max(...ranges.map((anchor) => anchor.endLine))}`;
+  }
+  return kept.sort((a, b) => span(a.anchors[0]!)[0] - span(b.anchors[0]!)[0]);
+}
+
+/** Extracts navigation ranges locally; changed lines outside a declaration join the nearest one in their file. */
 export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
   const units: StoryUnit[] = [];
   for (const file of snapshot.files) {
@@ -122,7 +169,7 @@ export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
         start = end + 1;
       }
     }
-    units.push(...[...bySymbol.values()].sort((a, b) => a.anchors[0]!.startLine - b.anchors[0]!.startLine));
+    units.push(...foldLooseChanges(bySymbol, diff.rows, sourceLines));
   }
   const supporting = (unit: StoryUnit) => Number(unit.test || unit.symbol.startsWith("lines "));
   units.sort((a, b) => supporting(a) - supporting(b));
@@ -153,4 +200,22 @@ export function pairStoryTests(units: StoryUnit[]): Map<string, string> {
     if (matches[0] && matches[0].score > (matches[1]?.score ?? 0)) pairs.set(test.id, matches[0].unit.id);
   }
   return pairs;
+}
+
+function rangeGap(left: Omit<StoryAnchor, "hash">, right: Omit<StoryAnchor, "hash">): number {
+  if (left.side !== right.side) return Infinity;
+  return Math.max(0, left.startLine - right.endLine, right.startLine - left.endLine);
+}
+
+/** Setup, helpers and other unpaired tests join the step that owns the nearest paired test in their file. */
+export function attachUnpairedTests(units: StoryUnit[], pairs: Map<string, string>): void {
+  const paired = new Map(pairs);
+  for (const test of units) {
+    if (!test.test || paired.has(test.id)) continue;
+    const siblings = units.filter((unit) => unit.test && unit.path === test.path && paired.has(unit.id));
+    if (siblings.length === 0) continue;
+    const distance = (sibling: StoryUnit) => Math.min(...test.anchors.flatMap((own) => sibling.anchors.map((other) => rangeGap(own, other))));
+    const nearest = siblings.reduce((best, sibling) => distance(sibling) < distance(best) ? sibling : best);
+    pairs.set(test.id, paired.get(nearest.id)!);
+  }
 }
