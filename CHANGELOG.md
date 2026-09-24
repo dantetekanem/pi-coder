@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Let agents open `/diff-story` with the `open_code_diff_story` tool. It takes the same targets and `cwd` as `open_code_diff`, waits for the story to finish, and returns its feedback. It always opens the built-in story view and needs the terminal UI.
+
+### Changed
+
+- Skip non-English/non-pt-BR locale files in `/diff-story`, as the `/diff` file list does. Preparation shows how many files it hid. A change with only those files shows why no story was built instead of a capture error. `F` and then `L` still show them in the full diff.
+
 ### Fixed
 
 - Show each changed line on exactly one `/diff-story` page. A story pane now shows only its step's lines of one file, plus a few unchanged lines of context. Code owned by another step stays collapsed, and each side of a replaced line appears only on the step that owns it. Movement stays inside the page; `F` still opens the full diff.

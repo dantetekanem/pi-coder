@@ -25,7 +25,7 @@
 
 Git remote fetches, configured provider commands such as `gh`, and the operating-system URL opener use the subprocesses above. Model-backed features also make requests through Pi's configured model providers and authentication.
 
-Starting `/diff-story` captures the selected before/after files locally, extracts changed code units, and pairs obvious related tests. One request sends unit identifiers, paths, symbols (including test names), local identifier-reference matches, proposed test pairs, and the bundled story instructions to the chosen model. The model returns ordering and pairing identifiers; exact ranges and hashes come from the local capture. Public output, progress, and errors appear in a five-line preparation strip.
+Starting `/diff-story` captures the selected before/after files locally. It skips non-English/non-pt-BR locale files, extracts changed code units, and pairs obvious related tests. One request sends unit identifiers, paths, symbols (including test names), local identifier-reference matches, proposed test pairs, and the bundled story instructions to the chosen model. The model returns ordering and pairing identifiers; exact ranges and hashes come from the local capture. Public output, progress, and errors appear in a five-line preparation strip.
 
 Finishing a review hands saved DISCUSS notes and their source context to the main conversation through the normal review flow.
 

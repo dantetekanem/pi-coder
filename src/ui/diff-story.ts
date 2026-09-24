@@ -5,6 +5,7 @@ import { createStoryAgentGenerator } from "../diff-story/agent.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
 import { generateDiffStory, type DiffStoryGenerate } from "../diff-story/generate.js";
 import type { StorySessionData } from "../diff-story/navigation.js";
+import { filterReviewFilesByLocale } from "../locale-files.js";
 import { loadReviewPreferences, saveReviewPreference } from "../preferences.js";
 import { validateReviewAgent } from "../review-agent.js";
 import { sanitizeTerminalText } from "../sanitize.js";
@@ -56,11 +57,14 @@ export function prepareDiffStory(
   generate?: DiffStoryGenerate,
 ): Promise<PreparedDiffStory | "diff" | undefined> {
   const selection = loadReviewPreferences().storyAgent;
+  const storyFiles = filterReviewFilesByLocale(files, false);
+  const hiddenLocales = files.length - storyFiles.length;
+  const localeNote = hiddenLocales === 0 ? "" : ` · ${hiddenLocales} locale${hiddenLocales === 1 ? "" : "s"} hidden`;
   return ctx.ui.custom((tui, theme, _keys, done) => {
     const abort = new AbortController();
     let settled = false;
     let phase = "Preparing captured diff";
-    let counts = `${files.length} selected files`;
+    let counts = `${storyFiles.length} selected files${localeNote}`;
     let error: string | undefined;
     let stale = false;
     let snapshot: StorySnapshot | undefined;
@@ -116,11 +120,17 @@ export function prepareDiffStory(
     };
 
     queueMicrotask(async () => {
+      if (storyFiles.length === 0 && hiddenLocales > 0) {
+        error = "This change only touches non-English/non-pt-BR locale files, which stories skip.";
+        clearInterval(timer);
+        update("No story to build");
+        return;
+      }
       try {
         const captured: StoryFile[] = [];
-        for (const file of files) {
+        for (const file of storyFiles) {
           if (settled) return;
-          update(`Reading ${captured.length + 1} of ${files.length} files · ${sanitizeTerminalText(file.path)}`);
+          update(`Reading ${captured.length + 1} of ${storyFiles.length} files · ${sanitizeTerminalText(file.path)}`);
           const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
           captured.push({
             fileId: file.id,
@@ -133,7 +143,7 @@ export function prepareDiffStory(
         }
         if (settled) return;
         snapshot = createStorySnapshot(captured);
-        counts = `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} lines changed`;
+        counts = `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} lines changed${localeNote}`;
         if (saved != null) {
           try {
             finish({ snapshot, plan: validateSavedDiffStory(saved.plan, snapshot) });
