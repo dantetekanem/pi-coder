@@ -201,9 +201,12 @@ describe("diff story plans", () => {
     expect(original.steps).toHaveLength(1);
     expect(uncoveredStoryChanges(completed, snapshot)).toEqual([]);
     const extra = completed.steps.filter((step) => step.implementation.some((anchor) => anchor.fileId === "extra"));
-    expect(extra).toHaveLength(2);
-    expect(extra[0]?.implementation.map((anchor) => anchor.side)).toEqual(["added", "deleted"]);
-    expect(extra[1]?.implementation).toEqual([expect.objectContaining({ side: "deleted", startLine: 12, endLine: 12 })]);
+    expect(extra).toHaveLength(1);
+    expect(extra[0]?.implementation).toEqual([
+      expect.objectContaining({ side: "added", startLine: 1, endLine: 1 }),
+      expect.objectContaining({ side: "deleted", startLine: 1, endLine: 1 }),
+      expect.objectContaining({ side: "deleted", startLine: 12, endLine: 12 }),
+    ]);
     expect(extra.every((step) => step.tests.length === 0)).toBe(true);
     expect(completed.steps.some((step) => step.implementation.some((anchor) => anchor.fileId === "only-test"))).toBe(true);
     expect(new Set(completed.steps.map((step) => step.id)).size).toBe(completed.steps.length);

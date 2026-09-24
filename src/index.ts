@@ -188,6 +188,12 @@ function unsupported(message: string, ctx: ExtensionContext): ReviewRunStatus {
   return { started: false, message };
 }
 
+const DIFF_STORY_TUI_MESSAGE = "Diff stories require a TUI session.";
+
+function canOpenDiffStory(ctx: ExtensionContext): boolean {
+  return ctx.hasUI && !("mode" in ctx && ctx.mode !== "tui");
+}
+
 const REVIEW_PROGRESS_FRAMES = ["-", "\\", "|", "/"];
 const LOCAL_PROGRESS_DELAY_MS = 5_000;
 const LOCAL_PROGRESS_MESSAGE = "Loading local changes…";
@@ -1758,8 +1764,8 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   pi.registerCommand("diff-story", {
     description: "Follow a change as a linked code/test story. Same targets as /diff; agent selects the independent model/thinking.",
     handler: async (args, ctx) => {
-      if (!ctx.hasUI || ("mode" in ctx && ctx.mode !== "tui")) {
-        ctx.ui.notify("Diff stories require a TUI session.", "error");
+      if (!canOpenDiffStory(ctx)) {
+        ctx.ui.notify(DIFF_STORY_TUI_MESSAGE, "error");
         return;
       }
       if (args.trim() === "agent") await selectStoryAgent(ctx);
@@ -1971,6 +1977,34 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         ctx,
         () => runDiff(args, ctx, cwd, input.comments, handoff, continuation),
       );
+      return {
+        content: [{ type: "text" as const, text: formatOpenCodeDiffToolText(status, args, cwd) }],
+        details: { ...status, args, cwd },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "open_code_diff_story",
+    label: "open-code-diff-story",
+    description: "Open /diff-story: walk through a change as ordered code steps, each beside its changed tests. Same targets as /diff.",
+    promptSnippet: "Open the interactive /diff-story walkthrough for a local diff, range, or pull request.",
+    promptGuidelines: [
+      "Call open_code_diff_story only when the user directly asks for /diff-story or to walk through a change as a story. Use open_code_diff for the ordinary diff.",
+      "Pass args as you would after /diff-story: empty for local working-tree changes, remote <url | branch>, or base..head/base...head. Pass cwd when you know the checkout.",
+      "Wait for the tool result. It returns message, prompt, and context details after the story UI finishes.",
+    ],
+    parameters: Type.Object({
+      args: Type.Optional(Type.String({ description: "Same target syntax as /diff, for example empty string, 'remote <url | branch>', or 'base..head'." })),
+      cwd: Type.Optional(Type.String({ description: "Directory to run the story from. Defaults to Pi's current cwd." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const input = params as { args?: string; cwd?: string };
+      const args = input.args ?? "";
+      const cwd = normalizeReviewCwd(input.cwd ?? ctx.cwd, ctx.cwd);
+      const status: ReviewRunStatus = canOpenDiffStory(ctx)
+        ? await reviewInvocations.runAwaited(ctx, () => runDiff(args, ctx, cwd, undefined, undefined, undefined, true))
+        : { started: false, message: DIFF_STORY_TUI_MESSAGE };
       return {
         content: [{ type: "text" as const, text: formatOpenCodeDiffToolText(status, args, cwd) }],
         details: { ...status, args, cwd },

@@ -264,8 +264,7 @@ function buildAlignedRowsFromPierreDiff(fileDiff: FileDiffMetadata, oldContent: 
   };
 }
 
-function createGapLabel(position: "start" | "middle" | "end", hiddenRows: number): string {
-  const hiddenText = pluralize("unchanged line", hiddenRows);
+function createGapLabel(position: "start" | "middle" | "end", hiddenRows: number, hiddenText = pluralize("unchanged line", hiddenRows)): string {
   if (position === "start") return `Start of file · ${hiddenText}`;
   if (position === "end") return `End of file · ${hiddenText}`;
   return `… ${hiddenText} …`;
@@ -465,7 +464,23 @@ export function revealStructuredDiffRows(diff: StructuredDiff, rowIndexes: Itera
   for (const rowIndex of rowIndexes) {
     if (rowIndex >= 0 && rowIndex < diff.rows.length) visibleRows.add(rowIndex);
   }
+  return withVisibleRows(diff, visibleRows);
+}
 
+/** Shows only these rows. Gaps name what they hide, because hidden rows may contain changes. */
+export function showOnlyStructuredDiffRows(
+  diff: StructuredDiff,
+  rowIndexes: Iterable<number>,
+  describeHidden: (hiddenRows: number) => string,
+): StructuredDiff {
+  return withVisibleRows(diff, new Set(rowIndexes), describeHidden);
+}
+
+function withVisibleRows(
+  diff: StructuredDiff,
+  visibleRows: ReadonlySet<number>,
+  describeHidden?: (hiddenRows: number) => string,
+): StructuredDiff {
   const visibleItems: StructuredDiffVisibleItem[] = [];
   let rowIndex = 0;
   while (rowIndex < diff.rows.length) {
@@ -487,7 +502,7 @@ export function revealStructuredDiffRows(diff: StructuredDiff, rowIndexes: Itera
       hiddenRowCount,
       hiddenOldLines: hiddenRows.filter((row) => row.oldLineNumber != null).length,
       hiddenNewLines: hiddenRows.filter((row) => row.newLineNumber != null).length,
-      label: createGapLabel(position, hiddenRowCount),
+      label: createGapLabel(position, hiddenRowCount, describeHidden?.(hiddenRowCount)),
     });
   }
 

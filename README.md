@@ -77,17 +77,17 @@ GitHub pull requests work by default through the authenticated [`gh`](https://cl
 
 The story agent starts as `openai-codex/gpt-5.6-luna` with `max` thinking. Its selection is saved independently of the main conversation. Model selection validates support for the chosen thinking level.
 
-A full-screen preparation view shows the captured files, change counts, and generation phase. The extension extracts changed functions, individual tests, and supporting hunks locally, then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. The extension supplies the exact ranges, complete changed-line coverage, and file/symbol titles. Each paired test appears once beside its implementation.
+A full-screen preparation view shows the captured files, change counts, and generation phase. The capture skips non-English/non-pt-BR locale files, as the `/diff` file list does, and shows how many it hid. Press `F` and then `L` to see them in the full diff. The extension extracts changed functions and individual tests locally. Changed lines outside a function join the nearest function in their file; a file without functions becomes one unit. The extension then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. The extension supplies the exact ranges, complete changed-line coverage, and file/symbol titles. Each paired test appears once beside its implementation. Setup, helpers, and other unpaired tests join the step that owns the nearest paired test in their file, and a test file without pairs gets one step.
 
 During preparation, a centered five-line strip shows public output, errors, and progress as they arrive, including the final ordering JSON. Gray text uses the normal terminal background, with the newest line at the bottom and older lines fading upward through 100% / 80% / 60% / 40% / 20%, approximated with terminal colors. The strip spans up to 120 columns. `Space` pauses/resumes the strip while generation and the running spinner continue. Elapsed time remains visible. The strip disappears when preparation ends. On generation failure, `r` explicitly retries against the same captured files.
 
-File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
+File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Each pane shows one file's lines for the current step, plus a few unchanged lines of context. Code owned by another step stays collapsed, so every changed line appears on exactly one page. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
 
 | Key | Story action |
 | --- | --- |
 | `Shift+Left` / `Shift+Right` | Previous / next step |
 | `Left` / `Right` | Focus implementation / tests |
-| `[` / `]` | Previous / next related range in the focused member |
+| `[` / `]` | Previous / next file in the focused member |
 | `R` | Mark the current step seen |
 | `c` / `d` | Comment / discuss at the selected range |
 | `h` / `Tab` | Reach comments or the paired panes |
@@ -95,11 +95,11 @@ File and change totals stay above two unified diffs: **Implementation** and **Re
 | `F` | Inspect the full captured diff, or return to the story |
 | `s` | Finish through the normal review flow |
 
-In either review mode, diff movement follows changed lines by default. Hold `Option` (`Alt`) with movement keys to reach unchanged code; `Option+Shift+↑/↓` selects a context range for a note. Cursor keys stay with an active editor. Steps with no related changed test show an empty test pane. `F` opens the full diff with the same saved comments.
+In either review mode, diff movement follows changed lines by default. Hold `Option` (`Alt`) with movement keys to reach unchanged code; `Option+Shift+↑/↓` selects a context range for a note. In a story, movement stays inside the current page. Cursor keys stay with an active editor. Steps with no related changed test show an empty test pane. `F` opens the full diff with the same saved comments.
 
 Resume retains the active step, per-member selections/scroll, marks, and comments. Changed bytes invalidate the saved story: explicitly rebuild it, use the ordinary diff, or cancel. Existing feedback remains subject to its usual anchor validation.
 
-The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. Full captured code stays available in the review panes. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
+The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. Full captured code stays available through `F`. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
 
 ### Discuss saved review notes
 
@@ -219,6 +219,7 @@ Agents can use the same interfaces through:
 
 - `open_code` — run the configured code command at an optional path or structured target; without one, open the Workbench.
 - `open_code_diff` — run the configured code command; without one, open `/diff` with an optional target and prepopulated comments.
+- `open_code_diff_story` — open `/diff-story` with the same targets and `cwd`. It always uses the built-in story view, even with a configured code command.
 - `submit_pr_review` — submit a confirmed configured-provider review.
 
 ## Security and data access

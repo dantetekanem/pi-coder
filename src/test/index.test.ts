@@ -778,6 +778,7 @@ describe("code diff extension", () => {
     const openCode = pi.registerTool.mock.calls.find(([tool]) => tool.name === "open_code")?.[0];
     expect(openCode.parameters.properties.path).toBeDefined();
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff" }));
+    expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff_story" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
   });
 
@@ -2059,6 +2060,42 @@ describe("code diff extension", () => {
     expect(result.details).toMatchObject({ started: true, args: "", cwd: expandedCwd, prompt: "generated review prompt" });
     expect(result.content[0].text).toContain("local working-tree/uncommitted changes");
     expect(result.content[0].text).toContain("generated review prompt");
+  });
+
+  it("open_code_diff_story opens the story like /diff-story and returns prompt details", async () => {
+    const tools = new Map<string, any>();
+    const expandedCwd = join(homedir(), "custom-repo");
+    const prepared = { snapshot: { fingerprint: "captured", files: [] }, plan: { version: 1, snapshot: "captured", summary: "", steps: [] } };
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files: [localReviewFile()], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.prepareDiffStory.mockResolvedValue(prepared);
+    mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
+    mocks.composeReviewPrompt.mockReturnValue("generated story prompt");
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, mode: "tui", cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    codeDiffExtension(pi as never);
+
+    const result = await tools.get("open_code_diff_story").execute("tool-call", { args: "", cwd: "~/custom-repo" }, new AbortController().signal, vi.fn(), ctx);
+
+    expect(mocks.getReviewWindowData).toHaveBeenCalledWith(pi, expandedCwd);
+    expect(mocks.prepareDiffStory).toHaveBeenCalledOnce();
+    expect(mocks.runReviewApp.mock.calls[0]![1].story).toBe(prepared);
+    expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
+    expect(result.details).toMatchObject({ started: true, args: "", cwd: expandedCwd, prompt: "generated story prompt" });
+    expect(result.content[0].text).toContain("generated story prompt");
+  });
+
+  it("open_code_diff_story refuses sessions without the terminal UI", async () => {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, mode: "rpc", cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    codeDiffExtension(pi as never);
+
+    const result = await tools.get("open_code_diff_story").execute("tool-call", { args: "main..HEAD" }, new AbortController().signal, vi.fn(), ctx);
+
+    expect(result.details).toEqual({ started: false, message: "Diff stories require a TUI session.", args: "main..HEAD", cwd: "/repo" });
+    expect(mocks.getReviewWindowDataForRevisionRange).not.toHaveBeenCalled();
+    expect(mocks.prepareDiffStory).not.toHaveBeenCalled();
+    expect(mocks.runReviewApp).not.toHaveBeenCalled();
   });
 
   it("validates every persisted draft before initial mount and uses the safe in-memory snapshot when saving fails", async () => {

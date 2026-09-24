@@ -17,6 +17,10 @@ const file: ReviewFile = {
   gitDiff: { status: "modified", displayPath: "app.ts", oldPath: "app.ts", newPath: "app.ts", hasOriginal: true, hasModified: true },
 };
 const contents = { originalContent: "before()\n", modifiedContent: "after()\n" };
+const localeFile = (path: string): ReviewFile => ({
+  ...file, id: path, path,
+  gitDiff: { ...file.gitDiff!, displayPath: path, oldPath: path, newPath: path },
+});
 const snapshot = createStorySnapshot([{ fileId: file.id, path: file.path, scope: "git-diff", contents }]);
 const plan = validateDiffStory({
   version: 1,
@@ -220,5 +224,42 @@ describe("centered story preparation", () => {
     drifted.view().handleInput("r");
     await expect(ready).resolves.toEqual({ plan, snapshot });
     expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("skips non-English/non-pt-BR locale files before capture, like /diff", async () => {
+    const preparation = harness();
+    const french = localeFile("config/locales/fr.yml");
+    const load = vi.fn(async () => contents);
+    let finish!: (value: string) => void;
+    const generate = vi.fn((_system: string, _prompt: string) => new Promise<string>((resolve) => { finish = resolve; }));
+    const files = [file, localeFile("config/locales/en.yml"), localeFile("config/locales/pt-BR.yml"), french];
+    const ready = prepareDiffStory(preparation.ctx as never, files, "git-diff", load, undefined, generate);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+
+    expect(preparation.view().render(100).join("\n")).toContain("3 files · +3 −3 lines changed · 1 locale hidden");
+    expect(load).not.toHaveBeenCalledWith(french, "git-diff");
+    expect(generate.mock.calls[0]![1]).not.toContain("fr.yml");
+    finish(orderOutput);
+    await expect(ready).resolves.toMatchObject({
+      snapshot: { files: [{ path: "app.ts" }, { path: "config/locales/en.yml" }, { path: "config/locales/pt-BR.yml" }] },
+    });
+  });
+
+  it("explains a change with only skipped locale files and never calls the model", async () => {
+    const preparation = harness();
+    const load = vi.fn(async () => contents);
+    const generate = vi.fn(async () => orderOutput);
+    const ready = prepareDiffStory(preparation.ctx as never, [localeFile("config/locales/fr.yml")], "git-diff", load, undefined, generate);
+    await vi.waitFor(() => expect(preparation.view().render(100).join("\n")).toContain("No story to build"));
+
+    const screen = preparation.view().render(100).join("\n");
+    expect(screen).toContain("This change only touches non-English/non-pt-BR locale files, which stories skip.");
+    expect(screen).toContain("0 selected files · 1 locale hidden");
+    expect(screen).toContain("f ordinary diff · Esc cancel");
+    expect(screen).not.toContain("r retry");
+    preparation.view().handleInput("f");
+    await expect(ready).resolves.toBe("diff");
+    expect(load).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
   });
 });

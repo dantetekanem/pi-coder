@@ -1,3 +1,4 @@
+import { showOnlyStructuredDiffRows, type StructuredDiff, type StructuredDiffRow } from "../diff.js";
 import type { ReviewLineTarget } from "../types.js";
 import type { DiffStory, StoryAnchor } from "./plan.js";
 
@@ -16,6 +17,14 @@ export interface StorySessionData {
   viewports: Record<string, StoryViewport>;
 }
 
+/** One bounded view per file of a step member: the ranges it shows and where the cursor starts. */
+export interface StoryPage {
+  key: string;
+  fileId: string;
+  anchor: StoryAnchor;
+  anchors: StoryAnchor[];
+}
+
 export function restoreStoryNavigation(plan: DiffStory, saved?: StorySessionData): StorySessionData {
   const same = saved?.plan?.snapshot === plan.snapshot;
   return {
@@ -31,19 +40,60 @@ export function restoreStoryNavigation(plan: DiffStory, saved?: StorySessionData
   };
 }
 
-export function storyAnchors(story: StorySessionData, member = story.member): StoryAnchor[] {
-  const grouped = new Map<string, StoryAnchor>();
+export function storyPages(story: StorySessionData, member = story.member): StoryPage[] {
+  const grouped = new Map<string, Omit<StoryPage, "key">>();
   for (const anchor of story.plan.steps[story.step]?.[member] ?? []) {
-    const key = anchor.unitId ?? JSON.stringify([anchor.fileId, anchor.side, anchor.startLine, anchor.endLine]);
-    const current = grouped.get(key);
-    if (current == null || current.side === "deleted" && anchor.side === "added") grouped.set(key, anchor);
+    const page = grouped.get(anchor.fileId);
+    if (page == null) grouped.set(anchor.fileId, { fileId: anchor.fileId, anchor, anchors: [anchor] });
+    else page.anchors.push(anchor);
   }
-  return [...grouped.values()];
+  return [...grouped.values()].map((page) => ({
+    ...page,
+    key: JSON.stringify([page.fileId, ...page.anchors.map((anchor) => [anchor.side, anchor.startLine, anchor.endLine])]),
+  }));
+}
+
+export function storyPage(story: StorySessionData, member = story.member): StoryPage | undefined {
+  const pages = storyPages(story, member);
+  return pages[Math.max(0, Math.min(pages.length - 1, story.related[member]))];
+}
+
+export function storyAnchors(story: StorySessionData, member = story.member): StoryAnchor[] {
+  return storyPages(story, member).map((page) => page.anchor);
 }
 
 export function storyAnchor(story: StorySessionData, member = story.member): StoryAnchor | undefined {
-  const anchors = storyAnchors(story, member);
-  return anchors[Math.max(0, Math.min(anchors.length - 1, story.related[member]))];
+  return storyPage(story, member)?.anchor;
+}
+
+/** A page shows its anchored lines plus nearby unchanged lines, never another step's changes. */
+export function storyPageDiff(diff: StructuredDiff, anchors: readonly StoryAnchor[], contextLines: number): StructuredDiff {
+  const covers = (side: StoryAnchor["side"], line: number | undefined) =>
+    line != null && anchors.some((anchor) => anchor.side === side && anchor.startLine <= line && line <= anchor.endLine);
+  const visible = new Set<number>();
+  diff.rows.forEach((row, index) => {
+    if (covers("added", row.newLineNumber) || covers("deleted", row.oldLineNumber)) visible.add(index);
+  });
+  for (const index of [...visible]) {
+    for (const step of [-1, 1]) {
+      for (let next = index + step, count = 0; count < contextLines && diff.rows[next]?.kind === "equal"; next += step, count += 1) {
+        visible.add(next);
+      }
+    }
+  }
+  const page = showOnlyStructuredDiffRows(diff, visible, (count) => `${count.toLocaleString()} line${count === 1 ? "" : "s"} outside this step`);
+  return {
+    ...page,
+    visibleItems: page.visibleItems.map((item) => {
+      if (item.type !== "row" || item.row.kind !== "replace") return item;
+      const added = covers("added", item.row.newLineNumber);
+      if (added === covers("deleted", item.row.oldLineNumber)) return item;
+      const row: StructuredDiffRow = added
+        ? { ...item.row, kind: "insert", oldLineNumber: undefined, oldText: "", oldHighlights: [] }
+        : { ...item.row, kind: "delete", newLineNumber: undefined, newText: "", newHighlights: [] };
+      return { ...item, row };
+    }),
+  };
 }
 
 export function storyViewportKey(story: StorySessionData, member = story.member): string {

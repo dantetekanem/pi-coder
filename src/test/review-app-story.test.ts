@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { generateDiffStory } from "../diff-story/generate.js";
 import { createStorySnapshot, uncoveredStoryChanges, validateDiffStory } from "../diff-story/plan.js";
 import { ReviewApp } from "../ui/review-app.js";
 import type { ReviewFile } from "../types.js";
@@ -81,30 +82,92 @@ function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, s
 }
 
 describe("paired diff story", () => {
-  it("moves through changes by default and uses Option to reach hidden context and save a DISCUSS range", async () => {
+  it("keeps the cursor on the step's own lines and uses Option only for their context", async () => {
     const before = Array.from({ length: 30 }, (_, i) => `line${i + 1}()`);
     const after = before.map((line, i) => i === 4 || i === 24 ? `changed${i + 1}()` : line);
     const captured = createStorySnapshot(files.map((file) => ({ fileId: file.id, path: file.path, scope: "git-diff", contents: { originalContent: before.join("\n"), modifiedContent: after.join("\n") } })));
     const ordered = validateDiffStory({ ...plan, snapshot: captured.fingerprint, steps: [{ ...plan.steps[0]!, implementation: [{ fileId: "app.ts", side: "added", startLine: 5, endLine: 5 }], tests: [] }] }, captured);
     const { app, saved } = harness(undefined, 40, { plan: ordered, snapshot: captured });
+    const selected = () => (app as any).state.selectedLineTargetByScopeFile["git-diff::app.ts"];
     try {
       await Promise.resolve();
-      app.render(140);
+      const page = app.render(140).join("\n");
+      expect(page).toContain("changed5()");
+      expect(page).not.toContain("changed25()");
+      expect(page).toContain("lines outside this step");
       app.handleInput("\x1b[B");
-      expect((app as any).state.selectedLineTargetByScopeFile["git-diff::app.ts"].line).toBe(25);
+      expect(selected().line).toBe(5);
       app.handleInput("\x1b[1;3A");
-      expect((app as any).state.selectedLineTargetByScopeFile["git-diff::app.ts"].line).toBe(24);
+      expect(selected().line).toBe(4);
       for (let i = 0; i < 5; i += 1) app.handleInput("\x1b[1;3A");
       app.render(140);
-      expect((app as any).state.selectedLineTargetByScopeFile["git-diff::app.ts"].line).toBe(19);
-      app.handleInput("\x1b[1;4A");
+      expect(selected().line).toBe(2);
+      app.handleInput("\x1b[1;4B");
       app.handleInput("d");
       app.handleInput("Why this context?");
       app.handleInput("\r");
-      expect(saved()?.state.draft.comments[0]).toMatchObject({ intent: "discuss", startLine: 18, endLine: 19, body: "Why this context?" });
-      app.handleInput("\x1b[B");
-      expect((app as any).state.selectedLineTargetByScopeFile["git-diff::app.ts"].line).toBe(25);
+      expect(saved()?.state.draft.comments[0]).toMatchObject({ intent: "discuss", startLine: 2, endLine: 3, body: "Why this context?" });
     } finally { app.dispose(); }
+  });
+
+  it("never shows a neighbouring step's changed lines again on the next page", async () => {
+    const captured = createStorySnapshot(files.map((file) => ({
+      fileId: file.id,
+      path: file.path,
+      scope: "git-diff",
+      contents: file.path === "app.ts"
+        ? {
+          originalContent: "function first() {\n  return 1;\n}\nfunction second() {\n  return 3;\n}\n",
+          modifiedContent: "function first() {\n  return 2;\n}\nfunction second() {\n  return 4;\n}\n",
+        }
+        : { originalContent: "", modifiedContent: "" },
+    })));
+    const story = await generateDiffStory(captured, async () => '{"order":[],"pairs":[]}', new AbortController().signal, () => {});
+    const { app } = harness(undefined, 40, { plan: story, snapshot: captured });
+    try {
+      await Promise.resolve();
+      const first = app.render(140).join("\n");
+      expect(first).toContain("return 2;");
+      expect(first).not.toContain("return 4;");
+      app.handleInput("\x1b[1;2C");
+      const second = app.render(140).join("\n");
+      expect(second).toContain("return 4;");
+      expect(second).not.toContain("return 2;");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("shows each side of a replaced line only on the step that owns it", async () => {
+    const captured = createStorySnapshot(files.map((file) => ({
+      fileId: file.id,
+      path: file.path,
+      scope: "git-diff",
+      contents: file.path === "app.ts"
+        ? { originalContent: "keep()\noldCall()\nkeep()\n", modifiedContent: "keep()\nnewCall()\nkeep()\n" }
+        : { originalContent: "", modifiedContent: "" },
+    })));
+    const split = validateDiffStory({
+      ...plan,
+      snapshot: captured.fingerprint,
+      steps: [
+        { id: "old", title: "Remove the old call", explanation: "", implementation: [{ fileId: "app.ts", side: "deleted", startLine: 2, endLine: 2 }], tests: [] },
+        { id: "new", title: "Add the new call", explanation: "", implementation: [{ fileId: "app.ts", side: "added", startLine: 2, endLine: 2 }], tests: [] },
+      ],
+    }, captured);
+    const { app } = harness(undefined, 40, { plan: split, snapshot: captured });
+    try {
+      await Promise.resolve();
+      const first = app.render(140).join("\n");
+      expect(first).toContain("oldCall()");
+      expect(first).not.toContain("newCall()");
+      app.handleInput("\x1b[1;2C");
+      const second = app.render(140).join("\n");
+      expect(second).toContain("newCall()");
+      expect(second).not.toContain("oldCall()");
+    } finally {
+      app.dispose();
+    }
   });
 
   it("starts at the anchor line and uses only the reader's range when commenting", async () => {
@@ -144,7 +207,11 @@ describe("paired diff story", () => {
   it("keeps saved notes accessible and preserves range comments when returning to the paired diffs", async () => {
     const summary = Array.from({ length: 20 }, (_, i) => `Summary-${i}. ${"Detail ".repeat(20)}`).join(" ");
     const explanation = Array.from({ length: 20 }, (_, i) => `Explanation-${i}. ${"Reason ".repeat(20)}`).join(" ");
-    const longPlan = { ...plan, summary, steps: [{ ...plan.steps[0]!, explanation }, plan.steps[1]!] };
+    const longPlan = validateDiffStory({
+      ...plan,
+      summary,
+      steps: [{ ...plan.steps[0]!, explanation, implementation: [{ fileId: "app.ts", side: "added", startLine: 2, endLine: 3 }] }, plan.steps[1]!],
+    }, snapshot);
     const { app, saved } = harness(undefined, 40, { plan: longPlan, snapshot });
     try {
       await Promise.resolve();
@@ -208,7 +275,7 @@ describe("paired diff story", () => {
     }
   });
 
-  it("counts the current hunk on each side and updates the counts when navigating related ranges", async () => {
+  it("shows every range of a file on one page and updates the hunk count while moving between them", async () => {
     const context = Array.from({ length: 20 }, (_, index) => `keep${index}()`).join("\n");
     const multiple = createStorySnapshot(snapshot.files.map((file) => file.fileId !== "app.ts" ? file : {
       ...file,
@@ -234,10 +301,14 @@ describe("paired diff story", () => {
       let rendered = app.render(140).join("\n");
       expect(rendered).toContain("Hunk 1/2 · +1 −1");
       expect(rendered).toContain("Hunk 1/1 · +3 −1");
-      app.handleInput("]");
+      expect(rendered).toContain("extra()");
+      expect(rendered).not.toContain("Implementation 1/2");
+      app.handleInput("\x1b[B");
+      app.handleInput("\x1b[B");
       rendered = app.render(140).join("\n");
       expect(rendered).toContain("Hunk 2/2 · +2 −0");
-      app.handleInput("[");
+      app.handleInput("\x1b[A");
+      app.handleInput("\x1b[A");
       expect(app.render(140).join("\n")).toContain("Hunk 1/2 · +1 −1");
     } finally {
       app.dispose();
