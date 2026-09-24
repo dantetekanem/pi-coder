@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 - 2026-09-24
 
 ### Added
 
@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Count each untracked file and its text additions in the repository footer, including when Pi runs from a subdirectory. Hide incomplete line totals when Git cannot return complete counts.
 - Show each changed line on exactly one `/diff-story` page. A story pane now shows only its step's lines of one file, plus a few unchanged lines of context. Code owned by another step stays collapsed, and each side of a replaced line appears only on the step that owns it. Movement stays inside the page; `F` still opens the full diff.
 - Build fewer, fuller story steps. Changed lines outside a function join the nearest function in their file, and a file without functions becomes one step. Setup, helpers, and other unpaired tests join the step that owns the nearest paired test in their file; a test file without pairs gets one step. Related tests show one page per file.
 
