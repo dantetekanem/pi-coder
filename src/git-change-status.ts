@@ -1,11 +1,13 @@
 import { execFile as nodeExecFile } from "node:child_process";
+import { devNull } from "node:os";
+import { isAbsolute, resolve } from "node:path";
 import { FILTER_CONFIG_ARGS, filterOverrideArgs, parseFilterConfigPrefixes } from "./git-filter-policy.js";
 
 export const REPOSITORY_CHANGE_STATUS_KEY = "pi-code-diff-local-changes";
 const COMMAND_TIMEOUT_MS = 3_000;
 const OUTPUT_CAP_BYTES = 64 * 1024;
-const STATUS_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all"] as const;
-const SHORTSTAT_ARGS = ["diff", "--shortstat", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--", "."] as const;
+const STATUS_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"] as const;
+const SHORTSTAT_ARGS = ["diff", "--shortstat", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--", ":/"] as const;
 const ANSI_GREEN = "\x1b[32m";
 const ANSI_RED = "\x1b[31m";
 const ANSI_PINK = "\x1b[95m";
@@ -108,15 +110,12 @@ export function runBoundedGit(
   });
 }
 
-export function parsePorcelainChangeCounts(
-  output: string,
-  capped: boolean,
-): Pick<RepositoryChangeSummary, "files" | "filesCapped" | "untrackedFiles"> {
+function parsePorcelainChanges(output: string, capped: boolean) {
   if (!capped && output.length > 0 && !output.endsWith("\0")) throw new Error("Git returned malformed Git status output.");
   const fields = output.split("\0");
   const completeFieldCount = output.endsWith("\0") ? fields.length - 1 : Math.max(0, fields.length - 1);
   let files = 0;
-  let untrackedFiles = 0;
+  const untrackedPaths: string[] = [];
 
   for (let index = 0; index < completeFieldCount; index += 1) {
     const record = fields[index]!;
@@ -132,11 +131,18 @@ export function parsePorcelainChangeCounts(
       index += 1;
     }
     files += 1;
-    if (indexStatus === "?" && worktreeStatus === "?") untrackedFiles += 1;
+    if (indexStatus === "?" && worktreeStatus === "?") untrackedPaths.push(record.slice(3));
   }
 
   if (capped && output.length > 0 && files === 0) files = 1;
-  return { files, filesCapped: capped, untrackedFiles };
+  return { counts: { files, filesCapped: capped, untrackedFiles: untrackedPaths.length }, untrackedPaths };
+}
+
+export function parsePorcelainChangeCounts(
+  output: string,
+  capped: boolean,
+): Pick<RepositoryChangeSummary, "files" | "filesCapped" | "untrackedFiles"> {
+  return parsePorcelainChanges(output, capped).counts;
 }
 
 export function parseShortStat(output: string): { additions: number; deletions: number } {
@@ -169,6 +175,7 @@ async function runStatusGroup(
   signal: AbortSignal,
   run: RepositoryGitCommand,
 ): Promise<RepositoryGitCommandResult[]> {
+  signal.throwIfAborted();
   const group = new AbortController();
   const relayAbort = () => group.abort(signal.reason ?? new Error("Git status refresh aborted."));
   signal.addEventListener("abort", relayAbort, { once: true });
@@ -190,6 +197,38 @@ async function runStatusGroup(
   }
 }
 
+async function untrackedAdditions(
+  cwd: string,
+  paths: string[],
+  overrides: string[],
+  signal: AbortSignal,
+  run: RepositoryGitCommand,
+): Promise<number | null> {
+  if (paths.length === 0) return 0;
+  let additions = 0;
+  try {
+    const root = await run(cwd, ["rev-parse", "--show-toplevel"], signal);
+    if (root.exitCode !== 0 || root.capped || !root.stdout.endsWith("\n")) return null;
+    const repositoryRoot = root.stdout.slice(0, -1);
+    if (!isAbsolute(repositoryRoot)) return null;
+    for (const path of paths) {
+      signal.throwIfAborted();
+      // Git handles binary files and symlink text without following the symlink target.
+      const result = await run(cwd, [
+        ...overrides, "diff", "--no-index", "--shortstat", "--no-ext-diff", "--no-textconv",
+        "--", devNull, resolve(repositoryRoot, path),
+      ], signal);
+      // --no-index exits 1 for an ordinary difference, not just errors.
+      if (result.capped || result.stderr.trim().length > 0 || (result.exitCode !== 0 && result.exitCode !== 1)) return null;
+      additions += parseShortStat(result.stdout).additions;
+    }
+    return additions;
+  } catch {
+    signal.throwIfAborted();
+    return null;
+  }
+}
+
 /** Best-effort local working-tree summary. No repository text reaches the terminal. */
 export async function loadRepositoryChangeSummary(
   cwd: string,
@@ -204,12 +243,16 @@ export async function loadRepositoryChangeSummary(
   ], signal, run);
   if (status == null || shortstat == null || (status.exitCode !== 0 && !status.capped)) return null;
 
-  const counts = parsePorcelainChangeCounts(status.stdout, status.capped);
-  const lineStats = shortstat.exitCode === 0 && !shortstat.capped ? parseShortStat(shortstat.stdout) : null;
+  const { counts, untrackedPaths } = parsePorcelainChanges(status.stdout, status.capped);
+  const tracked = shortstat.exitCode === 0 && !shortstat.capped ? parseShortStat(shortstat.stdout) : null;
+  const added = tracked != null && !status.capped
+    ? await untrackedAdditions(cwd, untrackedPaths, overrides, signal, run)
+    : null;
+  const complete = tracked != null && added != null;
   return {
     ...counts,
-    additions: lineStats?.additions ?? null,
-    deletions: lineStats?.deletions ?? null,
+    additions: complete ? tracked.additions + added : null,
+    deletions: complete ? tracked.deletions : null,
   };
 }
 

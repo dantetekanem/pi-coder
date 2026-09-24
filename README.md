@@ -6,7 +6,7 @@
 - `/code` browses and edits a workspace without leaving Pi.
 - `/diff-story` arranges a change as ordered code steps with linked implementation and test diffs.
 
-It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews.
+It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews. New, untracked files count individually and contribute their text additions. If Git cannot return complete counts, incomplete line totals are omitted rather than shown as exact.
 
 For a deeper walkthrough of the workflow, usage, and the engineering reasoning behind it, read [The Human in the Loop](https://blog.leonardopereira.com/2026/08/19/the-human-in-the-loop/).
 

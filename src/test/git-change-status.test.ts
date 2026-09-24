@@ -1,3 +1,8 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { FILTER_CONFIG_ARGS, filterOverrideArgs, parseFilterConfigPrefixes } from "../git-filter-policy.js";
 import {
@@ -49,6 +54,38 @@ describe("Git filter policy", () => {
 });
 
 describe("repository change footer status", () => {
+  it("refreshes actual new-file and line totals as an untracked directory grows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-footer-counts-"));
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    const git = promisify(execFile);
+    try {
+      await git("git", ["init", "-q", repo]);
+      await git("git", ["-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "Fixture"], { cwd: repo });
+      await mkdir(join(repo, "feature"));
+      await writeFile(join(repo, "feature/one.ts"), "first\n");
+      const first = await loadRepositoryChangeSummary(repo, new AbortController().signal);
+      await writeFile(join(repo, "feature/one.ts"), "first\nsecond\nthird\n");
+      await writeFile(join(repo, "feature/two name.ts"), "fourth\n");
+      const second = await loadRepositoryChangeSummary(repo, new AbortController().signal);
+      const fromSubdirectory = await loadRepositoryChangeSummary(join(repo, "feature"), new AbortController().signal);
+
+      expect(fromSubdirectory).toEqual(second);
+      expect([first, second]).toEqual([
+        { files: 1, filesCapped: false, additions: 1, deletions: 0, untrackedFiles: 1 },
+        { files: 2, filesCapped: false, additions: 4, deletions: 0, untrackedFiles: 2 },
+      ]);
+      await writeFile(join(repo, "feature/binary"), Buffer.from([0, 1, 2, 10]));
+      await writeFile(join(repo, "feature/empty"), "");
+      await writeFile(join(root, "outside"), "private\n".repeat(100));
+      await symlink(join(root, "outside"), join(repo, "feature/link"));
+      await expect(loadRepositoryChangeSummary(repo, new AbortController().signal)).resolves.toMatchObject({ files: 5, additions: 5, deletions: 0 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("counts staged, unstaged, renamed, and untracked porcelain records exactly", () => {
     expect(parsePorcelainChangeCounts(" M src/app.ts\0A  staged.ts\0R  renamed.ts\0old.ts\0?? new.ts\0", false)).toEqual({
       files: 4,
@@ -78,8 +115,12 @@ describe("repository change footer status", () => {
           return { stdout: "filter.zed.required\0filter.lfs.clean\0filter.lfs.process\0", stderr: "", exitCode: 0, capped: false };
         case "status":
           return { stdout: " M src/app.ts\0A  staged.ts\0?? new.ts\0", stderr: "", exitCode: 0, capped: false };
+        case "rev-parse":
+          return { stdout: "/repo\n", stderr: "", exitCode: 0, capped: false };
         case "diff":
-          return { stdout: " 2 files changed, 9 insertions(+), 3 deletions(-)\n", stderr: "", exitCode: 0, capped: false };
+          return args.includes("--no-index")
+            ? { stdout: " 1 file changed, 4 insertions(+)\n", stderr: "", exitCode: 1, capped: false }
+            : { stdout: " 2 files changed, 9 insertions(+), 3 deletions(-)\n", stderr: "", exitCode: 0, capped: false };
         default:
           throw new Error("unexpected Git command");
       }
@@ -88,7 +129,7 @@ describe("repository change footer status", () => {
     await expect(loadRepositoryChangeSummary("/repo", new AbortController().signal, run)).resolves.toEqual({
       files: 3,
       filesCapped: false,
-      additions: 9,
+      additions: 13,
       deletions: 3,
       untrackedFiles: 1,
     });
@@ -106,11 +147,14 @@ describe("repository change footer status", () => {
     ];
     expect(calls.find((args) => semanticCommand(args) === "status")).toEqual([
       ...overrides,
-      "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all",
+      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all",
     ]);
     expect(calls.find((args) => semanticCommand(args) === "diff")).toEqual([
       ...overrides,
-      "diff", "--shortstat", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--", ".",
+      "diff", "--shortstat", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--", ":/",
+    ]);
+    expect(calls.find((args) => args.includes("--no-index"))).toEqual([
+      ...overrides, "diff", "--no-index", "--shortstat", "--no-ext-diff", "--no-textconv", "--", "/dev/null", "/repo/new.ts",
     ]);
   });
 
@@ -133,6 +177,63 @@ describe("repository change footer status", () => {
       deletions: null,
       untrackedFiles: 1,
     });
+  });
+
+  it("includes every new file in the aggregate beyond 64 untracked paths", async () => {
+    const run: RepositoryGitCommand = vi.fn(async (_cwd, args) => {
+      if (semanticCommand(args) === "config") return { stdout: "", stderr: "", exitCode: 1, capped: false };
+      if (semanticCommand(args) === "status") return {
+        stdout: " M tracked.ts\0" + Array.from({ length: 65 }, (_, index) => `?? new/${index}.ts\0`).join(""), stderr: "", exitCode: 0, capped: false,
+      };
+      if (semanticCommand(args) === "rev-parse") return { stdout: "/repo\n", stderr: "", exitCode: 0, capped: false };
+      return { stdout: " 1 file changed, 3 insertions(+)\n", stderr: "", exitCode: args.includes("--no-index") ? 1 : 0, capped: false };
+    });
+
+    await expect(loadRepositoryChangeSummary("/repo", new AbortController().signal, run)).resolves.toMatchObject({
+      files: 66, additions: 198, deletions: 0, untrackedFiles: 65,
+    });
+    expect(run).toHaveBeenCalledTimes(69);
+  });
+
+  it.each(["complete", "cancel"])("lets a longer new-file count %s without an aggregate deadline", async (ending) => {
+    vi.useFakeTimers();
+    const run: RepositoryGitCommand = vi.fn(async (_cwd, args, signal) => {
+      if (semanticCommand(args) === "config") return { stdout: "", stderr: "", exitCode: 1, capped: false };
+      if (semanticCommand(args) === "status") return {
+        stdout: Array.from({ length: 8 }, (_, index) => `?? new/${index}.ts\0`).join(""), stderr: "", exitCode: 0, capped: false,
+      };
+      if (semanticCommand(args) === "rev-parse") return { stdout: "/repo\n", stderr: "", exitCode: 0, capped: false };
+      if (!args.includes("--no-index")) return { stdout: "", stderr: "", exitCode: 0, capped: false };
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener("abort", abort);
+          resolve();
+        }, 2_000);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+      return { stdout: " 1 file changed, 1 insertion(+)\n", stderr: "", exitCode: 1, capped: false };
+    });
+    const controller = new AbortController();
+    try {
+      const loading = loadRepositoryChangeSummary("/repo", controller.signal, run);
+      if (ending === "cancel") {
+        await vi.advanceTimersByTimeAsync(3_001);
+        const result = expect(loading).rejects.toThrow("User cancelled");
+        controller.abort(new Error("User cancelled"));
+        await result;
+      } else {
+        await vi.advanceTimersByTimeAsync(16_001);
+        await expect(loading).resolves.toMatchObject({ files: 8, additions: 8, deletions: 0 });
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      controller.abort();
+      vi.useRealTimers();
+    }
   });
 
   it("formats dirty repositories with exact ANSI colors and resets each segment", () => {
