@@ -92,6 +92,7 @@ File and change totals stay above two unified diffs: **Implementation** and **Re
 | `c` / `d` | Comment / discuss at the selected range |
 | `h` / `Tab` | Reach comments or the paired panes |
 | `i` | View captured files, story steps, and saved notes |
+| `4` | Open PR context; `D` toggles the full description and `Esc` returns to the same step |
 | `F` | Inspect the full captured diff, or return to the story |
 | `s` | Finish through the normal review flow |
 
@@ -153,7 +154,9 @@ Common review controls:
 
 ### Current PR context
 
-The context pane shows fetched PR facts, including the reviewed head, before the optional generated explanation. The explanation appears below those facts without replacing them or resetting your scroll position.
+Remote `/diff` and `/diff-story` show the PR title, reviewed revision, and a short author-derived brief. The same orientation stays visible during story preparation. In the context pane, `D` switches between the brief and the author's complete description, preserving each view's scroll position.
+
+The context pane starts with the brief and fetched PR facts. When an optional generated explanation arrives, it appears above those facts under its own label. The original description remains available through `D`.
 
 Known checks, comments, and reviews appear while slower conversation reads are still pending. Failed or limited sections are labeled unavailable; successfully fetched facts remain visible.
 

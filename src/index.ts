@@ -1045,6 +1045,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             ...(handoffThreads == null ? {} : { openThreads: handoffThreads.open, awaitingReply: handoffThreads.awaitingReply }),
           };
 
+      const pullRequestSources = createRemotePullRequestSources(pi, ctx, remoteTarget);
       let story: PreparedDiffStory | undefined;
       if (sessionOptions?.story || initialSession?.story != null) {
         const scope = initialSession?.state.activeScope ?? getDefaultScope(files);
@@ -1054,6 +1055,8 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           scope,
           (file, selectedScope) => loadFileContentsForReview(repoRoot, file, selectedScope),
           initialSession?.story,
+          undefined,
+          reviewHeader == null ? undefined : { header: reviewHeader, brief: pullRequestSources.contextPanelSource?.brief },
         );
         if (prepared == null) return { started: false, message: "Story preparation cancelled; saved feedback was not changed." };
         if (prepared !== "diff") {
@@ -1108,7 +1111,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           allowEmptySubmit: remoteTarget == null || remoteTarget.pullRequest != null,
           visibleScopes,
           seedComments: firstReview ? partitionedSeed.applicable : [],
-          ...createRemotePullRequestSources(pi, ctx, remoteTarget),
+          ...(firstReview ? pullRequestSources : createRemotePullRequestSources(pi, ctx, remoteTarget)),
           orderSignals: buildReviewOrderSignals(handoff),
           reviewHeader,
           story,

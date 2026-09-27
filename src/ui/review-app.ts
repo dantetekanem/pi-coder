@@ -846,10 +846,10 @@ function shortHeaderRevision(revision: string): string {
 
 export function buildReviewHeaderText(info: ReviewHeaderInfo, counts: ReviewHeaderCounts): string {
   const parts = [info.identity];
+  if (info.revision != null && info.revision.length > 0) parts.push(`@${shortHeaderRevision(info.revision)}`);
   if (info.title != null && info.title.length > 0) parts.push(truncateToWidth(info.title, HEADER_TITLE_WIDTH, "…", false));
   if (info.state != null && info.state.length > 0) parts.push(info.state);
   if (info.queue != null) parts.push(`queue ${info.queue.position}${info.queue.total == null ? "" : `/${info.queue.total}`}`);
-  if (info.revision != null && info.revision.length > 0) parts.push(`@${shortHeaderRevision(info.revision)}`);
   parts.push(`${counts.reviewed}/${counts.files} reviewed`);
   parts.push(`${counts.comments} comment${counts.comments === 1 ? "" : "s"}`);
   if (info.openThreads != null) {
@@ -861,6 +861,22 @@ export function buildReviewHeaderText(info: ReviewHeaderInfo, counts: ReviewHead
 
 export function buildReviewHeaderLine(theme: Theme, width: number, info: ReviewHeaderInfo, counts: ReviewHeaderCounts): string {
   return theme.fg("muted", truncateToWidth(sanitizeTerminalText(buildReviewHeaderText(info, counts)), Math.max(1, width), "…", false));
+}
+
+export function buildReviewOrientationLines(
+  theme: Theme,
+  width: number,
+  info: ReviewHeaderInfo,
+  counts: ReviewHeaderCounts,
+  brief?: string,
+): string[] {
+  const lines = [buildReviewHeaderLine(theme, width, { ...info, title: undefined }, counts)];
+  for (const text of [info.title, brief]) {
+    if (!text) continue;
+    const line = truncateToWidth(sanitizeTerminalText(text), Math.max(1, width), "…", false);
+    lines.push(theme.fg("muted", line));
+  }
+  return lines;
 }
 
 export function getNavigatorGroup(file: ReviewFile): string {
@@ -1554,8 +1570,11 @@ export class ReviewApp {
   private storyInventory = false;
   private storyBrowsingDiff = false;
   private storyInventoryScroll = 0;
+  private storyContextReturnFocus?: ReviewState["focus"];
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
+  private inactiveContextScroll = 0;
+  private showingDescription = false;
   private contextLineCount = 0;
   private navigatorPageSize = 1;
   private diffPageSize = 1;
@@ -1740,7 +1759,9 @@ export class ReviewApp {
 
   private ensureContextPanel(options?: ReviewConversationLoadOptions): void {
     const source = this.options.contextPanelSource;
-    if (source == null || (options == null && (!this.paneVisibility.context || this.contextPanelState.status !== "idle"))) return;
+    if (source == null) return;
+    const contextVisible = this.paneVisibility.context || this.storyContextReturnFocus != null;
+    if (options == null && (!contextVisible || this.contextPanelState.status !== "idle")) return;
 
     const token = ++this.contextRequestToken;
     this.contextRequestInFlight = true;
@@ -1765,7 +1786,8 @@ export class ReviewApp {
     };
     if (this.contextPanelState.status !== "ready") {
       this.contextPanelState = { status: "loading" };
-      this.contextScroll = 0;
+      if (this.showingDescription) this.inactiveContextScroll = 0;
+      else this.contextScroll = 0;
     }
     this.requestRender();
     void (options == null ? source.load(applyUpdate) : source.load(applyUpdate, options)).then((text) => {
@@ -4364,6 +4386,12 @@ export class ReviewApp {
     }
 
     if (this.story != null && this.handleStoryInput(data)) return;
+    if (this.state.focus === "context" && data === "D" && this.options.contextPanelSource?.description != null) {
+      this.showingDescription = !this.showingDescription;
+      [this.contextScroll, this.inactiveContextScroll] = [this.inactiveContextScroll, this.contextScroll];
+      this.requestRender();
+      return;
+    }
     if (this.state.focus === "diff") {
       const movement = [
         ["up", -1], ["down", 1], ["pageUp", -this.diffPageSize], ["pageDown", this.diffPageSize],
@@ -5172,7 +5200,23 @@ export class ReviewApp {
 
   private handleStoryInput(data: string): boolean {
     const story = this.story!;
-    if (data === "F") {
+    if (this.storyContextReturnFocus != null) {
+      if (data === "4" || matchesKey(data, Key.escape)) {
+        this.state = setFocus(this.state, this.storyContextReturnFocus);
+        this.storyContextReturnFocus = undefined;
+        this.requestRender();
+        return true;
+      }
+      if (["D", "r", "m", "j", "k", "g", "G"].includes(data)) return false;
+      return ![Key.up, Key.down, Key.pageUp, Key.pageDown, Key.enter, Key.ctrl("u"), Key.ctrl("d"),
+        Key.ctrl("b"), Key.ctrl("f"), Key.ctrl("c")].some((key) => matchesKey(data, key));
+    }
+    if (!this.storyBrowsingDiff && data === "4" && this.options.contextPanelSource != null) {
+      this.storyContextReturnFocus = this.state.focus;
+      this.storyInventory = false;
+      this.state = setFocus(this.state, "context");
+      this.ensureContextPanel();
+    } else if (data === "F") {
       this.captureStorySession();
       this.storyBrowsingDiff = !this.storyBrowsingDiff;
       if (this.storyBrowsingDiff) {
@@ -5291,6 +5335,7 @@ export class ReviewApp {
     const inner = Math.max(1, width - 2);
     if (width < 40 || height < 27) {
       let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
+      if (this.storyContextReturnFocus != null) compact = this.renderContextPanel(width, height);
       if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
       if (this.confirmCancel) compact = renderCenteredOverlay(compact, this.renderCancelConfirmation(), width, height);
       return compact;
@@ -5299,8 +5344,13 @@ export class ReviewApp {
     const snapshot = this.options.story!.snapshot;
     const step = story.plan.steps[story.step];
     const header = [
+      ...(this.options.reviewHeader == null ? [] : buildReviewOrientationLines(this.theme, inner, { ...this.options.reviewHeader, openThreads: undefined }, {
+        files: snapshot.files.length,
+        reviewed: this.reviewedFileIds.size,
+        comments: getDraftCommentCount(this.state),
+      }, this.options.contextPanelSource?.brief)),
       `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} · ${story.viewedStepIds.length}/${story.plan.steps.length} steps seen`,
-      "",
+      ...(this.options.reviewHeader == null ? [""] : []),
       centerText(`${story.step > 0 ? "‹ Previous" : "Start"}  ·  ${story.step + 1}/${story.plan.steps.length}  ·  ${story.step + 1 < story.plan.steps.length ? `Next: ${sanitizeTerminalText(story.plan.steps[story.step + 1]!.title)} ›` : "End"}`, inner),
       "",
       this.theme.fg("accent", `◆ ${sanitizeTerminalText(step?.title ?? "Overview")}${step != null && story.viewedStepIds.includes(step.id) ? " · seen" : ""}`),
@@ -5311,7 +5361,7 @@ export class ReviewApp {
       ...(this.message ? [this.theme.fg("warning", this.message)] : []),
       this.theme.fg("dim", "Shift+←/→ step · ←/→ pane · [/] related"),
       this.theme.fg("dim", "c comment · d discuss · R seen · s finish"),
-      this.theme.fg("dim", "h comments · i story/files · F full diff"),
+      this.theme.fg("dim", `h comments · i story/files${this.options.contextPanelSource == null ? "" : " · 4 PR context"} · F full diff`),
     ];
     const bodyHeight = height - header.length - footer.length - 2;
     const stacked = inner < 100;
@@ -5332,7 +5382,8 @@ export class ReviewApp {
       ].flatMap((line) => wrapTextWithAnsi(sanitizeTerminalText(line), inner - 2));
       this.storyInventoryScroll = Math.min(this.storyInventoryScroll, Math.max(0, inventory.length - height + 4));
       rendered = renderBox("Story inventory · ↑↓ scroll · Esc back", width, height, this.theme, inventory.slice(this.storyInventoryScroll), true);
-    } else if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderHelpPanel(width - 4, height - 4), width, height);
+    } else if (this.storyContextReturnFocus != null) rendered = renderCenteredOverlay(rendered, this.renderContextPanel(width - 4, height - 4), width, height);
+    else if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderHelpPanel(width - 4, height - 4), width, height);
     else if (this.state.focus === "comments") rendered = renderCenteredOverlay(rendered, this.renderComments(width - 4, height - 4), width, height);
     if (this.needsStoryEditorOverlay()) {
       const target = this.editTarget!;
@@ -5377,9 +5428,14 @@ export class ReviewApp {
       return renderBox("PR context", width, height, this.theme, lines, false);
     }
 
-    if (this.contextPanelState.status === "idle" || this.contextPanelState.status === "loading") {
+    if (this.showingDescription) {
+      const description = sanitizeTerminalMultilineText(source.description || "No description supplied.");
+      lines.push(...wrapTextWithAnsi(description, Math.max(1, width - 2)));
+    } else if (this.contextPanelState.status === "idle" || this.contextPanelState.status === "loading") {
+      if (source.brief) lines.push(...buildContextPanelLines(this.theme, width, source.brief));
       lines.push(this.theme.fg("muted", source.loadingText));
     } else if (this.contextPanelState.status === "error") {
+      if (source.brief) lines.push(...buildContextPanelLines(this.theme, width, source.brief));
       lines.push(this.theme.fg("error", "Could not load PR context."));
       pushWrappedText(lines, this.theme, this.contextPanelState.error, Math.max(1, width - 2), "muted");
     } else {
@@ -5387,14 +5443,20 @@ export class ReviewApp {
     }
 
     const header: string[] = [];
-    pushWrappedText(header, this.theme, this.conversationStatus(this.contextConversation), Math.max(1, width - 2), "dim");
-    header.push(this.theme.fg("dim", `r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`));
+    const toggle = source.description == null ? "" : `D ${this.showingDescription ? "brief" : "description"} • `;
+    header.push(this.theme.fg("dim", `${toggle}↑↓ scroll${this.storyContextReturnFocus == null ? "" : " • Esc back"}`));
+    if (!this.showingDescription) {
+      pushWrappedText(header, this.theme, this.conversationStatus(this.contextConversation), Math.max(1, width - 2), "dim");
+      header.push(this.theme.fg("dim", `r refresh${this.conversation?.continuation == null ? "" : " • m load more"}`));
+    }
     header.length = Math.min(header.length, Math.max(0, Math.floor(height) - 3));
     const bodyHeight = Math.max(1, Math.floor(height) - 2 - header.length);
     this.contextLineCount = lines.length;
     this.contextPageSize = bodyHeight;
     this.contextScroll = Math.max(0, Math.min(this.contextScroll, this.maxContextScroll()));
-    return renderBox(source.title, width, height, this.theme, [...header, ...lines.slice(this.contextScroll, this.contextScroll + bodyHeight)], focused);
+    const title = this.showingDescription ? "PR description · author" : source.title;
+    const visibleLines = lines.slice(this.contextScroll, this.contextScroll + bodyHeight);
+    return renderBox(title, width, height, this.theme, [...header, ...visibleLines], focused);
   }
 
   private renderThread(width: number, height: number): string[] {
@@ -5685,11 +5747,11 @@ export class ReviewApp {
     if (this.options.reviewHeader != null) {
       const scopedFiles = getScopedFiles(this.files, this.state.activeScope);
       const info = this.options.contextPanelSource || this.options.repliesSource ? { ...this.options.reviewHeader, openThreads: undefined } : this.options.reviewHeader;
-      headerLines.push(buildReviewHeaderLine(this.theme, frameInnerWidth, info, {
+      headerLines.push(...buildReviewOrientationLines(this.theme, frameInnerWidth, info, {
         files: scopedFiles.length,
         reviewed: scopedFiles.filter((file) => this.reviewedFileIds.has(file.id)).length,
         comments: getDraftCommentCount(this.state),
-      }));
+      }, this.options.contextPanelSource?.brief));
     }
     if (this.conversation != null) headerLines.push(truncateToWidth(this.conversationStatus(this.conversation), frameInnerWidth, "", false));
     if (visibleScopes.length > 1) {

@@ -211,9 +211,10 @@ function deriveStatus(details: PullRequestDetails): StatusSummary {
 function extractBodySignal(body: string): string {
   const lines = stripMarkup(body)
     .split(/\r?\n/)
-    .map((line) => line.replace(/^#+\s*/, "").replace(/^[-*]\s*/, "").trim())
+    .filter((line) => !/^\s*#/.test(line))
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
     .filter((line) => line.length > 0 && !/^\|/.test(line));
-  return lines.slice(0, 4).join(" ");
+  return compact(lines.slice(0, 4).join(" "), 320);
 }
 
 function formatChecks(details: PullRequestDetails, provider: ProviderSettings): string {
@@ -271,13 +272,13 @@ function fallbackSummary(target: RemoteReviewTarget, details: PullRequestDetails
   ].filter(Boolean).join("; ");
 
   return [
+    `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
     `Title: ${pr.title}`,
     `URL: ${details.url ?? pullRequestUrl(target, provider)}`,
     `Author: ${pr.authorLogin}`,
     `Head: ${pr.headRefName} @ ${pr.headRefOid}`,
     `Diff: ${formatDiffStats(target)}`,
     `Status: ${status.status} - ${status.reason}`,
-    `Problem: ${bodySignal || "PR body did not include a clear problem statement."}`,
     "Changes: Read the diff for implementation details.",
     `Validation: ${formatChecks(details, provider)}`,
     `Open comments: ${[conversation, coverage].filter(Boolean).join("; ") || "None found."}`,
@@ -616,6 +617,8 @@ export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: Exte
     conversation: reader,
     title: `${provider.label} PR context`,
     loadingText: `Loading ${provider.label} PR context...`,
+    brief: extractBodySignal(target.pullRequest.body) || "No description supplied.",
+    description: target.pullRequest.body,
     load: async (onUpdate, options) => {
       if (reader == null && (options?.continuation != null || options?.budgets != null)) throw new Error("Continuation and budget options require a shared reader.");
       const shared = reader?.load(options);
@@ -649,7 +652,7 @@ export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: Exte
           : summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
         void explanation.then((text) => {
           const clean = text == null ? "" : cleanAgentOutput(text);
-          if (isCurrent() && clean.length > 0) onUpdate?.(`${facts}\n\nGenerated explanation (optional):\n${clean}`, metadata);
+          if (isCurrent() && clean.length > 0) onUpdate?.(`Generated explanation (optional):\n${clean}\n\n${facts}`, metadata);
         }).catch(() => undefined);
       }).catch(() => undefined);
       return format(await (onUpdate == null ? complete : early));

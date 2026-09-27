@@ -373,6 +373,49 @@ describe("code diff extension", () => {
     expect(mocks.selectStoryAgent).toHaveBeenCalledWith(ctx);
   });
 
+  it("passes the same remote brief to story preparation and the mounted review", async () => {
+    const commands = new Map<string, any>();
+    const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, mode: "tui", cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    const target = remoteTarget();
+    target.pullRequest.body = "## Intent\nKeep review context beside the code.";
+    mocks.resolveRemoteReviewTarget.mockResolvedValue(target);
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"] });
+    mocks.prepareDiffStory.mockResolvedValue({ snapshot: { files: [] }, plan: { steps: [] } });
+    mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
+    codeDiffExtension(pi as never);
+
+    await commands.get("diff-story").handler("remote feature/review", ctx);
+    await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalledOnce());
+    const options = mocks.runReviewApp.mock.calls[0]![1];
+    expect(mocks.prepareDiffStory.mock.calls[0]![6]).toEqual({
+      header: options.reviewHeader,
+      brief: "Keep review context beside the code.",
+    });
+    expect(options.contextPanelSource.brief).toBe("Keep review context beside the code.");
+    expect(options.contextPanelSource.description).toBe(target.pullRequest.body);
+  });
+
+  it("creates fresh conversation sources when a remote review remounts", async () => {
+    const commands = new Map<string, any>();
+    const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
+    const ctx = { hasUI: true, mode: "tui", cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"] });
+    mocks.runReviewApp
+      .mockResolvedValueOnce({ type: "open-editor", command: "editor", args: [], filePath: "/repo/src/app.ts", line: 1 })
+      .mockResolvedValueOnce({ type: "cancel", disposition: "park" });
+    const runExternalEditor = vi.fn(async () => ({ kind: "exit" as const, code: 0 }));
+    codeDiffExtension(pi as never, { runExternalEditor });
+
+    await commands.get("diff").handler("remote feature/review", ctx);
+    await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalledTimes(2));
+    const first = mocks.runReviewApp.mock.calls[0]![1].contextPanelSource;
+    const second = mocks.runReviewApp.mock.calls[1]![1].contextPanelSource;
+    expect(first.conversation).not.toBe(second.conversation);
+    expect(first.brief).toBe(second.brief);
+    expect(runExternalEditor).toHaveBeenCalledOnce();
+  });
+
   it("does not mount or submit when story preparation is cancelled", async () => {
     const commands = new Map<string, any>();
     const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };

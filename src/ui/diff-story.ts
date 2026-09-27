@@ -12,6 +12,7 @@ import { sanitizeTerminalText } from "../sanitize.js";
 import { getReviewFileDisplayPath, type ReviewFile, type ReviewFileContents, type ReviewScope } from "../types.js";
 import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
 import { StoryOutputCarousel } from "./story-output.js";
+import { buildReviewOrientationLines, type ReviewHeaderInfo } from "./review-app.js";
 
 const RUNNING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -55,6 +56,7 @@ export function prepareDiffStory(
   load: (file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>,
   saved?: StorySessionData,
   generate?: DiffStoryGenerate,
+  orientation?: { header: ReviewHeaderInfo; brief?: string },
 ): Promise<PreparedDiffStory | "diff" | undefined> {
   const selection = loadReviewPreferences().storyAgent;
   const storyFiles = filterReviewFilesByLocale(files, false);
@@ -195,6 +197,11 @@ export function prepareDiffStory(
           ? `${retry}f ordinary diff · Esc cancel`
           : "Read-only · Space pause/resume motion · Esc cancel";
         const lines = [
+          ...(orientation == null ? [] : buildReviewOrientationLines(theme, Math.max(1, width - 4), orientation.header, {
+            files: storyFiles.length,
+            reviewed: 0,
+            comments: 0,
+          }, orientation.brief)),
           theme.fg("accent", `${indicator}${phase}`),
           "",
           counts,

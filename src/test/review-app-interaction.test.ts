@@ -2437,6 +2437,73 @@ describe("PR context pane", () => {
     app.handleInput("\t");
   }
 
+  it("toggles the original description without refetching or losing either scroll position", async () => {
+    let update: ((text: string) => void) | undefined;
+    const load = vi.fn(async (onUpdate?: typeof update) => {
+      update = onUpdate;
+      return contextText;
+    });
+    const { app } = await createContextHarness({
+      contextPanelSource: {
+        title: "PR context",
+        loadingText: "Loading",
+        load,
+        description: "Original \\n stays literal.\x1b[2J\n" + "Author details\n".repeat(80),
+      },
+    });
+    try {
+      focusContext(app);
+      app.handleInput("j");
+      app.handleInput("D");
+      const description = app.render(200).join("\n");
+      expect(description).toContain("Original \\n stays literal.\\x1b[2J");
+      expect(description).not.toContain("\x1b[2J");
+
+      app.handleInput("\x1b[6~");
+      const descriptionScroll = (app as any).contextScroll;
+      update!(`${contextText}\nUpdated explanation`);
+      expect((app as any).contextScroll).toBe(descriptionScroll);
+      app.handleInput("D");
+      expect((app as any).contextScroll).toBe(1);
+      expect(app.render(200).join("\n")).toContain("context line 2");
+      app.handleInput("D");
+      expect((app as any).contextScroll).toBe(descriptionScroll);
+      expect(load).toHaveBeenCalledOnce();
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps the description readable while context is pending or unavailable", async () => {
+    const pending = deferred<string>();
+    const load = vi.fn(() => pending.promise);
+    const { app } = createHarness(undefined, undefined, {
+      contextPanelSource: {
+        title: "PR context",
+        loadingText: "Loading context",
+        brief: "Keep the review moving.",
+        description: "Author details stay available.",
+        load,
+      },
+    }, { rows: 30, columns: 200 });
+    try {
+      focusContext(app);
+      expect(app.render(200).join("\n")).toContain("Keep the review moving.");
+      app.handleInput("D");
+      expect(app.render(200).join("\n")).toContain("Author details stay available.");
+      pending.reject(new Error("Provider unavailable"));
+      await vi.waitFor(() => expect((app as any).contextPanelState.status).toBe("error"));
+      expect(app.render(200).join("\n")).toContain("Author details stay available.");
+      app.handleInput("D");
+      const brief = app.render(200).join("\n");
+      expect(brief).toContain("Keep the review moving.");
+      expect(brief).toContain("Provider unavailable");
+      expect(load).toHaveBeenCalledOnce();
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("applies context enrichment without moving scroll or code selection", async () => {
     let update: ((text: string) => void) | undefined;
     const { app } = await createContextHarness({ contextPanelSource: {

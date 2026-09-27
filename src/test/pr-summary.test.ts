@@ -286,6 +286,17 @@ describe("remote pull request summary source", () => {
     expect(summary).toMatch(/Open comments:\nbob commented: Recovered review; Thread read incomplete\.$/);
   });
 
+  it("provides bounded orientation and the original description before any reads", () => {
+    const body = `## Problem\n${"Repeated requests waste work. ".repeat(40)}\n\n## Details\nKeep literal \\n and accents: revisão.\x1b[2J`;
+    const exec = vi.fn();
+    const source = createRemotePullRequestSummarySource({ exec } as never, {} as never, target("primary", { body }))!;
+
+    expect(source.brief).toMatch(/^Repeated requests waste work\./);
+    expect(source.brief!.length).toBeLessThanOrEqual(320);
+    expect(source.description).toBe(body);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
   it("uses supplied handoff context without provider reads", async () => {
     const exec = vi.fn(async (command: string) => {
       if (command === "pi") return { code: 1, stdout: "", stderr: "agent unavailable", killed: false };
@@ -317,9 +328,9 @@ describe("remote pull request summary source", () => {
     expect(exec).not.toHaveBeenCalled();
     expect(summary).toContain("Title:\nRemove old checkout path");
     expect(summary).toContain("Diff:\n2 files touched | +3/-9");
-    expect(summary).toContain("Problem:\nIntent Remove the old path. Tested Unit tests pass.");
+    expect(summary).toContain("Problem:\nRemove the old path. Unit tests pass.");
     expect(summary).toContain("Validation:\nFailing: build");
-    expect(update.mock.lastCall?.[0]).toContain(`${summary}\n\nGenerated explanation (optional):\nTitle:\nStale title`);
+    expect(update.mock.lastCall?.[0]).toBe(`Generated explanation (optional):\nTitle:\nStale title\n\nStatus:\npending - waiting for review\n\nProblem:\nRemove the old path.\n\n${summary}`);
   });
 
   it.each(["primary", "secondary"])("returns known embedded facts before slow %s conversation reads", async (providerId) => {
@@ -369,7 +380,7 @@ describe("remote pull request summary source", () => {
       const completeFacts = update.mock.lastCall![0];
       finish("Status: approved - invented\nAn optional explanation.");
       await vi.waitFor(() => expect(update.mock.lastCall?.[0]).toContain("Generated explanation (optional):"));
-      expect(update.mock.lastCall?.[0]).toBe(`${completeFacts}\n\nGenerated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.`);
+      expect(update.mock.lastCall?.[0]).toBe(`Generated explanation (optional):\nStatus:\napproved - invented\nAn optional explanation.\n\n${completeFacts}`);
     } finally {
       finish("");
       await first;

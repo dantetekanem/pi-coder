@@ -504,7 +504,7 @@ describe("persistent review header", () => {
 
   it("shows PR identity, queue position, revision, progress, and thread counts", () => {
     expect(buildReviewHeaderText(info, { files: 12, reviewed: 4, comments: 2 })).toBe(
-      "example/widgets#1 • Add review mode • OPEN • queue 2/5 • @bbbbbbb • 4/12 reviewed • 2 comments • 3 open threads, 1 awaiting reply",
+      "example/widgets#1 • @bbbbbbb • Add review mode • OPEN • queue 2/5 • 4/12 reviewed • 2 comments • 3 open threads, 1 awaiting reply",
     );
   });
 

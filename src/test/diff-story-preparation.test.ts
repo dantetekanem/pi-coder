@@ -86,6 +86,32 @@ describe("story agent selection", () => {
 });
 
 describe("centered story preparation", () => {
+  it("keeps remote orientation visible while generation is pending and still cancels immediately", async () => {
+    const preparation = harness();
+    const generate = vi.fn(() => new Promise<string>(() => {}));
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate, {
+      header: {
+        identity: "dantetekanem/pi-coder#25",
+        title: "Reuse pending requests",
+        revision: "a".repeat(40),
+        state: "OPEN",
+      },
+      brief: "Reuse work rather than starting the same request twice.",
+    });
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    for (const [width, height] of [[80, 30], [40, 20]] as const) {
+      preparation.terminal.rows = height;
+      const rows = preparation.view().render(width);
+      expect(rows).toHaveLength(height);
+      expect(rows.every((row) => visibleWidth(row) === width)).toBe(true);
+      expect(rows.join("\n")).toContain("dantetekanem/pi-coder#25");
+      expect(rows.join("\n")).toContain("@aaaaaaa");
+      expect(rows.join("\n")).toContain("Reuse pending requests");
+    }
+    preparation.view().handleInput("\x1b");
+    await expect(ready).resolves.toBeUndefined();
+  });
+
   it.each(["ready", "cancel"])("streams public output below status, supports pausing, and clears feedback on %s", async (ending) => {
     vi.useFakeTimers();
     const preparation = harness();

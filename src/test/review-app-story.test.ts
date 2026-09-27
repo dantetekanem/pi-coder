@@ -58,7 +58,7 @@ const plan = validateDiffStory({
   ],
 }, snapshot);
 
-function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, snapshot }) {
+function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, snapshot }, overrides: Partial<ConstructorParameters<typeof ReviewApp>[3]> = {}) {
   let saved: ReviewSessionData | undefined;
   const done = vi.fn();
   const tui = { terminal: { rows, columns: 140 }, requestRender: vi.fn() };
@@ -73,6 +73,7 @@ function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, s
     loadFileContents: async (_root, file) => pair.snapshot.files.find((entry) => entry.fileId === file.id)!.contents,
     story: pair,
     initialSession,
+    ...overrides,
     onSessionChange: (data) => {
       saved = structuredClone(data);
       return true;
@@ -82,6 +83,56 @@ function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, s
 }
 
 describe("paired diff story", () => {
+  it.each([[80, 32], [140, 40]])("opens PR context without losing the story selection at %i×%i", async (width, height) => {
+    const load = vi.fn(async () => "Why this change matters\nValidation: checks pending");
+    const { app, done } = harness(undefined, height, { plan, snapshot }, {
+      reviewHeader: {
+        identity: "widgets#12",
+        title: "Reuse pending requests",
+        revision: "a".repeat(40),
+        state: "OPEN",
+      },
+      contextPanelSource: {
+        title: "PR context",
+        loadingText: "Loading",
+        load,
+        brief: "Reuse work rather than starting the same request twice.",
+        description: "Full author details\n" + "More background\n".repeat(50),
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(load).toHaveBeenCalledOnce());
+      const initial = app.render(width).join("\n");
+      expect(initial).toContain("widgets#12");
+      expect(initial).toContain("@aaaaaaa");
+      expect(initial).toContain("Reuse pending requests");
+      expect(initial).toContain("Reuse work rather than starting the same request twice.");
+      expect(initial).not.toContain("Full author details");
+
+      app.handleInput("\x1b[C");
+      app.handleInput("\x1b[1;2B");
+      const selected = structuredClone((app as any).state.selectedLineTargetByScopeFile);
+      app.handleInput("4");
+      expect(app.render(width).join("\n")).toContain("Why this change matters");
+      app.handleInput("D");
+      expect(app.render(width).join("\n")).toContain("Full author details");
+      app.handleInput("\x1b[6~");
+      expect((app as any).contextScroll).toBeGreaterThan(0);
+
+      app.handleInput("\x1b");
+      expect(done).not.toHaveBeenCalled();
+      expect((app as any).story.member).toBe("tests");
+      expect((app as any).state.selectedLineTargetByScopeFile).toEqual(selected);
+      const rows = app.render(width);
+      expect(rows).toHaveLength(height);
+      expect(rows.every((row) => visibleWidth(row) === width)).toBe(true);
+      expect(rows.join("\n")).toContain("expectReuse()");
+      expect(load).toHaveBeenCalledOnce();
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("keeps the cursor on the step's own lines and uses Option only for their context", async () => {
     const before = Array.from({ length: 30 }, (_, i) => `line${i + 1}()`);
     const after = before.map((line, i) => i === 4 || i === 24 ? `changed${i + 1}()` : line);

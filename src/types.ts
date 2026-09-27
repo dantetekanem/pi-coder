@@ -76,6 +76,10 @@ export interface ReviewContextPanelSource {
   conversation?: object;
   title: string;
   loadingText: string;
+  /** Bounded author-derived orientation available before context reads. */
+  brief?: string;
+  /** Original author description, rendered only on demand. */
+  description?: string;
   /** Returns usable context; optional later updates replace its text without resetting the pane. */
   load: (onUpdate?: (text: string, conversation?: ReviewConversationMetadata) => void, options?: ReviewConversationLoadOptions) => Promise<string>;
   /** Canonical http(s) URL opened from the PR context pane. */
