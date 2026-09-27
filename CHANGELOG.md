@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0 - 2026-09-27
+
+### Added
+
+- Show a short author-derived PR brief, title, and reviewed revision in remote `/diff`, `/diff-story`, and story preparation.
+- Toggle the complete author description with `D` in PR context, preserving each view's scroll position. In stories, `4` opens context and `Esc` returns to the same step and selection.
+
+### Changed
+
+- Place the optional generated explanation above fetched PR facts under its own label, keeping the original description separate.
+
 ## 0.9.0 - 2026-09-24
 
 ### Added
