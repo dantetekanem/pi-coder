@@ -1,24 +1,37 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { createStorySnapshot, validateSavedDiffStory, type DiffStory, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
+import { createStorySnapshot, storyFile, validateSavedDiffStory, type DiffStory, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
 import { createStoryAgentGenerator } from "../diff-story/agent.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
+import { generateFormalStory, type FormalStory, type FormalStoryOptions, type FormalStoryPhase } from "../diff-story/formal.js";
 import { generateDiffStory, type DiffStoryGenerate } from "../diff-story/generate.js";
 import type { StorySessionData } from "../diff-story/navigation.js";
+import type { FormalValidationGuide } from "../formal-validation/guide.js";
+import { singleLine } from "../formal-validation/source.js";
 import { filterReviewFilesByLocale } from "../locale-files.js";
 import { loadReviewPreferences, saveReviewPreference } from "../preferences.js";
 import { validateReviewAgent } from "../review-agent.js";
 import { sanitizeTerminalText } from "../sanitize.js";
-import { getReviewFileDisplayPath, type ReviewFile, type ReviewFileContents, type ReviewScope } from "../types.js";
+import { formatScopeLabel, type ReviewFile, type ReviewFileContents, type ReviewScope } from "../types.js";
 import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
 import { StoryOutputCarousel } from "./story-output.js";
 import { buildReviewOrientationLines, type ReviewHeaderInfo } from "./review-app.js";
 
 const RUNNING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+const FORMAL_PHASES: Record<FormalStoryPhase, string> = {
+  "Preparing code and test units": "Preparing code and test units",
+  "Writing the validation guide": "Constructing storyline from a validation guide",
+  "Reusing the saved validation guide": "Constructing storyline from the saved validation guide",
+  "Validating story": "Validating story",
+};
+
 export interface PreparedDiffStory {
   plan: DiffStory;
   snapshot: StorySnapshot;
+  /** A freshly built story opens on its storyline before the first code step. */
+  storylineFirst?: boolean;
+  guide?: FormalValidationGuide;
 }
 
 export async function selectStoryAgent(ctx: ExtensionContext): Promise<void> {
@@ -57,8 +70,14 @@ export function prepareDiffStory(
   saved?: StorySessionData,
   generate?: DiffStoryGenerate,
   orientation?: { header: ReviewHeaderInfo; brief?: string },
+  formal?: Omit<FormalStoryOptions, "model">,
 ): Promise<PreparedDiffStory | "diff" | undefined> {
   const selection = loadReviewPreferences().storyAgent;
+  const model = `${selection.provider}/${selection.model} · ${selection.thinking}`;
+  const formalOptions: FormalStoryOptions = {
+    ...(formal ?? { target: { kind: "working", label: formatScopeLabel(scope), repoRoot: "", scope } }),
+    model,
+  };
   const storyFiles = filterReviewFilesByLocale(files, false);
   const hiddenLocales = files.length - storyFiles.length;
   const localeNote = hiddenLocales === 0 ? "" : ` · ${hiddenLocales} locale${hiddenLocales === 1 ? "" : "s"} hidden`;
@@ -70,6 +89,8 @@ export function prepareDiffStory(
     let error: string | undefined;
     let stale = false;
     let snapshot: StorySnapshot | undefined;
+    // A story built from host rules after the guideline model failed; Enter opens it.
+    let pending: FormalStory | undefined;
     let startedAt = Date.now();
     const carousel = new StoryOutputCarousel();
     let frame = 0;
@@ -91,9 +112,11 @@ export function prepareDiffStory(
       phase = value;
       tui.requestRender();
     };
+    const opened = (story: FormalStory): PreparedDiffStory => ({ plan: story.plan, snapshot: snapshot!, storylineFirst: true, guide: story.guide });
     const construct = async () => {
       error = undefined;
       stale = false;
+      pending = undefined;
       phase = "Preparing story agent";
       carousel.clear();
       startedAt = Date.now();
@@ -106,10 +129,29 @@ export function prepareDiffStory(
           carousel.addActivity(activity);
           tui.requestRender();
         });
-        const plan = await generateDiffStory(snapshot!, generator, abort.signal, (progress) => {
-          update(progress === "Generating story" ? "Constructing storyline and connecting changed tests" : progress);
-        });
-        if (!settled) finish({ plan, snapshot: snapshot! });
+        let story: FormalStory;
+        try {
+          story = await generateFormalStory(snapshot!, generator, abort.signal, (value) => update(FORMAL_PHASES[value]), formalOptions);
+        } catch (failure) {
+          if (settled || abort.signal.aborted) throw failure;
+          const message = singleLine(failure instanceof Error ? failure.message : String(failure), 300);
+          carousel.addActivity({ kind: "error", text: `Formal validation failed: ${message}. Using the plain story order.` });
+          const plan = await generateDiffStory(snapshot!, generator, abort.signal, (progress) => {
+            update(progress === "Generating story" ? "Constructing storyline and connecting changed tests" : progress);
+          });
+          if (!settled) finish({ plan: { ...plan, summary: `Formal validation failed (${message}); steps follow the plain story order.` }, snapshot: snapshot!, storylineFirst: true });
+          return;
+        }
+        if (settled) return;
+        if (story.guide.refinement.status === "failed") {
+          pending = story;
+          error = sanitizeTerminalText(`The guideline model failed: ${story.guide.refinement.message ?? "no message"}`);
+          clearInterval(timer);
+          carousel.clear();
+          update("Storyline built from host rules only");
+          return;
+        }
+        finish(opened(story));
       } catch (failure) {
         if (settled) return;
         error = sanitizeTerminalText(failure instanceof Error ? failure.message : String(failure));
@@ -133,15 +175,7 @@ export function prepareDiffStory(
         for (const file of storyFiles) {
           if (settled) return;
           update(`Reading ${captured.length + 1} of ${storyFiles.length} files · ${sanitizeTerminalText(file.path)}`);
-          const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
-          captured.push({
-            fileId: file.id,
-            path: getReviewFileDisplayPath(file, scope),
-            scope,
-            contents: await load(file, scope),
-            hasOriginal: comparison?.hasOriginal,
-            hasModified: comparison?.hasModified,
-          });
+          captured.push(storyFile(file, scope, await load(file, scope)));
         }
         if (settled) return;
         snapshot = createStorySnapshot(captured);
@@ -172,6 +206,7 @@ export function prepareDiffStory(
     return {
       handleInput(data: string) {
         if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) finish(undefined);
+        else if (error && pending != null && matchesKey(data, Key.enter)) finish(opened(pending));
         else if (error && data === "f") finish("diff");
         else if (error && snapshot != null && data === "r") void construct();
         else if (!error && data === " ") {
@@ -193,8 +228,9 @@ export function prepareDiffStory(
         const activity = carousel.paused ? "Preview paused · agent still running"
           : carousel.hasActivity ? "Receiving agent activity" : "Waiting for agent activity";
         const retry = stale ? "r rebuild · " : snapshot != null ? "r retry · " : "";
+        const proceed = pending == null ? "" : "Enter continue with host steps · ";
         const controls = error
-          ? `${retry}f ordinary diff · Esc cancel`
+          ? `${retry}${proceed}f ordinary diff · Esc cancel`
           : "Read-only · Space pause/resume motion · Esc cancel";
         const lines = [
           ...(orientation == null ? [] : buildReviewOrientationLines(theme, Math.max(1, width - 4), orientation.header, {
@@ -205,7 +241,7 @@ export function prepareDiffStory(
           theme.fg("accent", `${indicator}${phase}`),
           "",
           counts,
-          `${selection.provider}/${selection.model} · ${selection.thinking}`,
+          model,
           ...(error ? ["", theme.fg("warning", error)] : [theme.fg("dim", `${activity} · ${elapsed}`)]),
           "",
           controls,

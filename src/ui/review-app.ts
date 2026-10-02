@@ -129,7 +129,7 @@ interface ReviewAppOptions {
   seedComments?: ResolvedSeedComment[];
   contextPanelSource?: ReviewContextPanelSource;
   repliesSource?: ReviewRepliesPanelSource;
-  story?: { plan: DiffStory; snapshot: StorySnapshot };
+  story?: { plan: DiffStory; snapshot: StorySnapshot; storylineFirst?: boolean };
   orderSignals?: ReviewOrderSignals;
   reviewHeader?: ReviewHeaderInfo;
   initialSession?: ReviewSessionData;
@@ -1654,6 +1654,8 @@ export class ReviewApp {
         }) ? [index] : [])));
       }
       this.activateStoryMember(this.story.member);
+      // A rebuilt story keeps the session's comments, but its steps are new, so it opens on the storyline too.
+      if (options.story.storylineFirst === true && options.initialSession?.story?.plan?.snapshot !== options.story.plan.snapshot) this.storyInventory = true;
     }
 
     const editorTheme: EditorTheme = {
@@ -5231,7 +5233,7 @@ export class ReviewApp {
       this.setMessage("Captured story bytes are read-only. Open a separate /code session to edit files.");
     } else if (this.storyBrowsingDiff) return false;
     else if (this.storyInventory) {
-      if (matchesKey(data, Key.escape) || data === "i") this.storyInventory = false;
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "i") this.storyInventory = false;
       else if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) this.storyInventoryScroll += matchesKey(data, Key.pageDown) ? 10 : 1;
       else if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) this.storyInventoryScroll = Math.max(0, this.storyInventoryScroll - (matchesKey(data, Key.pageUp) ? 10 : 1));
     } else if (matchesKey(data, Key.shift("right")) || matchesKey(data, Key.shift("left"))) {
@@ -5343,6 +5345,7 @@ export class ReviewApp {
     const story = this.captureStorySession();
     const snapshot = this.options.story!.snapshot;
     const step = story.plan.steps[story.step];
+    const lead = step?.explanation.split("\n").find((line) => line.trim().length > 0);
     const header = [
       ...(this.options.reviewHeader == null ? [] : buildReviewOrientationLines(this.theme, inner, { ...this.options.reviewHeader, openThreads: undefined }, {
         files: snapshot.files.length,
@@ -5354,6 +5357,7 @@ export class ReviewApp {
       centerText(`${story.step > 0 ? "‹ Previous" : "Start"}  ·  ${story.step + 1}/${story.plan.steps.length}  ·  ${story.step + 1 < story.plan.steps.length ? `Next: ${sanitizeTerminalText(story.plan.steps[story.step + 1]!.title)} ›` : "End"}`, inner),
       "",
       this.theme.fg("accent", `◆ ${sanitizeTerminalText(step?.title ?? "Overview")}${step != null && story.viewedStepIds.includes(step.id) ? " · seen" : ""}`),
+      ...(lead == null ? [] : [this.theme.fg("dim", truncateToWidth(sanitizeTerminalText(lead), inner, "…"))]),
       "",
     ];
     const footer = [
@@ -5361,7 +5365,7 @@ export class ReviewApp {
       ...(this.message ? [this.theme.fg("warning", this.message)] : []),
       this.theme.fg("dim", "Shift+←/→ step · ←/→ pane · [/] related"),
       this.theme.fg("dim", "c comment · d discuss · R seen · s finish"),
-      this.theme.fg("dim", `h comments · i story/files${this.options.contextPanelSource == null ? "" : " · 4 PR context"} · F full diff`),
+      this.theme.fg("dim", `h comments · i storyline${this.options.contextPanelSource == null ? "" : " · 4 PR context"} · F full diff`),
     ];
     const bodyHeight = height - header.length - footer.length - 2;
     const stacked = inner < 100;
@@ -5372,16 +5376,20 @@ export class ReviewApp {
     const body = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
     let rendered = renderBox("diff-story", width, height, this.theme, [...header, ...body, ...footer], true);
     if (this.storyInventory) {
+      const textLines = (text: string) => text.split("\n").filter((line) => line.trim().length > 0);
       const inventory = [
+        ...textLines(story.plan.summary),
+        "",
+        ...story.plan.steps.flatMap((entry, index) => [
+          `${index + 1}. ${entry.title}`,
+          ...textLines(entry.explanation).map((line) => `   ${line}`),
+          "",
+        ]),
         "Captured files:",
         ...snapshot.files.map((file) => file.path),
-        "",
-        "Story steps:",
-        story.plan.summary,
-        ...story.plan.steps.flatMap((entry) => [entry.title, entry.explanation]),
       ].flatMap((line) => wrapTextWithAnsi(sanitizeTerminalText(line), inner - 2));
       this.storyInventoryScroll = Math.min(this.storyInventoryScroll, Math.max(0, inventory.length - height + 4));
-      rendered = renderBox("Story inventory · ↑↓ scroll · Esc back", width, height, this.theme, inventory.slice(this.storyInventoryScroll), true);
+      rendered = renderBox("Storyline · ↑↓ scroll · Enter or Esc to read the steps", width, height, this.theme, inventory.slice(this.storyInventoryScroll), true);
     } else if (this.storyContextReturnFocus != null) rendered = renderCenteredOverlay(rendered, this.renderContextPanel(width - 4, height - 4), width, height);
     else if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderHelpPanel(width - 4, height - 4), width, height);
     else if (this.state.focus === "comments") rendered = renderCenteredOverlay(rendered, this.renderComments(width - 4, height - 4), width, height);

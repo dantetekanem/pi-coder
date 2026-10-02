@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { buildStructuredDiff } from "../diff.js";
-import type { ReviewFileContents, ReviewScope } from "../types.js";
+import { getReviewFileDisplayPath, type ReviewFile, type ReviewFileContents, type ReviewScope } from "../types.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import { prepareStoryUnits } from "./units.js";
 
@@ -179,6 +179,19 @@ function changedRanges(file: StorySnapshotFile): { additions: number; deletions:
     }
   }
   return { additions: diff.additions, deletions: diff.deletions, changes };
+}
+
+/** One loaded review file as a story capture; /diff-story and formal validation hash the same fields. */
+export function storyFile(file: ReviewFile, scope: ReviewScope, contents: ReviewFileContents): StoryFile {
+  const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
+  return {
+    fileId: file.id,
+    path: getReviewFileDisplayPath(file, scope),
+    scope,
+    contents,
+    hasOriginal: comparison?.hasOriginal,
+    hasModified: comparison?.hasModified,
+  };
 }
 
 /** Captures complete selected revision bytes before any model call. */

@@ -4,7 +4,7 @@
 
 - `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
 - `/code` browses and edits a workspace without leaving Pi.
-- `/diff-story` arranges a change as ordered code steps with linked implementation and test diffs.
+- `/diff-story` runs formal validation on a change, then walks through it as a storyline of ranked behavior steps beside their tests.
 
 It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews. New, untracked files count individually and contribute their text additions. If Git cannot return complete counts, incomplete line totals are omitted rather than shown as exact.
 
@@ -77,11 +77,13 @@ GitHub pull requests work by default through the authenticated [`gh`](https://cl
 
 The story agent starts as `openai-codex/gpt-5.6-luna` with `max` thinking. Its selection is saved independently of the main conversation. Model selection validates support for the chosen thinking level.
 
-A full-screen preparation view shows the captured files, change counts, and generation phase. The capture skips non-English/non-pt-BR locale files, as the `/diff` file list does, and shows how many it hid. Press `F` and then `L` to see them in the full diff. The extension extracts changed functions and individual tests locally. Changed lines outside a function join the nearest function in their file; a file without functions becomes one unit. The extension then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. The extension supplies the exact ranges, complete changed-line coverage, and file/symbol titles. Each paired test appears once beside its implementation. Setup, helpers, and other unpaired tests join the step that owns the nearest paired test in their file, and a test file without pairs gets one step.
+A full-screen preparation view shows the captured files, change counts, and generation phase. The capture skips non-English/non-pt-BR locale files, as the `/diff` file list does, and shows how many it hid. Press `F` and then `L` to see them in the full diff. The extension extracts changed functions and individual tests locally. Changed lines outside a function join the nearest function in their file; a file without functions becomes one unit. Before it builds steps, the story runs [formal validation](#formal-validation) on these exact bytes. One request to the story model groups the units into behavior steps, ranks each step critical, needed or minor, and writes the rule it must keep with ordered checks. The extension keeps the exact ranges, complete changed-line coverage, and test facts. Critical and needed steps come first, in the guide's order, and each title starts with its priority. Docs, lockfiles, comment, import and whitespace edits share one closing step with any minor steps. Each changed test appears once, beside the code it exercises; a test file without paired code gets its own step.
 
-During preparation, a centered five-line strip shows public output, errors, and progress as they arrive, including the final ordering JSON. Gray text uses the normal terminal background, with the newest line at the bottom and older lines fading upward through 100% / 80% / 60% / 40% / 20%, approximated with terminal colors. The strip spans up to 120 columns. `Space` pauses/resumes the strip while generation and the running spinner continue. Elapsed time remains visible. The strip disappears when preparation ends. On generation failure, `r` explicitly retries against the same captured files.
+A fresh story opens on its **storyline**: the summary, description claims mapped to step numbers, every step with its rule, checks, test quality and gaps, and the captured files. `Enter` or `Esc` starts the first step, and `i` reopens the storyline. During the steps, the rule appears under the step title. The guide is saved by snapshot fingerprint. Reopening a story for the same bytes reuses the saved guide, prose included, without a model request, as long as the PR description and the extension's analysis of each unit still match; otherwise the story asks the model again. If the guideline model fails, preparation offers `r` to retry, `Enter` to continue with host-only steps and rule-based checks, or `f` for the ordinary diff. If the guide itself cannot be built, the story falls back to the earlier ordering request, and its storyline says so.
 
-File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Each pane shows one file's lines for the current step, plus a few unchanged lines of context. Code owned by another step stays collapsed, so every changed line appears on exactly one page. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
+During preparation, a centered five-line strip shows public output, errors, and progress as they arrive, including the final guideline JSON. Gray text uses the normal terminal background, with the newest line at the bottom and older lines fading upward through 100% / 80% / 60% / 40% / 20%, approximated with terminal colors. The strip spans up to 120 columns. `Space` pauses/resumes the strip while generation and the running spinner continue. Elapsed time remains visible. The strip disappears when preparation ends. On generation failure, `r` explicitly retries against the same captured files.
+
+File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Each pane shows one file's lines for the current step, plus a few unchanged lines of context. Code owned by another step stays collapsed, so every changed line appears on exactly one page. Every captured change is reachable through step navigation. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
 
 | Key | Story action |
 | --- | --- |
@@ -91,7 +93,7 @@ File and change totals stay above two unified diffs: **Implementation** and **Re
 | `R` | Mark the current step seen |
 | `c` / `d` | Comment / discuss at the selected range |
 | `h` / `Tab` | Reach comments or the paired panes |
-| `i` | View captured files, story steps, and saved notes |
+| `i` | Reopen the storyline: steps, rules, checks, test quality, and captured files |
 | `4` | Open PR context; `D` toggles the full description and `Esc` returns to the same step |
 | `F` | Inspect the full captured diff, or return to the story |
 | `s` | Finish through the normal review flow |
@@ -100,7 +102,7 @@ In either review mode, diff movement follows changed lines by default. Hold `Opt
 
 Resume retains the active step, per-member selections/scroll, marks, and comments. Changed bytes invalidate the saved story: explicitly rebuild it, use the ordinary diff, or cancel. Existing feedback remains subject to its usual anchor validation.
 
-The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. Full captured code stays available through `F`. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
+The model receives a bounded diff excerpt per changed unit and test (mechanical edits go without one), the PR title and description, and the extension's priorities and test facts. Full captured code stays available through `F`. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
 
 ### Discuss saved review notes
 
@@ -223,7 +225,21 @@ Agents can use the same interfaces through:
 - `open_code` — run the configured code command at an optional path or structured target; without one, open the Workbench.
 - `open_code_diff` — run the configured code command; without one, open `/diff` with an optional target and prepopulated comments.
 - `open_code_diff_story` — open `/diff-story` with the same targets and `cwd`. It always uses the built-in story view, even with a configured code command.
+- `pi_coder_formal_validation` — build a step-by-step formal validation guide for the same targets, without opening any UI. See [Formal validation](#formal-validation).
 - `submit_pr_review` — submit a confirmed configured-provider review.
+
+## Formal validation
+
+`pi_coder_formal_validation` reads a pull request with its description, a range, or local changes, and returns a guide a reviewer can follow:
+
+- **Steps by behavior.** Changed functions keep their nested helpers, and test cases keep the helpers declared inside them. One model request (the `/diff-story` agent) groups units into behaviors and writes, for each step, the property it must keep and two to five ordered checks. Steps that depend on the order of operations get checks for concurrent callers, retries and partial failures.
+- **Priorities.** Each step is critical, needed or minor. The extension ranks units from their paths and changed lines (migrations, access and secrets, money, deletes and bulk writes, order of steps, public interfaces, flags) and minimizes docs, lockfiles, and comment, import and whitespace edits. A line that only moved, or a dedent in an indentation-sensitive file, is not a whitespace edit. The model can move a step or lower its priority, which the guide reports. A step with critical code or a changed test is never minimized, and the model cannot remove an order-of-steps note.
+- **Test quality.** Every changed test lists its assertions, its mocks and stubs (external boundary, owned code, or the code this change modifies, judged by the receiver or module path), what it runs for real (records, requests, rendered UI, files, git), and flags such as no assertion, snapshot or existence-only checks, stubbed changed code, stubs in shared setup, branches, sleeps, and skipped or focused tests. Each step reports missing tests and success-only coverage.
+- **Description claims.** Claims from the PR description map to the steps that implement them, and author test steps are listed separately. A claim with no step says whether the model found nothing for it or no step names it.
+
+Arguments: `args` (same targets as `/diff`), `cwd`, `description` (extra requirements; the only description for local changes), and `refine` (`false` returns host facts only). The guide is saved as JSON under `~/.pi/agent/cache/pi-code-diff/formal-validation/`, keyed by the snapshot fingerprint of the captured bytes. A host-only or failed run never replaces a model-written guide for the same bytes.
+
+`/diff-story` runs the same analysis before it builds its steps, and reuses a saved model-written guide for the same bytes and description. The tool captures with the default scope and skips files a story cannot read, so a story can compute a different fingerprint and build its own guide.
 
 ## Security and data access
 
