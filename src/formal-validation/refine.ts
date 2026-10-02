@@ -288,7 +288,7 @@ export async function refineGuide(
     if (signal.aborted) throw error;
     return {
       ...prepared.guide,
-      refinement: { status: "failed", ...(model == null ? {} : { model }), message: error instanceof Error ? error.message : String(error) },
+      refinement: { status: "failed", ...(model == null ? {} : { model }), message: singleLine(error instanceof Error ? error.message : String(error), 300) },
     };
   }
 }

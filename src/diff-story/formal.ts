@@ -1,6 +1,7 @@
 import { buildGuide, unitLabel, type FormalValidationGuide, type GuideStep, type GuideTarget, type GuideUnit, type PreparedGuide } from "../formal-validation/guide.js";
 import { applyRefinement, refineGuide } from "../formal-validation/refine.js";
 import type { GuideStore } from "../formal-validation/run.js";
+import { singleLine } from "../formal-validation/source.js";
 import type { TestProfile } from "../formal-validation/tests.js";
 import type { DiffStoryGenerate } from "./generate.js";
 import { completeDiffStory, uncoveredStoryChanges, validateDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "./plan.js";
@@ -51,7 +52,7 @@ function storySummary(guide: FormalValidationGuide, position: ReadonlyMap<string
   for (const step of guide.steps) if (step.priority !== "minor") counts[step.priority] += 1;
   const lines = guide.summary == null ? [] : [guide.summary];
   if (guide.refinement.status === "failed") {
-    lines.push(`The guideline model failed (${guide.refinement.message ?? "no message"}), so steps follow host rules.`);
+    lines.push(`The guideline model failed (${singleLine(guide.refinement.message ?? "no message", 300)}), so steps follow host rules.`);
   }
   lines.push(`${counts.critical} critical and ${counts.needed} needed ${counts.critical + counts.needed === 1 ? "step" : "steps"}${minorCount === 0 ? "" : `, then ${plural(minorCount, "minor change")}`}.`);
   for (const claim of guide.claims) {
@@ -112,14 +113,17 @@ export function storyFromGuide(guide: FormalValidationGuide, snapshot: StorySnap
   return uncoveredStoryChanges(plan, snapshot).length === 0 ? plan : completeDiffStory(plan, snapshot);
 }
 
+/** The saved guide was written for the same description and the same host analysis of the same units and tests. */
 function sameHostFacts(fresh: FormalValidationGuide, saved: FormalValidationGuide): boolean {
+  if (saved.descriptionHash !== fresh.descriptionHash) return false;
   const ids = Object.keys(fresh.units);
   if (ids.length !== Object.keys(saved.units ?? {}).length) return false;
   for (const id of ids) {
     const current = fresh.units[id]!;
     const previous = saved.units[id];
     if (previous == null || previous.path !== current.path || previous.symbol !== current.symbol || previous.test !== current.test
-      || JSON.stringify(previous.anchors) !== JSON.stringify(current.anchors)) return false;
+      || previous.root !== current.root || JSON.stringify(previous.anchors) !== JSON.stringify(current.anchors)
+      || JSON.stringify(previous.risk) !== JSON.stringify(current.risk)) return false;
   }
   const tests = (guide: FormalValidationGuide) => JSON.stringify(Object.keys(guide.tests ?? {}).sort());
   return tests(fresh) === tests(saved);
@@ -127,35 +131,43 @@ function sameHostFacts(fresh: FormalValidationGuide, saved: FormalValidationGuid
 
 /**
  * Re-applies a saved guide's model-written steps to fresh host facts. Host rules and test profiles
- * come from the current code; a saved guide whose units no longer match is not reused.
+ * come from the current code; a saved guide that no longer matches, or can't be read, is not reused.
  */
 export function reapplySavedGuide(prepared: PreparedGuide, saved: FormalValidationGuide): FormalValidationGuide | undefined {
   const fresh = prepared.guide;
-  if (saved.snapshot !== fresh.snapshot || saved.refinement?.status !== "applied" || !Array.isArray(saved.steps)) return undefined;
-  if (!sameHostFacts(fresh, saved)) return undefined;
-  const roots = new Set(Object.values(fresh.units).filter((unit) => !unit.test && unit.root == null).map((unit) => unit.id));
-  const position = new Map(saved.steps.map((step, index) => [step.id, index + 1]));
-  const claims = new Map(fresh.claims.map((claim) => [claim.id, claim.text]));
-  const answer = {
-    ...(saved.summary == null ? {} : { summary: saved.summary }),
-    steps: saved.steps.map((step) => ({
-      units: step.units.filter((id) => roots.has(id)),
-      tests: step.tests,
-      title: step.title,
-      priority: step.priority,
-      ...(step.reasons[0] == null ? {} : { why: step.reasons[0] }),
-      ...(step.property == null ? {} : { property: step.property }),
-      ordering: step.ordering,
-      checks: step.checks,
-    })),
-    tests: Object.values(saved.tests).flatMap((test) => test.verifies == null ? [] : [{ id: test.unitId, verifies: test.verifies }]),
-    claims: (saved.claims ?? []).filter((claim) => claims.get(claim.id) === claim.text).map((claim) => ({
-      id: claim.id,
-      steps: claim.steps.map((id) => position.get(id)).filter((value): value is number => value != null),
-    })),
-  };
   try {
+    if (saved.snapshot !== fresh.snapshot || saved.refinement?.status !== "applied" || !Array.isArray(saved.steps)) return undefined;
+    if (!sameHostFacts(fresh, saved)) return undefined;
+    const roots = new Set(Object.values(fresh.units).filter((unit) => !unit.test && unit.root == null).map((unit) => unit.id));
+    const position = new Map(saved.steps.map((step, index) => [step.id, index + 1]));
+    const claims = new Map(fresh.claims.map((claim) => [claim.id, claim.text]));
+    const answer = {
+      ...(saved.summary == null ? {} : { summary: saved.summary }),
+      steps: saved.steps.map((step) => ({
+        units: step.units.filter((id) => roots.has(id)),
+        tests: step.tests,
+        title: step.title,
+        priority: step.priority,
+        ...(step.reasons[0] == null ? {} : { why: step.reasons[0] }),
+        ...(step.property == null ? {} : { property: step.property }),
+        ordering: step.ordering,
+        checks: step.checks,
+      })),
+      tests: Object.values(saved.tests).flatMap((test) => test.verifies == null ? [] : [{ id: test.unitId, verifies: test.verifies }]),
+      claims: (saved.claims ?? []).filter((claim) => claims.get(claim.id) === claim.text).map((claim) => ({
+        id: claim.id,
+        steps: claim.steps.map((id) => position.get(id)).filter((value): value is number => value != null),
+      })),
+    };
     return applyRefinement(prepared, JSON.stringify(answer), saved.refinement.model == null ? "a saved guide" : `${saved.refinement.model} (saved)`);
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadSaved(store: GuideStore, snapshot: string): Promise<FormalValidationGuide | undefined> {
+  try {
+    return await store.load(snapshot);
   } catch {
     return undefined;
   }
@@ -173,7 +185,7 @@ export async function generateFormalStory(
   onProgress("Preparing code and test units");
   const description = options.description?.trim() ?? "";
   const prepared = buildGuide({ snapshot, target: options.target, description });
-  const saved = options.store == null ? undefined : await options.store.load(snapshot.fingerprint).catch(() => undefined);
+  const saved = options.store == null ? undefined : await loadSaved(options.store, snapshot.fingerprint);
   signal.throwIfAborted();
   let guide = saved == null ? undefined : reapplySavedGuide(prepared, saved);
   if (guide != null) {
@@ -182,8 +194,11 @@ export async function generateFormalStory(
     onProgress("Writing the validation guide");
     guide = await refineGuide(prepared, description, generate, signal, options.model);
     signal.throwIfAborted();
-    // A story still opens when the guide cannot be saved; the next run asks the model again.
-    await options.store?.save(guide).catch(() => undefined);
+    try {
+      await options.store?.save(guide);
+    } catch {
+      // A story still opens when the guide cannot be saved; the next run asks the model again.
+    }
   }
   onProgress("Validating story");
   return { plan: storyFromGuide(guide, snapshot), guide };

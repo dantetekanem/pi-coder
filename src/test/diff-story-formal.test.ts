@@ -201,14 +201,19 @@ describe("formal story generation", () => {
     expect(again.plan.steps).toEqual(first.plan.steps);
   });
 
-  it("asks the model again when the saved guide was written for other units or without a model", async () => {
+  it("asks the model again when the saved guide was written for other units, another description or without a model", async () => {
     const prepared = prepare();
     const refined = applyRefinement(prepared, JSON.stringify(answer(prepared.guide)), "model/test");
+    const cancel = rootId(refined, "app/models/subscription.rb", "cancel!");
     const renamed = structuredClone(refined);
-    renamed.units[rootId(refined, "app/models/subscription.rb", "cancel!")]!.symbol = "close!";
+    renamed.units[cancel]!.symbol = "close!";
+    const reranked = structuredClone(refined);
+    reranked.units[cancel]!.risk = { priority: "minor", categories: ["comments"], reasons: ["OLD HOST RULE"], ordering: false };
 
     expect(reapplySavedGuide(prepare(), refined)).toMatchObject({ refinement: { status: "applied" } });
     expect(reapplySavedGuide(prepare(), renamed)).toBeUndefined();
+    expect(reapplySavedGuide(prepare(), reranked)).toBeUndefined();
+    expect(reapplySavedGuide(buildGuide({ snapshot, target, description: "Cancelling now emails the merchant." }), refined)).toBeUndefined();
     expect(reapplySavedGuide(prepare(), { ...refined, refinement: { status: "failed", message: "Provider down." } })).toBeUndefined();
 
     const generate = vi.fn(async () => JSON.stringify(answer(prepare().guide)));
@@ -216,14 +221,42 @@ describe("formal story generation", () => {
     expect(generate).toHaveBeenCalledOnce();
   });
 
+  it("treats a saved guide it cannot read as missing, then asks the model and saves over it", async () => {
+    const prepared = prepare();
+    const broken = structuredClone(applyRefinement(prepared, JSON.stringify(answer(prepared.guide)), "model/test")) as any;
+    delete broken.steps[0].reasons;
+    broken.claims[0].steps = undefined;
+    expect(reapplySavedGuide(prepare(), broken)).toBeUndefined();
+
+    const store = memoryStore(broken);
+    const generate = vi.fn(async () => JSON.stringify(answer(prepare().guide)));
+    const story = await generateFormalStory(snapshot, generate, new AbortController().signal, () => {}, { target, description, store });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.guide.refinement.status).toBe("applied");
+    expect(store.saves).toHaveLength(1);
+  });
+
+  it("keeps the formal path when the guide store throws instead of rejecting", async () => {
+    const store: GuideStore = {
+      load: () => { throw new Error("Store unreadable."); },
+      save: () => { throw new Error("Store full."); },
+    };
+    const generate = vi.fn(async () => JSON.stringify(answer(prepare().guide)));
+    const story = await generateFormalStory(snapshot, generate, new AbortController().signal, () => {}, { target, description, store });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.plan.steps[0]!.title).toBe("Critical \u00b7 Refund once per cancellation");
+  });
+
   it("keeps a complete story from host rules when the model fails, and stops when cancelled", async () => {
     const failing = vi.fn(async () => {
-      throw new Error("Provider unavailable.");
+      throw new Error("Provider \u001b[31munavailable.");
     });
     const story = await generateFormalStory(snapshot, failing, new AbortController().signal, () => {}, { target });
 
-    expect(story.guide.refinement).toMatchObject({ status: "failed", message: "Provider unavailable." });
-    expect(story.plan.summary).toContain("The guideline model failed (Provider unavailable.), so steps follow host rules.");
+    expect(story.guide.refinement).toMatchObject({ status: "failed", message: "Provider [31munavailable." });
+    expect(story.plan.summary).toContain("The guideline model failed (Provider [31munavailable.), so steps follow host rules.");
     expect(uncoveredStoryChanges(story.plan, snapshot)).toEqual([]);
 
     const controller = new AbortController();

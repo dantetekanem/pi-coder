@@ -424,6 +424,19 @@ describe("paired diff story", () => {
     } finally {
       resumed.app.dispose();
     }
+
+    const stale = { ...session!, story: { ...session!.story!, plan: { ...session!.story!.plan, snapshot: "old snapshot" } } };
+    const rebuilt = harness(stale, 40, { plan: storyline, snapshot, storylineFirst: true });
+    try {
+      await Promise.resolve();
+      expect(rebuilt.app.render(140).join("\n")).toContain("Enter or Esc to read the steps");
+      rebuilt.app.handleInput("\r");
+      expect(rebuilt.app.render(140).join("\n")).toContain("\u25c6 Critical \u00b7 Reuse pending work");
+      rebuilt.app.handleInput("h");
+      expect(rebuilt.app.render(140).join("\n")).toContain("Keep this note");
+    } finally {
+      rebuilt.app.dispose();
+    }
   });
 
   it("marks the linked step rather than unseen files, resumes both members, and keeps final comments intact", async () => {

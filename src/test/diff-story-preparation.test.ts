@@ -3,6 +3,15 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 
 const storyAgent = vi.hoisted(() => ({ createStoryAgentGenerator: vi.fn() }));
 vi.mock("../diff-story/agent.js", () => storyAgent);
+const formalFailure = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+vi.mock("../diff-story/formal.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../diff-story/formal.js")>();
+  return {
+    ...actual,
+    generateFormalStory: (...args: Parameters<typeof actual.generateFormalStory>) =>
+      formalFailure.error == null ? actual.generateFormalStory(...args) : Promise.reject(formalFailure.error),
+  };
+});
 
 import { prepareDiffStory, selectStoryAgent } from "../ui/diff-story.js";
 import * as preferences from "../preferences.js";
@@ -51,6 +60,7 @@ afterEach(() => {
   for (const dispose of disposals.splice(0)) dispose();
   vi.restoreAllMocks();
   storyAgent.createStoryAgentGenerator.mockReset();
+  formalFailure.error = undefined;
   vi.useRealTimers();
 });
 
@@ -227,7 +237,7 @@ describe("centered story preparation", () => {
   it("opens the host-rule story on Enter when the guideline model fails", async () => {
     const preparation = harness();
     const generate = vi.fn(async () => {
-      throw new Error("Provider down.");
+      throw new Error("Provider \u001b[31mdown.");
     });
     const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate);
     await vi.waitFor(() => expect(preparation.view().render(100).join("\n")).toContain("Enter continue with host steps"));
@@ -236,8 +246,8 @@ describe("centered story preparation", () => {
     await expect(ready).resolves.toMatchObject({
       snapshot,
       storylineFirst: true,
-      guide: { refinement: { status: "failed", message: "Provider down." } },
-      plan: { summary: expect.stringContaining("The guideline model failed (Provider down.), so steps follow host rules.") },
+      guide: { refinement: { status: "failed", message: "Provider [31mdown." } },
+      plan: { summary: expect.stringContaining("The guideline model failed (Provider [31mdown.), so steps follow host rules.") },
     });
     expect(generate).toHaveBeenCalledOnce();
   });
@@ -262,19 +272,31 @@ describe("centered story preparation", () => {
     expect(saves).toEqual([expect.objectContaining({ snapshot: snapshot.fingerprint, target, refinement: expect.objectContaining({ status: "applied" }) })]);
   });
 
-  it("falls back to the plain story order when the validation guide cannot be built", async () => {
+  it("keeps the formal story when the guide store throws", async () => {
     const preparation = harness();
-    const generate = vi.fn(async () => orderOutput);
-    const store = { load: () => { throw new Error("Broken store."); }, save: vi.fn() };
+    const generate = vi.fn(async () => formalOutput);
+    const store = { load: () => { throw new Error("Broken store."); }, save: () => { throw new Error("Broken store."); } };
     const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate, undefined, {
       target: { kind: "working", label: "uncommitted changes", repoRoot: "/repo", scope: "git-diff" },
       store: store as never,
     });
 
-    const prepared = await ready;
-    expect(prepared).toEqual({ snapshot, plan: { ...plan, summary: "Formal validation failed (Broken store.); steps follow the plain story order." } });
+    await expect(ready).resolves.toMatchObject(formalStory);
     expect(generate).toHaveBeenCalledOnce();
-    expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the plain story order, opening on its storyline, when the validation guide cannot be built", async () => {
+    formalFailure.error = new Error("Broken \u001b[31mguide.");
+    const preparation = harness();
+    const generate = vi.fn(async () => orderOutput);
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate);
+
+    await expect(ready).resolves.toEqual({
+      snapshot,
+      storylineFirst: true,
+      plan: { ...plan, summary: "Formal validation failed (Broken [31mguide.); steps follow the plain story order." },
+    });
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it("cancels promptly and never mounts a late answer", async () => {

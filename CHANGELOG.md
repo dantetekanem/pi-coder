@@ -4,12 +4,12 @@
 
 ### Added
 
-- Add the `pi_coder_formal_validation` agent tool. It reads a pull request with its description, a range, or local changes, and returns a step-by-step validation guide: behavior steps ranked critical, needed or minimized, the property each step keeps, ordered checks, and the changed tests that prove it with their assertions, mocks and stubs, and quality flags. The guide is saved by snapshot fingerprint for later `/diff-story` use.
+- Add the `pi_coder_formal_validation` agent tool. It reads a pull request with its description, a range, or local changes, and returns a step-by-step validation guide: behavior steps ranked critical, needed or minimized, the property each step keeps, ordered checks, and the changed tests that prove it with their assertions, mocks and stubs, and quality flags. The guide is saved by snapshot fingerprint, and `/diff-story` reuses it for the same bytes and description.
 
 ### Changed
 
 - Run formal validation before `/diff-story` builds its steps. Steps now follow behaviors ranked critical, needed or minor; each title starts with its priority, and the step's rule appears under the title. Mechanical edits share one closing step. A fresh story opens on its storyline: the summary, description claims mapped to steps, and every step's rule, checks, test quality and gaps. The story model request now includes diff excerpts and the PR description.
-- Reuse a saved model-written guide when a story reopens the same bytes. When the guideline model fails, preparation offers a retry or host-only steps; when the guide cannot be built, the story falls back to the earlier ordering request.
+- Reuse a saved model-written guide when a story reopens the same bytes with the same description and unit analysis; a saved guide that can't be read is ignored. When the guideline model fails, preparation offers a retry or host-only steps; when the guide cannot be built, the story falls back to the earlier ordering request and opens on a storyline that says so.
 - Keep a model-written guide when a host-only or failed run saves a guide for the same bytes.
 
 ### Fixed

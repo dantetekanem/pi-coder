@@ -7,6 +7,7 @@ import { generateFormalStory, type FormalStory, type FormalStoryOptions, type Fo
 import { generateDiffStory, type DiffStoryGenerate } from "../diff-story/generate.js";
 import type { StorySessionData } from "../diff-story/navigation.js";
 import type { FormalValidationGuide } from "../formal-validation/guide.js";
+import { singleLine } from "../formal-validation/source.js";
 import { filterReviewFilesByLocale } from "../locale-files.js";
 import { loadReviewPreferences, saveReviewPreference } from "../preferences.js";
 import { validateReviewAgent } from "../review-agent.js";
@@ -133,12 +134,12 @@ export function prepareDiffStory(
           story = await generateFormalStory(snapshot!, generator, abort.signal, (value) => update(FORMAL_PHASES[value]), formalOptions);
         } catch (failure) {
           if (settled || abort.signal.aborted) throw failure;
-          const message = failure instanceof Error ? failure.message : String(failure);
+          const message = singleLine(failure instanceof Error ? failure.message : String(failure), 300);
           carousel.addActivity({ kind: "error", text: `Formal validation failed: ${message}. Using the plain story order.` });
           const plan = await generateDiffStory(snapshot!, generator, abort.signal, (progress) => {
             update(progress === "Generating story" ? "Constructing storyline and connecting changed tests" : progress);
           });
-          if (!settled) finish({ plan: { ...plan, summary: `Formal validation failed (${message}); steps follow the plain story order.` }, snapshot: snapshot! });
+          if (!settled) finish({ plan: { ...plan, summary: `Formal validation failed (${message}); steps follow the plain story order.` }, snapshot: snapshot!, storylineFirst: true });
           return;
         }
         if (settled) return;

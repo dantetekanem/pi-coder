@@ -1654,7 +1654,8 @@ export class ReviewApp {
         }) ? [index] : [])));
       }
       this.activateStoryMember(this.story.member);
-      if (options.story.storylineFirst === true && options.initialSession?.story == null) this.storyInventory = true;
+      // A rebuilt story keeps the session's comments, but its steps are new, so it opens on the storyline too.
+      if (options.story.storylineFirst === true && options.initialSession?.story?.plan?.snapshot !== options.story.plan.snapshot) this.storyInventory = true;
     }
 
     const editorTheme: EditorTheme = {

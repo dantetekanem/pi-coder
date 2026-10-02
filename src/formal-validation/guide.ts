@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { StorySide, StorySnapshot } from "../diff-story/plan.js";
 import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, type StoryUnit } from "../diff-story/units.js";
 import type { ReviewScope } from "../types.js";
@@ -95,6 +96,8 @@ export interface FormalValidationGuide {
   units: Record<string, GuideUnit>;
   tests: Record<string, TestProfile>;
   claims: DescriptionClaim[];
+  /** SHA-256 of the description the guide was written for; a saved guide is reused only for the same text. */
+  descriptionHash?: string;
   /** Verification steps the author listed under a testing heading. */
   authorChecks: string[];
   gaps: string[];
@@ -544,6 +547,7 @@ export function buildGuide(input: GuideInput): PreparedGuide {
     units: guideUnits,
     tests: profiles,
     claims,
+    descriptionHash: createHash("sha256").update(description).digest("hex"),
     authorChecks: read.checks,
     gaps,
     refinement: { status: "skipped" },
