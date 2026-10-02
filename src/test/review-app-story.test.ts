@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import { generateDiffStory } from "../diff-story/generate.js";
-import { createStorySnapshot, uncoveredStoryChanges, validateDiffStory } from "../diff-story/plan.js";
+import { createStorySnapshot, uncoveredStoryChanges, validateDiffStory, type DiffStory, type StorySnapshot } from "../diff-story/plan.js";
 import { ReviewApp } from "../ui/review-app.js";
 import type { ReviewFile } from "../types.js";
 import type { ReviewSessionData } from "../review-session.js";
@@ -58,7 +58,12 @@ const plan = validateDiffStory({
   ],
 }, snapshot);
 
-function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, snapshot }, overrides: Partial<ConstructorParameters<typeof ReviewApp>[3]> = {}) {
+function harness(
+  initialSession?: ReviewSessionData,
+  rows = 40,
+  pair: { plan: DiffStory; snapshot: StorySnapshot; storylineFirst?: boolean } = { plan, snapshot },
+  overrides: Partial<ConstructorParameters<typeof ReviewApp>[3]> = {},
+) {
   let saved: ReviewSessionData | undefined;
   const done = vi.fn();
   const tui = { terminal: { rows, columns: 140 }, requestRender: vi.fn() };
@@ -363,6 +368,61 @@ describe("paired diff story", () => {
       expect(app.render(140).join("\n")).toContain("Hunk 1/2 · +1 −1");
     } finally {
       app.dispose();
+    }
+  });
+
+  it("opens a fresh story on its storyline, then reads each step with its rule under the title", async () => {
+    const storyline = validateDiffStory({
+      ...plan,
+      summary: "Reuse an in-flight request.\n1 critical and 1 needed steps.",
+      steps: [
+        { ...plan.steps[0]!, title: "Critical \u00b7 Reuse pending work", explanation: "Property: One request runs per key.\nVerify:\n  1. Call it twice at once; expect one fetch." },
+        plan.steps[1]!,
+      ],
+    }, snapshot);
+    const { app, saved } = harness(undefined, 40, { plan: storyline, snapshot, storylineFirst: true });
+    let session: ReviewSessionData | undefined;
+    try {
+      await Promise.resolve();
+      const opening = app.render(140).join("\n");
+      expect(opening).toContain("Storyline \u00b7 \u2191\u2193 scroll \u00b7 Enter or Esc to read the steps");
+      expect(opening).toContain("1 critical and 1 needed steps.");
+      expect(opening).toContain("1. Critical \u00b7 Reuse pending work");
+      expect(opening).toContain("   Property: One request runs per key.");
+      expect(opening).toContain("     1. Call it twice at once; expect one fetch.");
+      expect(opening).toContain("2. Remove the old entry");
+      expect(opening).not.toContain("Related changed tests");
+
+      app.handleInput("\r");
+      const step = app.render(140).join("\n");
+      expect(step).toContain("\u25c6 Critical \u00b7 Reuse pending work");
+      expect(step).toContain("Property: One request runs per key.");
+      expect(step).not.toContain("Call it twice at once");
+      expect(step).toContain("reuse()");
+      expect(step).toContain("expectReuse()");
+
+      app.handleInput("i");
+      expect(app.render(140).join("\n")).toContain("1. Critical \u00b7 Reuse pending work");
+      app.handleInput("\x1b");
+      app.handleInput("\x1b[1;2C");
+      expect(app.render(140).join("\n")).toContain("The old entry is no longer called.");
+      app.handleInput("c");
+      app.handleInput("Keep this note");
+      app.handleInput("\r");
+      session = saved();
+      expect(session?.story?.step).toBe(1);
+    } finally {
+      app.dispose();
+    }
+
+    const resumed = harness(session, 40, { plan: storyline, snapshot, storylineFirst: true });
+    try {
+      await Promise.resolve();
+      const reopened = resumed.app.render(140).join("\n");
+      expect(reopened).not.toContain("Enter or Esc to read the steps");
+      expect(reopened).toContain("\u25c6 Remove the old entry");
+    } finally {
+      resumed.app.dispose();
     }
   });
 

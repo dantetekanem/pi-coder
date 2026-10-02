@@ -28,7 +28,8 @@ import { prepareDiffStory, selectStoryAgent, type PreparedDiffStory } from "./ui
 import { createStoryAgentGenerator } from "./diff-story/agent.js";
 import type { DiffStoryGenerate } from "./diff-story/generate.js";
 import type { FormalValidationSource } from "./formal-validation/capture.js";
-import { runFormalValidation } from "./formal-validation/run.js";
+import type { GuideTarget } from "./formal-validation/guide.js";
+import { formalGuideStore, runFormalValidation } from "./formal-validation/run.js";
 import { validateReviewAgent } from "./review-agent.js";
 import { getDefaultScope, getScopedFiles } from "./state.js";
 import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
@@ -40,7 +41,7 @@ import { ReviewInvocationCoordinator } from "./adapters/pi/review-invocation.js"
 import { listBundledShikiThemes } from "./workbench/node/shiki.js";
 import { normalizeWorkbenchLaunch } from "./workbench/target.js";
 import type { CodeStory, CodeTarget, WorkbenchCompletionResult, WorkbenchLaunch } from "./workbench/contracts.js";
-import { hasExactSubmoduleRange, type ReviewComposition, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
+import { formatScopeLabel, hasExactSubmoduleRange, type ReviewComposition, type ReviewFile, type ReviewScope, type ReviewSubmitPayload } from "./types.js";
 
 type InteractiveReviewMode = "working" | "staged" | "branch" | "custom";
 
@@ -248,6 +249,41 @@ const DIFF_STORY_TUI_MESSAGE = "Diff stories require a TUI session.";
 
 function canOpenDiffStory(ctx: ExtensionContext): boolean {
   return ctx.hasUI && !("mode" in ctx && ctx.mode !== "tui");
+}
+
+function shortRevision(revision: string | null | undefined): string | undefined {
+  if (revision == null || revision.length === 0) return undefined;
+  return /^[0-9a-f]{40}$/i.test(revision) ? revision.slice(0, 12) : revision;
+}
+
+/** Describes a story's capture for the validation guide that /diff-story builds before its steps. */
+function storyGuideTarget(data: ReviewWindowData, remoteTarget: RemoteReviewTarget | undefined, scope: ReviewScope): GuideTarget {
+  const pullRequest = remoteTarget?.pullRequest;
+  const base = shortRevision(data.branchBaseRevision);
+  const head = shortRevision(pullRequest?.headRefOid ?? data.modifiedRevision);
+  const label = remoteTarget == null
+    ? data.modifiedRevision == null ? formatScopeLabel(scope) : `${base ?? "base"}..${head ?? "head"}`
+    : pullRequest == null ? `remote ${remoteTarget.branch}` : `${remoteTarget.repo ?? pullRequest.repo ?? remoteTarget.remote}#${pullRequest.number}`;
+  return {
+    kind: remoteTarget != null ? "remote" : data.modifiedRevision != null ? "range" : "working",
+    label,
+    repoRoot: data.repoRoot,
+    scope,
+    ...(base == null ? {} : { base }),
+    ...(head == null ? {} : { head }),
+    ...(pullRequest == null ? {} : {
+      pullRequest: {
+        number: pullRequest.number,
+        ...(remoteTarget?.repo == null ? {} : { repo: remoteTarget.repo }),
+        url: remoteTarget?.remote,
+        title: pullRequest.title,
+        author: pullRequest.authorLogin,
+        state: pullRequest.state,
+        headRefOid: pullRequest.headRefOid,
+        baseRefName: pullRequest.baseRefName,
+      },
+    }),
+  };
 }
 
 const REVIEW_PROGRESS_FRAMES = ["-", "\\", "|", "/"];
@@ -1113,6 +1149,11 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           initialSession?.story,
           undefined,
           reviewHeader == null ? undefined : { header: reviewHeader, brief: pullRequestSources.contextPanelSource?.brief },
+          {
+            target: storyGuideTarget(data, remoteTarget, scope),
+            ...(pullRequest?.body == null ? {} : { description: pullRequest.body }),
+            store: formalGuideStore(),
+          },
         );
         if (prepared == null) return { started: false, message: "Story preparation cancelled; saved feedback was not changed." };
         if (prepared !== "diff") {
@@ -1198,6 +1239,8 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             })
           : await mountReview();
         firstReview = false;
+        // Only the first mount opens on the storyline; remounts return to the reader's step.
+        if (story?.storylineFirst === true) story = { plan: story.plan, snapshot: story.snapshot };
 
         if (result.type === "open-editor") {
           let editorBanner: string;

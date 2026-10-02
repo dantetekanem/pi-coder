@@ -38,6 +38,14 @@ const plan = validateDiffStory({
   }],
 }, snapshot);
 const orderOutput = '{"order":[],"pairs":[]}';
+const formalOutput = JSON.stringify({
+  steps: [{ units: ["u1"], title: "Call after() instead of before()", priority: "needed", property: "The app calls after().", checks: ["Run it."] }],
+});
+const formalStory = {
+  snapshot,
+  storylineFirst: true,
+  plan: { snapshot: snapshot.fingerprint, steps: [expect.objectContaining({ title: "Needed · Call after() instead of before()" })] },
+};
 const disposals: Array<() => void> = [];
 afterEach(() => {
   for (const dispose of disposals.splice(0)) dispose();
@@ -137,7 +145,7 @@ describe("centered story preparation", () => {
     preparation.view().handleInput(" ");
     expect(preparation.view().render(80).join("\n")).toContain(orderOutput);
 
-    if (ending === "ready") finish(orderOutput);
+    if (ending === "ready") finish(formalOutput);
     else preparation.view().handleInput("\x1b");
     await ready;
     const renders = preparation.requestRender.mock.calls.length;
@@ -158,12 +166,13 @@ describe("centered story preparation", () => {
       .mockImplementationOnce(async () => {
         throw new Error("Provider unavailable.");
       })
-      .mockResolvedValueOnce(orderOutput);
+      .mockResolvedValueOnce(formalOutput);
     const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", load, undefined, generate);
     await vi.waitFor(() => expect(preparation.view().render(100).join("\n")).toContain("r retry"));
+    expect(preparation.view().render(100).join("\n")).toContain("The guideline model failed: Provider unavailable.");
     expect(vi.getTimerCount()).toBe(0);
     preparation.view().handleInput("r");
-    await expect(ready).resolves.toEqual({ plan, snapshot });
+    await expect(ready).resolves.toMatchObject(formalStory);
     expect(generate).toHaveBeenCalledTimes(2);
     expect(load).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
@@ -175,7 +184,7 @@ describe("centered story preparation", () => {
       ? Promise.reject(new Error("Generation unavailable"))
       : new Promise<string>(() => {}));
     const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate);
-    const phase = state === "error" ? "Story could not be prepared" : "Constructing storyline";
+    const phase = state === "error" ? "Storyline built from host rules only" : "Constructing storyline";
     await vi.waitFor(() => expect(preparation.view().render(100).join("\n")).toContain(phase));
 
     expect(preparation.ctx.ui.custom).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
@@ -211,8 +220,61 @@ describe("centered story preparation", () => {
     await vi.advanceTimersByTimeAsync(80);
     expect(runningLine()).not.toBe(initial);
     expect(preparation.requestRender.mock.calls.length).toBeGreaterThan(renders);
-    finish(orderOutput);
-    await expect(ready).resolves.toEqual({ plan, snapshot });
+    finish(formalOutput);
+    await expect(ready).resolves.toMatchObject(formalStory);
+  });
+
+  it("opens the host-rule story on Enter when the guideline model fails", async () => {
+    const preparation = harness();
+    const generate = vi.fn(async () => {
+      throw new Error("Provider down.");
+    });
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate);
+    await vi.waitFor(() => expect(preparation.view().render(100).join("\n")).toContain("Enter continue with host steps"));
+
+    preparation.view().handleInput("\r");
+    await expect(ready).resolves.toMatchObject({
+      snapshot,
+      storylineFirst: true,
+      guide: { refinement: { status: "failed", message: "Provider down." } },
+      plan: { summary: expect.stringContaining("The guideline model failed (Provider down.), so steps follow host rules.") },
+    });
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("sends the PR description with the guideline request and saves the guide for the same bytes", async () => {
+    const preparation = harness();
+    const saves: unknown[] = [];
+    const store = { load: vi.fn(async () => undefined), save: vi.fn(async (guide: unknown) => (saves.push(guide), { status: "saved" as const, path: "/guides/x.json" })) };
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      expect(prompt).toContain("Swap before() for after().");
+      return formalOutput;
+    });
+    const target = { kind: "remote" as const, label: "owner/repo#7", repoRoot: "/repo", scope: "git-diff" as const };
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate, undefined, {
+      target,
+      description: "## Solution\n\nSwap before() for after().",
+      store,
+    });
+
+    await expect(ready).resolves.toMatchObject(formalStory);
+    expect(store.load).toHaveBeenCalledWith(snapshot.fingerprint);
+    expect(saves).toEqual([expect.objectContaining({ snapshot: snapshot.fingerprint, target, refinement: expect.objectContaining({ status: "applied" }) })]);
+  });
+
+  it("falls back to the plain story order when the validation guide cannot be built", async () => {
+    const preparation = harness();
+    const generate = vi.fn(async () => orderOutput);
+    const store = { load: () => { throw new Error("Broken store."); }, save: vi.fn() };
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate, undefined, {
+      target: { kind: "working", label: "uncommitted changes", repoRoot: "/repo", scope: "git-diff" },
+      store: store as never,
+    });
+
+    const prepared = await ready;
+    expect(prepared).toEqual({ snapshot, plan: { ...plan, summary: "Formal validation failed (Broken store.); steps follow the plain story order." } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(store.save).not.toHaveBeenCalled();
   });
 
   it("cancels promptly and never mounts a late answer", async () => {
@@ -236,7 +298,7 @@ describe("centered story preparation", () => {
 
   it("resumes matching hashes without a model call and requires an explicit rebuild for drift", async () => {
     const saved = restoreStoryNavigation(plan);
-    const generate = vi.fn(async () => orderOutput);
+    const generate = vi.fn(async () => formalOutput);
     const matching = harness();
     await expect(prepareDiffStory(matching.ctx as never, [file], "git-diff", async () => contents, saved, generate))
       .resolves.toEqual({ plan, snapshot });
@@ -248,7 +310,7 @@ describe("centered story preparation", () => {
     await vi.waitFor(() => expect(drifted.view().render(100).join("\n")).toContain("needs rebuilding"));
     expect(generate).not.toHaveBeenCalled();
     drifted.view().handleInput("r");
-    await expect(ready).resolves.toEqual({ plan, snapshot });
+    await expect(ready).resolves.toMatchObject(formalStory);
     expect(generate).toHaveBeenCalledOnce();
   });
 
@@ -265,7 +327,7 @@ describe("centered story preparation", () => {
     expect(preparation.view().render(100).join("\n")).toContain("3 files · +3 −3 lines changed · 1 locale hidden");
     expect(load).not.toHaveBeenCalledWith(french, "git-diff");
     expect(generate.mock.calls[0]![1]).not.toContain("fr.yml");
-    finish(orderOutput);
+    finish(formalOutput);
     await expect(ready).resolves.toMatchObject({
       snapshot: { files: [{ path: "app.ts" }, { path: "config/locales/en.yml" }, { path: "config/locales/pt-BR.yml" }] },
     });

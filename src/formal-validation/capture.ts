@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createStorySnapshot, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
+import { createStorySnapshot, storyFile, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
 import {
   getReviewWindowData,
   getReviewWindowDataForRevisionRange,
@@ -63,7 +63,10 @@ async function loadWindow(pi: ExtensionAPI, source: FormalValidationSource, onPr
   return { data, remote, label };
 }
 
-/** Captures the selected change the way /diff-story does: same files, scope, locale policy and exact bytes. */
+/**
+ * Captures a change with /diff-story's file order, locale policy and byte loading. It always uses the
+ * default scope and skips files a story cannot hash, so /diff-story builds its own guide from what it shows.
+ */
 export async function captureChange(pi: ExtensionAPI, source: FormalValidationSource, onProgress: (message: string) => void = () => {}): Promise<CapturedChange> {
   const { data, remote, label } = await loadWindow(pi, source, onProgress);
   const scope = getDefaultScope(data.files);
@@ -77,13 +80,11 @@ export async function captureChange(pi: ExtensionAPI, source: FormalValidationSo
       skipped.push({ path, reason: "submodule" });
       return undefined;
     }
-    const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
     const contents = await loadReviewFileContents(pi, data.repoRoot, file, scope, data.branchBaseRevision, data.modifiedRevision);
     read += 1;
     if (read % 10 === 0) onProgress(`Read ${read} of ${files.length} files…`);
-    const hasOriginal = comparison?.hasOriginal ?? true;
-    const hasModified = comparison?.hasModified ?? true;
-    if ((hasOriginal && contents.originalAvailable === false) || (hasModified && contents.modifiedAvailable === false)) {
+    const captured = storyFile(file, scope, contents);
+    if (((captured.hasOriginal ?? true) && contents.originalAvailable === false) || ((captured.hasModified ?? true) && contents.modifiedAvailable === false)) {
       skipped.push({ path, reason: "unreadable or too large" });
       return undefined;
     }
@@ -91,7 +92,7 @@ export async function captureChange(pi: ExtensionAPI, source: FormalValidationSo
       skipped.push({ path, reason: "binary content" });
       return undefined;
     }
-    return { fileId: file.id, path, scope, contents, hasOriginal, hasModified };
+    return captured;
   });
   const captured = loaded.filter((file): file is StoryFile => file != null);
   skipped.sort((a, b) => a.path.localeCompare(b.path));

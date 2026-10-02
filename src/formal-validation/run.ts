@@ -1,4 +1,6 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { DiffStoryGenerate } from "../diff-story/generate.js";
@@ -26,18 +28,65 @@ export interface FormalValidationOutcome {
   path?: string;
 }
 
+/** `kept` means a model-written guide for the same bytes was already saved and this one was not written over it. */
+export type GuideSave = { status: "saved" | "kept"; path: string };
+
+export interface GuideStore {
+  load(snapshot: string): Promise<FormalValidationGuide | undefined>;
+  save(guide: FormalValidationGuide): Promise<GuideSave>;
+}
+
 export function formalValidationDirectory(): string {
   return process.env.PI_CODE_DIFF_FORMAL_VALIDATION_DIR ?? join(getAgentDir(), "cache", "pi-code-diff", "formal-validation");
 }
 
-/** Saves the guide under its snapshot fingerprint, so a later /diff-story of the same bytes can find it. */
-export async function saveFormalValidationGuide(guide: FormalValidationGuide, directory = formalValidationDirectory()): Promise<string> {
+function isSavedGuide(value: unknown, snapshot: string): value is FormalValidationGuide {
+  if (typeof value !== "object" || value == null) return false;
+  const guide = value as Partial<FormalValidationGuide>;
+  return guide.version === 1 && guide.snapshot === snapshot && Array.isArray(guide.steps) && Array.isArray(guide.minimized)
+    && Array.isArray(guide.claims) && typeof guide.units === "object" && guide.units != null
+    && typeof guide.tests === "object" && guide.tests != null && typeof guide.refinement?.status === "string";
+}
+
+/** Reads the guide saved for these exact bytes; a missing, unreadable or foreign file reads as no guide. */
+export async function loadFormalValidationGuide(snapshot: string, directory = formalValidationDirectory()): Promise<FormalValidationGuide | undefined> {
+  if (!/^[0-9a-f]{64}$/.test(snapshot)) return undefined;
+  try {
+    const value: unknown = JSON.parse(await readFile(join(directory, `${snapshot}.json`), "utf8"));
+    return isSavedGuide(value, snapshot) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Saves the guide under its snapshot fingerprint, so a later /diff-story of the same bytes can reuse it. */
+export async function saveFormalValidationGuide(guide: FormalValidationGuide, directory = formalValidationDirectory()): Promise<GuideSave> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${guide.snapshot}.json`);
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(guide, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
-  return path;
+  if (guide.refinement.status !== "applied" && (await loadFormalValidationGuide(guide.snapshot, directory))?.refinement.status === "applied") {
+    return { status: "kept", path };
+  }
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(guide, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+  return { status: "saved", path };
+}
+
+export function formalGuideStore(directory?: string): GuideStore {
+  return {
+    load: (snapshot) => loadFormalValidationGuide(snapshot, directory),
+    save: (guide) => saveFormalValidationGuide(guide, directory),
+  };
+}
+
+function tildePath(path: string): string {
+  const home = homedir();
+  return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 }
 
 export async function runFormalValidation(pi: ExtensionAPI, run: FormalValidationRun): Promise<FormalValidationOutcome> {
@@ -66,7 +115,9 @@ export async function runFormalValidation(pi: ExtensionAPI, run: FormalValidatio
   let path: string | undefined;
   let saveError: string | undefined;
   try {
-    path = await saveFormalValidationGuide(guide, run.directory);
+    const save = await saveFormalValidationGuide(guide, run.directory);
+    if (save.status === "saved") path = save.path;
+    else saveError = `a model-written guide for these exact bytes is already saved at ${tildePath(save.path)}, so this one was not written over it`;
   } catch (error) {
     saveError = error instanceof Error ? error.message : String(error);
   }
