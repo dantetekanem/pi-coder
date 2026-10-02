@@ -2074,7 +2074,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     promptSnippet: "Build a formal validation guide (priorities, properties, checks, test quality) for a PR, range, or local diff.",
     promptGuidelines: [
       "Call pi_coder_formal_validation when the user asks for a formal validation, a verification guide, or a test-quality read of a PR, range, or local diff. Pass args as after /diff, and cwd when you know the checkout.",
-      "Present the returned guide. Properties and checks are the guideline model's reading of the code; ranges, test pairing and test counts come from the captured bytes. refine=false returns host facts only.",
+      "Present the returned guide. The guideline model writes properties and checks and may reassign tests to steps; source ranges and test counts come from the captured bytes. refine=false returns host facts only.",
     ],
     parameters: Type.Object({
       args: Type.Optional(Type.String({ description: "Same target syntax as /diff: empty for local changes, 'remote <url | branch>', or 'base..head' / 'base...head'." })),

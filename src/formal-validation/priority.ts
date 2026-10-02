@@ -194,7 +194,9 @@ function mechanicalChange(added: readonly string[], deleted: readonly string[]):
   const all = [...added, ...deleted];
   if (all.length === 0) return undefined;
   const squash = (lines: readonly string[]) => lines.join("").replace(/\s+/g, "");
-  if (added.length > 0 && deleted.length > 0 && squash(added) === squash(deleted)) {
+  // Changed-line snippets cannot establish literal boundaries; keep quoted edits visible.
+  const hasQuotes = all.some((line) => /["'`]/.test(line));
+  if (!hasQuotes && added.length > 0 && deleted.length > 0 && squash(added) === squash(deleted)) {
     return { category: "formatting", label: MECHANICAL_LABELS.whitespace };
   }
   const meaningful = all.filter((line) => line.trim().length > 0);

@@ -1,4 +1,4 @@
-import type { StoryUnit } from "../diff-story/units.js";
+import { functionOwners, type StoryUnit } from "../diff-story/units.js";
 import { isCommentLine, isImportLine } from "./priority.js";
 import { fileStem, identifierWords, identifiers, splitLines, type NumberedLine } from "./source.js";
 
@@ -134,6 +134,16 @@ export function findDoubles(text: string, line: number, changed: ChangedCode): T
   return doubles;
 }
 
+/** Module mocks outside a test or helper still apply when only a test case changes. */
+export function fileModuleMocks(content: string, changed: ChangedCode): TestDouble[] {
+  const lines = splitLines(content);
+  const owners = functionOwners(lines);
+  return lines.flatMap((text, index) => {
+    if (owners[index] != null || isCommentLine(text)) return [];
+    return findDoubles(text, index + 1, changed).filter((double) => double.kind === "module-mock");
+  });
+}
+
 const SETUP_START = /^(\s*)(?:def\s+setup\b|setup\b|before(?:Each|All)?\b|before\s*\(\s*:(?:each|all)\s*\)|around\b)\s*(?:do\b|\{|\(|$)/;
 
 /** Doubles created in shared setup run before every test in the file. */
@@ -218,6 +228,7 @@ export interface TestProfileInput {
   changed: ChangedCode;
   pairedWith?: string;
   setupDoubles?: readonly TestDouble[];
+  fileMocks?: readonly TestDouble[];
 }
 
 /** Reads one changed test case for what it asserts, what it fakes and what it exercises for real. */
@@ -230,6 +241,13 @@ export function profileTest(input: TestProfileInput): TestProfile {
   const strippedText = stripped.map((line) => line.text).join("\n");
   const assertionLines = stripped.filter((line) => ASSERTION.test(line.text));
   const doubles = body.flatMap((line) => findDoubles(line.text, line.line, changed));
+  if (input.isCase) {
+    for (const double of input.fileMocks ?? []) {
+      const alreadyIncluded = doubles.some((existing) =>
+        existing.line === double.line && existing.kind === double.kind && existing.target === double.target);
+      if (!alreadyIncluded) doubles.push(double);
+    }
+  }
   const real = REAL_SIGNALS.filter(([, pattern]) => body.some((line) => pattern.test(line.text))).map(([label]) => label);
   const level = testLevel(unit.path, strippedText, real);
   const flags: TestFlag[] = [];

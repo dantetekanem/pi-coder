@@ -51,7 +51,13 @@ function testLines(test: TestProfile, compact: boolean): string[] {
   return [head, `       ${facts.join(" · ")}`, ...notes.map((note) => `       ${note}`)];
 }
 
-function stepLines(guide: FormalValidationGuide, step: GuideStep, position: number, compact: boolean): string[] {
+function stepLines(
+  guide: FormalValidationGuide,
+  step: GuideStep,
+  position: number,
+  compact: boolean,
+  saved: boolean,
+): string[] {
   const lines = [`${position}. [${step.priority}] ${step.title}`];
   if (step.property != null) lines.push(`   Property: ${step.property}`);
   if (step.reasons.length > 0) lines.push(`   Why: ${step.reasons.join("; ")}`);
@@ -73,7 +79,10 @@ function stepLines(guide: FormalValidationGuide, step: GuideStep, position: numb
     lines.push(`   Tests (${tests.length}):`);
     const shown = compact ? tests.slice(0, 6) : tests;
     for (const test of shown) lines.push(...testLines(test, compact));
-    if (shown.length < tests.length) lines.push(`     … ${plural(tests.length - shown.length, "more test")} in the saved guide`);
+    if (shown.length < tests.length) {
+      const remainder = saved ? "in the saved guide" : "omitted; the guide was not saved";
+      lines.push(`     … ${plural(tests.length - shown.length, "more test")} ${remainder}`);
+    }
   }
   if (step.gaps.length > 0) {
     lines.push("   Gaps:");
@@ -172,7 +181,9 @@ function render(guide: FormalValidationGuide, options: { path?: string; saveErro
   if (guide.summary != null) lines.push("", `Summary: ${guide.summary}`);
   lines.push(...claimLines(guide));
   if (mainSteps.length === 0) lines.push("", "No critical or needed step: every change is mechanical.");
-  for (const step of mainSteps) lines.push("", ...stepLines(guide, step, guide.steps.indexOf(step) + 1, compact));
+  for (const step of mainSteps) {
+    lines.push("", ...stepLines(guide, step, guide.steps.indexOf(step) + 1, compact, options.path != null));
+  }
   lines.push(...minimizedLines(guide, minorSteps), ...summaryLines(guide));
   return lines.join("\n");
 }
@@ -182,5 +193,9 @@ export function renderGuide(guide: FormalValidationGuide, options: { path?: stri
   const full = render(guide, options, false);
   if (full.length <= TEXT_LIMIT) return full;
   const compact = render(guide, options, true);
-  return compact.length <= TEXT_LIMIT ? compact : `${compact.slice(0, TEXT_LIMIT)}\n… truncated; the saved guide has every step.`;
+  if (compact.length <= TEXT_LIMIT) return compact;
+  const remainder = options.path != null
+    ? "the saved guide has every step."
+    : "the guide was not saved, so remaining steps are unavailable.";
+  return `${compact.slice(0, TEXT_LIMIT)}\n… truncated; ${remainder}`;
 }

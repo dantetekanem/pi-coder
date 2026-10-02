@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { createStorySnapshot, type StoryFile } from "../diff-story/plan.js";
+import * as capture from "../formal-validation/capture.js";
 import { buildGuide, linkClaim, readDescription, type FormalValidationGuide, type GuideTarget } from "../formal-validation/guide.js";
 import { classifyUnitRisk } from "../formal-validation/priority.js";
 import { applyRefinement, buildRefinementPrompt, refineGuide } from "../formal-validation/refine.js";
@@ -181,6 +182,21 @@ describe("formal validation risk ranking", () => {
 });
 
 describe("formal validation guide", () => {
+  it.each(['"a b"', "'a b'", "`a b`"])("keeps changed quoted values in a validation step: %s", (literal) => {
+    const before = `export function message() {\n  return ${literal};\n}\n`;
+    const after = before.replace("a b", "ab");
+    const { guide } = buildGuide({
+      snapshot: createStorySnapshot([file("src/message.ts", before, after)]),
+      target,
+    });
+    const id = unitId(guide, "src/message.ts", "message");
+
+    expect(guide.steps).toContainEqual(expect.objectContaining({
+      priority: "needed",
+      units: expect.arrayContaining([id]),
+    }));
+  });
+
   it("keeps every changed test case whole and reads what it asserts, fakes and runs for real", () => {
     const { guide } = prepare();
     expect(testNamed(guide, "cancel! refunds the prorated amount once")).toMatchObject({
@@ -205,7 +221,49 @@ describe("formal validation guide", () => {
     expect(spied.doubles).toEqual([expect.objectContaining({ kind: "spy", boundary: "external" })]);
     const mocked = testNamed(guide, "checks out an empty cart");
     expect(mocked.quality).toBe("weak");
-    expect(mocked.doubles).toContainEqual(expect.objectContaining({ kind: "module-mock", target: "./billing", boundary: "changed-code" }));
+    expect(mocked.doubles).toEqual([
+      expect.objectContaining({ kind: "module-mock", target: "./billing", boundary: "changed-code", line: 4 }),
+    ]);
+  });
+
+  it.each(["vi", "jest"])("includes an unchanged file-level %s.mock in a modified test profile", (mockApi) => {
+    const before = checkoutTest.replace("vi.mock", `${mockApi}.mock`);
+    const after = before.replace("paid: 0", "paid: 1");
+    const { guide } = buildGuide({
+      snapshot: createStorySnapshot([
+        file("src/billing.ts", billingBefore, billingAfter),
+        file("src/checkout.test.ts", before, after),
+      ]),
+      target,
+    });
+    const profile = testNamed(guide, "checks out an empty cart");
+
+    expect(profile.quality).toBe("weak");
+    expect(profile.doubles).toEqual([
+      expect.objectContaining({ kind: "module-mock", target: "./billing", boundary: "changed-code", line: 4 }),
+    ]);
+    expect(profile.flags).toContainEqual(expect.objectContaining({ code: "stubs-changed-code" }));
+  });
+
+  it("keeps a case-local module mock out of another changed case", () => {
+    const before = `it("mocks billing locally", () => {
+  vi.doMock("./billing", () => ({ total: () => 0 }));
+  expect(total([])).toBe(0);
+});
+it("checks total", () => {
+  expect(total([1])).toBe(1);
+});
+`;
+    const after = before.replace("toBe(1)", "toBe(2)");
+    const { guide } = buildGuide({
+      snapshot: createStorySnapshot([
+        file("src/billing.ts", billingBefore, billingAfter),
+        file("src/billing.test.ts", before, after),
+      ]),
+      target,
+    });
+
+    expect(testNamed(guide, "checks total")).toMatchObject({ quality: "strong", doubles: [] });
   });
 
   it("orders critical steps first, keeps nested code with its declaration and minimizes mechanical edits", () => {
@@ -348,6 +406,54 @@ describe("formal validation output", () => {
     expect(text).toContain("  - README.md · lines 1–1 — documentation");
     expect(text).toContain("\"`cancel!` takes a row lock and returns early when already cancelled.\" → step ");
     expect(text).not.toMatch(/\bu\d+\b/);
+  });
+
+  it.each(["succeeds", "fails"])("handles a large guide when saving %s", async (saving) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-formal-validation-overflow-"));
+    const captureSpy = vi.spyOn(capture, "captureChange");
+    try {
+      const files = Array.from({ length: 300 }, (_, index) =>
+        file(`src/item${index}.ts`, "", `export function item${index}() {\n  return ${index};\n}\n`));
+      const testCases = Array.from({ length: 8 }, (_, index) =>
+        `it("checks item0 case ${index}", () => {\n  expect(item0()).toBe(0);\n});\n`);
+      files.push(file("src/item0.test.ts", "", testCases.join("\n")));
+      captureSpy.mockResolvedValue({
+        snapshot: createStorySnapshot(files),
+        target: { ...target, repoRoot: root },
+        hiddenLocales: 0,
+        skipped: [],
+      });
+      const directory = join(root, "guides");
+      if (saving === "fails") {
+        await writeFile(directory, "blocks directory creation");
+      }
+
+      const outcome = await runFormalValidation({} as never, {
+        source: { kind: "range", cwd: root, base: "base", head: "head" },
+        signal: new AbortController().signal,
+        directory,
+      });
+      const lastStep = outcome.guide.steps.at(-1)!;
+
+      expect(outcome.guide.steps).toHaveLength(300);
+      expect(outcome.text).not.toContain(lastStep.title);
+      if (saving === "succeeds") {
+        expect(outcome.path).toBe(join(directory, `${outcome.guide.snapshot}.json`));
+        const saved = JSON.parse(await readFile(outcome.path!, "utf8"));
+        expect(saved.steps.at(-1)).toEqual(lastStep);
+        expect(saved.steps[0].tests).toHaveLength(8);
+        expect(outcome.text).toContain("2 more tests in the saved guide");
+        expect(outcome.text).toContain("the saved guide has every step.");
+      } else {
+        expect(outcome.path).toBeUndefined();
+        expect(outcome.text).toContain("Not saved:");
+        expect(outcome.text).toContain("2 more tests omitted; the guide was not saved");
+        expect(outcome.text).toContain("remaining steps are unavailable.");
+      }
+    } finally {
+      captureSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("captures a real range, writes a private guide and reports host facts without a model", async () => {

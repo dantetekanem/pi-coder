@@ -4,7 +4,7 @@ import type { ReviewScope } from "../types.js";
 import { unitFamilies, type UnitFamilies } from "./families.js";
 import { classifyUnitRisk, comparePriority, higherPriority, MINOR_REASONS, type RiskCategory, type UnitRisk, type ValidationPriority } from "./priority.js";
 import { fileStem, identifierWords, identifiers, singleLine, SnapshotIndex, type UnitAnchor } from "./source.js";
-import { changedCodeIndex, profileTest, sharedSetupDoubles, type TestDouble, type TestProfile } from "./tests.js";
+import { changedCodeIndex, fileModuleMocks, profileTest, sharedSetupDoubles, type TestDouble, type TestProfile } from "./tests.js";
 
 export interface GuidePullRequest {
   number: string;
@@ -326,6 +326,7 @@ export function buildGuide(input: GuideInput): PreparedGuide {
 
   const changed = changedCodeIndex(units);
   const setupDoubles = new Map<string, TestDouble[]>();
+  const moduleMocks = new Map<string, TestDouble[]>();
   const profiles: Record<string, TestProfile> = {};
   const familyPair = new Map<string, string>();
   for (const root of roots) {
@@ -336,6 +337,7 @@ export function buildGuide(input: GuideInput): PreparedGuide {
     if (!setupDoubles.has(root.path)) {
       const file = snapshot.files.find((entry) => entry.path === root.path);
       setupDoubles.set(root.path, file == null ? [] : sharedSetupDoubles(file.contents.modifiedContent, changed));
+      moduleMocks.set(root.path, file == null ? [] : fileModuleMocks(file.contents.modifiedContent, changed));
     }
     const enclosing = families.enclosing.get(root.id);
     const statuses = new Set(membersOf(root.id).map((member) => member.status));
@@ -362,6 +364,7 @@ export function buildGuide(input: GuideInput): PreparedGuide {
       changed,
       ...(owner == null ? {} : { pairedWith: rootOf(owner) }),
       setupDoubles: setupDoubles.get(root.path),
+      fileMocks: moduleMocks.get(root.path),
     });
     profiles[root.id]!.targets = unique(profiles[root.id]!.targets.map(rootOf));
   }
