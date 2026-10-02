@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add the `pi_coder_formal_validation` agent tool. It reads a pull request with its description, a range, or local changes, and returns a step-by-step validation guide: behavior steps ranked critical, needed or minimized, the property each step keeps, ordered checks, and the changed tests that prove it with their assertions, mocks and stubs, and quality flags. The guide is saved by snapshot fingerprint for later `/diff-story` use.
+
 ## 0.9.1 - 2026-09-27
 
 ### Added

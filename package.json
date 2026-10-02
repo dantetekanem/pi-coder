@@ -37,6 +37,7 @@
     "src/review-grammar.ts",
     "src/review-agent.ts",
     "src/diff-story",
+    "src/formal-validation",
     "prompts",
     "skills/diff-story",
     "src/review-order.ts",

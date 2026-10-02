@@ -822,6 +822,7 @@ describe("code diff extension", () => {
     expect(openCode.parameters.properties.path).toBeDefined();
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "open_code_diff_story" }));
+    expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "pi_coder_formal_validation" }));
     expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "submit_pr_review" }));
   });
 

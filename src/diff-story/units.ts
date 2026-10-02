@@ -17,7 +17,7 @@ function lines(text: string): string[] {
   return result;
 }
 
-function declaration(line: string): string | undefined {
+export function declaration(line: string): string | undefined {
   return /^\s*(?:test|it|specify)(?:\.(?:only|skip))?\s*(?:\(\s*)?["'`]([^"'`]+)["'`]/.exec(line)?.[1]
     ?? /^\s*(?:private\s+|protected\s+)?def\s+(?:self\.)?([\w!?=]+)/.exec(line)?.[1]
     ?? /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)/.exec(line)?.[1]
@@ -25,7 +25,7 @@ function declaration(line: string): string | undefined {
     ?? /^\s*(?:(?:private|public|protected|static|async|override|get|set)\s+)*([\w$]+)\s*\([^;]*\)\s*(?::[^=;]+)?\s*\{/.exec(line)?.[1];
 }
 
-function functionOwners(source: string[]): Array<string | undefined> {
+export function functionOwners(source: string[]): Array<string | undefined> {
   const owners: Array<string | undefined> = new Array(source.length);
   const occurrences = new Map<string, number>();
   for (let start = 0; start < source.length; start += 1) {

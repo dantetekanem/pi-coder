@@ -25,6 +25,11 @@ import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
 import { prepareDiffStory, selectStoryAgent, type PreparedDiffStory } from "./ui/diff-story.js";
+import { createStoryAgentGenerator } from "./diff-story/agent.js";
+import type { DiffStoryGenerate } from "./diff-story/generate.js";
+import type { FormalValidationSource } from "./formal-validation/capture.js";
+import { runFormalValidation } from "./formal-validation/run.js";
+import { validateReviewAgent } from "./review-agent.js";
 import { getDefaultScope, getScopedFiles } from "./state.js";
 import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
@@ -181,6 +186,53 @@ function extractRemoteArgs(trimmed: string, fallbackCwd: string): string | null 
   if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) return parseInteractiveReviewArgs(trimmed).remote ?? null;
   if (trimmed.includes("..")) return null;
   return resolveLocalReviewCwdArg(trimmed, fallbackCwd) == null ? trimmed : null;
+}
+
+/** Resolves the same targets as /diff into a formal validation source, without opening any UI. */
+function formalValidationSource(args: string, cwd: string): FormalValidationSource {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return { kind: "working", cwd };
+  const tokens = trimmed.split(/\s+/);
+  const firstToken = tokens[0]!;
+  const options = (params: InteractiveReviewParams) => ({
+    ...(params.includeGenerated ? { includeGenerated: true } : {}),
+    ...(params.wholeRepo ? { wholeRepo: true } : {}),
+  });
+  const remote = (target: string, params: InteractiveReviewParams): FormalValidationSource => ({
+    kind: "remote",
+    cwd,
+    remote: target,
+    ...(params.cwd == null ? {} : { explicitCwd: normalizeReviewCwd(params.cwd, cwd) }),
+    options: options(params),
+  });
+  const range = (value: string, params: InteractiveReviewParams): FormalValidationSource => {
+    const [base, head] = value.split(/\.\.\.?/, 2);
+    if (base == null || head == null || base.length === 0 || head.length === 0) throw new Error("A range needs base..head or base...head.");
+    return {
+      kind: "range",
+      cwd: params.cwd == null ? cwd : normalizeReviewCwd(params.cwd, cwd),
+      base,
+      head,
+      options: { ...options(params), ...(value.includes("...") ? { mergeBase: true } : {}) },
+    };
+  };
+  if (firstToken.toLowerCase() === "remote") {
+    if (tokens[1] == null) throw new Error("Usage: remote <url | branch>");
+    return remote(tokens[1], parseInteractiveReviewArgs(tokens.slice(2).join(" ")));
+  }
+  if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) {
+    const params = parseInteractiveReviewArgs(trimmed);
+    if (params.tree != null || params.branch != null || params.project != null || params.mode === "staged") {
+      throw new Error("Formal validation supports local changes, base..head ranges and remote targets.");
+    }
+    if (params.remote != null) return remote(params.remote, params);
+    if (params.mode === "custom" && params.ref != null) return range(params.ref, params);
+    return { kind: "working", cwd: params.cwd == null ? cwd : normalizeReviewCwd(params.cwd, cwd), options: options(params) };
+  }
+  const localCwd = resolveLocalReviewCwdArg(trimmed, cwd);
+  if (localCwd != null) return { kind: "working", cwd: localCwd };
+  const rest = parseInteractiveReviewArgs(tokens.slice(1).join(" "));
+  return trimmed.includes("..") ? range(firstToken, rest) : remote(firstToken, rest);
 }
 
 function unsupported(message: string, ctx: ExtensionContext): ReviewRunStatus {
@@ -2012,6 +2064,87 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         content: [{ type: "text" as const, text: formatOpenCodeDiffToolText(status, args, cwd) }],
         details: { ...status, args, cwd },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "pi_coder_formal_validation",
+    label: "pi-coder-formal-validation",
+    description: "Build a step-by-step formal validation guide for a change: behavior steps ranked critical, needed or minimized, the property each step must keep, ordered checks, and the changed tests that prove it with their quality (assertions, mocks and stubs, real records). Reads a pull request with its description, a range, or local changes. Same targets as /diff.",
+    promptSnippet: "Build a formal validation guide (priorities, properties, checks, test quality) for a PR, range, or local diff.",
+    promptGuidelines: [
+      "Call pi_coder_formal_validation when the user asks for a formal validation, a verification guide, or a test-quality read of a PR, range, or local diff. Pass args as after /diff, and cwd when you know the checkout.",
+      "Present the returned guide. Properties and checks are the guideline model's reading of the code; ranges, test pairing and test counts come from the captured bytes. refine=false returns host facts only.",
+    ],
+    parameters: Type.Object({
+      args: Type.Optional(Type.String({ description: "Same target syntax as /diff: empty for local changes, 'remote <url | branch>', or 'base..head' / 'base...head'." })),
+      cwd: Type.Optional(Type.String({ description: "Repository directory. Defaults to Pi's current cwd." })),
+      description: Type.Optional(Type.String({ description: "Requirements or context added to the PR description; the only description for local changes." })),
+      refine: Type.Optional(Type.Boolean({ description: "Run the guideline model (the /diff-story agent). Defaults to true; false returns host facts only." })),
+    }),
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const input = params as { args?: string; cwd?: string; description?: string; refine?: boolean };
+      const args = input.args ?? "";
+      const cwd = normalizeReviewCwd(input.cwd ?? ctx.cwd, ctx.cwd);
+      const progress = (message: string) => onUpdate?.({ content: [{ type: "text", text: message }], details: { phase: message } });
+      const fail = (prefix: string, error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text" as const, text: `${prefix}: ${message}` }], details: { error: message, args, cwd } };
+      };
+      let source: FormalValidationSource;
+      try {
+        source = formalValidationSource(args, cwd);
+      } catch (error) {
+        return fail("Formal validation did not start", error);
+      }
+      let generate: DiffStoryGenerate | undefined;
+      let model: string | undefined;
+      let skipReason: string | undefined;
+      if (input.refine === false) {
+        skipReason = "refine=false";
+      } else {
+        const selection = loadReviewPreferences().storyAgent;
+        const label = `${selection.provider}/${selection.model} \u00b7 ${selection.thinking}`;
+        try {
+          validateReviewAgent(ctx, selection);
+          let reportedAt = 0;
+          generate = createStoryAgentGenerator(ctx, selection, (activity) => {
+            if (activity.kind !== "text" || Date.now() - reportedAt < 2_000) return;
+            reportedAt = Date.now();
+            progress(`Writing the guideline with ${label}\u2026 ${activity.text.length.toLocaleString()} characters so far`);
+          });
+          model = label;
+        } catch (error) {
+          skipReason = `guideline model unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      try {
+        const outcome = await runFormalValidation(pi, {
+          source,
+          ...(input.description == null ? {} : { description: input.description }),
+          ...(generate == null ? {} : { generate }),
+          ...(model == null ? {} : { model }),
+          ...(skipReason == null ? {} : { skipReason }),
+          signal: signal ?? new AbortController().signal,
+          onProgress: progress,
+        });
+        const { guide } = outcome;
+        return {
+          content: [{ type: "text" as const, text: outcome.text }],
+          details: {
+            args,
+            cwd,
+            path: outcome.path,
+            snapshot: guide.snapshot,
+            target: guide.target,
+            stats: guide.stats,
+            refinement: guide.refinement,
+            steps: guide.steps.map(({ id, title, priority, units, tests }) => ({ id, title, priority, units, tests })),
+          },
+        };
+      } catch (error) {
+        return fail("Formal validation failed", error);
+      }
     },
   });
 

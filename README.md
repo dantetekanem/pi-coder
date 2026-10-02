@@ -223,7 +223,19 @@ Agents can use the same interfaces through:
 - `open_code` — run the configured code command at an optional path or structured target; without one, open the Workbench.
 - `open_code_diff` — run the configured code command; without one, open `/diff` with an optional target and prepopulated comments.
 - `open_code_diff_story` — open `/diff-story` with the same targets and `cwd`. It always uses the built-in story view, even with a configured code command.
+- `pi_coder_formal_validation` — build a step-by-step formal validation guide for the same targets, without opening any UI. See [Formal validation](#formal-validation).
 - `submit_pr_review` — submit a confirmed configured-provider review.
+
+## Formal validation
+
+`pi_coder_formal_validation` reads a pull request with its description, a range, or local changes, and returns a guide a reviewer can follow:
+
+- **Steps by behavior.** Changed functions keep their nested helpers, and test cases keep the helpers declared inside them. One model request (the `/diff-story` agent) groups units into behaviors and writes, for each step, the property it must keep and two to five ordered checks. Steps that depend on the order of operations get checks for concurrent callers, retries and partial failures.
+- **Priorities.** Each step is critical, needed or minor. The extension ranks units from their paths and changed lines (migrations, access and secrets, money, deletes and bulk writes, order of steps, public interfaces, flags) and minimizes docs, lockfiles, and comment, import and whitespace edits. The model can move a step, but a step with critical code or a live changed test is never minimized.
+- **Test quality.** Every changed test lists its assertions, its mocks and stubs (external boundary, owned code, or the code this change modifies), what it runs for real (records, requests, rendered UI, files, git), and flags such as no assertion, snapshot or existence-only checks, stubbed changed code, stubs in shared setup, branches, sleeps, and skipped or focused tests. Each step reports missing tests and success-only coverage.
+- **Description claims.** Claims from the PR description map to the steps that implement them, and author test steps are listed separately.
+
+Arguments: `args` (same targets as `/diff`), `cwd`, `description` (extra requirements; the only description for local changes), and `refine` (`false` returns host facts only). The guide is saved as JSON under `~/.pi/agent/cache/pi-code-diff/formal-validation/`, keyed by the same snapshot fingerprint `/diff-story` uses for those bytes.
 
 ## Security and data access
 
