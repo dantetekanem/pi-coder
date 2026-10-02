@@ -198,6 +198,13 @@ function formalValidationSource(args: string, cwd: string): FormalValidationSour
     ...(params.includeGenerated ? { includeGenerated: true } : {}),
     ...(params.wholeRepo ? { wholeRepo: true } : {}),
   });
+  const parse = (value: string): InteractiveReviewParams => {
+    const params = parseInteractiveReviewArgs(value);
+    if (params.tree != null || params.branch != null || params.project != null || params.mode === "staged") {
+      throw new Error("Formal validation supports local changes, base..head ranges and remote targets.");
+    }
+    return params;
+  };
   const remote = (target: string, params: InteractiveReviewParams): FormalValidationSource => ({
     kind: "remote",
     cwd,
@@ -218,20 +225,17 @@ function formalValidationSource(args: string, cwd: string): FormalValidationSour
   };
   if (firstToken.toLowerCase() === "remote") {
     if (tokens[1] == null) throw new Error("Usage: remote <url | branch>");
-    return remote(tokens[1], parseInteractiveReviewArgs(tokens.slice(2).join(" ")));
+    return remote(tokens[1], parse(tokens.slice(2).join(" ")));
   }
   if (trimmed.startsWith("-") || MODE_VALUES.has(firstToken)) {
-    const params = parseInteractiveReviewArgs(trimmed);
-    if (params.tree != null || params.branch != null || params.project != null || params.mode === "staged") {
-      throw new Error("Formal validation supports local changes, base..head ranges and remote targets.");
-    }
+    const params = parse(trimmed);
     if (params.remote != null) return remote(params.remote, params);
-    if (params.mode === "custom" && params.ref != null) return range(params.ref, params);
+    if (params.mode === "custom") return range(params.ref ?? "", params);
     return { kind: "working", cwd: params.cwd == null ? cwd : normalizeReviewCwd(params.cwd, cwd), options: options(params) };
   }
   const localCwd = resolveLocalReviewCwdArg(trimmed, cwd);
   if (localCwd != null) return { kind: "working", cwd: localCwd };
-  const rest = parseInteractiveReviewArgs(tokens.slice(1).join(" "));
+  const rest = parse(tokens.slice(1).join(" "));
   return trimmed.includes("..") ? range(firstToken, rest) : remote(firstToken, rest);
 }
 

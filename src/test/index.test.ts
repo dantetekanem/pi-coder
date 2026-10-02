@@ -3628,4 +3628,24 @@ describe("code diff extension", () => {
     await vi.waitFor(() => expect(mocks.loadReviewSession).toHaveBeenCalledWith(previousIdentity, "parked-session"));
     await vi.waitFor(() => expect(mocks.saveReviewSessionWithStatus).toHaveBeenCalledWith("pr|github|example/widgets|1", expect.anything(), expect.objectContaining({ id: "parked-session", previousIdentity, expectedGeneration: 0 })));
   });
+
+  it.each([
+    ["custom main..HEAD", "A range needs base..head or base...head."],
+    ["remote https://github.com/o/r/pull/1 --branch x", "Formal validation supports local changes, base..head ranges and remote targets."],
+    ["main..HEAD --tree x", "Formal validation supports local changes, base..head ranges and remote targets."],
+    ["https://github.com/o/r/pull/1 --project p", "Formal validation supports local changes, base..head ranges and remote targets."],
+  ])("refuses formal validation args %j before reading git", async (args, message) => {
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), exec: vi.fn() };
+    const ctx = { hasUI: false, cwd: "/repo", ui: { notify: vi.fn() } };
+    codeDiffExtension(pi as never);
+
+    const result = await tools.get("pi_coder_formal_validation").execute("tool-call", { args, refine: false }, new AbortController().signal, vi.fn(), ctx);
+
+    expect(result.content[0].text).toBe(`Formal validation did not start: ${message}`);
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(mocks.getReviewWindowData).not.toHaveBeenCalled();
+    expect(mocks.getReviewWindowDataForRevisionRange).not.toHaveBeenCalled();
+    expect(mocks.resolveRemoteReviewTarget).not.toHaveBeenCalled();
+  });
 });

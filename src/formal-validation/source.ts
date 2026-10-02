@@ -40,6 +40,78 @@ export function fileStem(path: string): string {
   return path.split("/").at(-1)!.replace(/\.[^.]+$/, "");
 }
 
+const RUBY_FILE = /\.(?:rb|rake|gemspec|ru)$/;
+const SCRIPT_FILE = /\.[cm]?[jt]sx?$/;
+const PYTHON_FILE = /\.pyi?$/;
+
+/**
+ * 1-based numbers of the lines inside literals that span lines: Ruby heredocs, JS/TS template
+ * literals and Python triple-quoted strings. The line that opens the literal is not inside it;
+ * the line that closes it is. Nested `${}` templates are approximate.
+ */
+export function multilineLiteralLines(lines: readonly string[], path: string): Set<number> {
+  const inside = new Set<number>();
+  const ruby = RUBY_FILE.test(path);
+  const script = SCRIPT_FILE.test(path);
+  const python = PYTHON_FILE.test(path);
+  if (!ruby && !script && !python) return inside;
+  const terminators: string[] = [];
+  let mode: "code" | "template" | "block" | "triple" = "code";
+  let triple = "";
+  lines.forEach((text, index) => {
+    if (terminators.length > 0) {
+      inside.add(index + 1);
+      if (text.trim() === terminators[0]) terminators.shift();
+      return;
+    }
+    if (mode === "template" || mode === "triple") inside.add(index + 1);
+    let column = 0;
+    while (column < text.length) {
+      const char = text[column]!;
+      if (mode === "template") {
+        if (char === "\\") column += 1;
+        else if (char === "`") mode = "code";
+      } else if (mode === "triple") {
+        if (char === "\\") column += 1;
+        else if (text.startsWith(triple, column)) {
+          mode = "code";
+          column += 2;
+        }
+      } else if (mode === "block") {
+        if (text.startsWith("*/", column)) {
+          mode = "code";
+          column += 1;
+        }
+      } else if (script && text.startsWith("//", column)) {
+        break;
+      } else if (script && text.startsWith("/*", column)) {
+        mode = "block";
+        column += 1;
+      } else if ((ruby || python) && char === "#") {
+        break;
+      } else if (script && char === "`") {
+        mode = "template";
+      } else if (python && (char === '"' || char === "'") && text.startsWith(char.repeat(3), column)) {
+        mode = "triple";
+        triple = char.repeat(3);
+        column += 2;
+      } else if (char === '"' || char === "'") {
+        column += 1;
+        while (column < text.length && text[column] !== char) column += text[column] === "\\" ? 2 : 1;
+      } else if (ruby && char === "<") {
+        const heredoc = /^<<([~-]?)(?:(["'`])(\w+)\2|(\w+))/.exec(text.slice(column));
+        const id = heredoc?.[3] ?? heredoc?.[4];
+        if (heredoc != null && id != null && (heredoc[1] !== "" || heredoc[3] != null || /^[A-Z_]\w*$/.test(id))) {
+          terminators.push(id);
+          column += heredoc[0].length - 1;
+        }
+      }
+      column += 1;
+    }
+  });
+  return inside;
+}
+
 export function singleLine(value: string, limit: number): string {
   const clean = value.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").replace(/\s+/g, " ").trim();
   return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
@@ -51,6 +123,7 @@ export class SnapshotIndex {
   private readonly lineCache = new Map<string, string[]>();
   private readonly changedCache = new Map<string, Set<number>>();
   private readonly rowCache = new Map<string, StructuredDiffRow[]>();
+  private readonly literalCache = new Map<string, Set<number>>();
 
   constructor(readonly snapshot: StorySnapshot) {
     this.files = new Map(snapshot.files.map((file) => [file.fileId, file]));
@@ -67,6 +140,17 @@ export class SnapshotIndex {
       const file = this.files.get(fileId);
       cached = file == null ? [] : splitLines(side === "added" ? file.contents.modifiedContent : file.contents.originalContent);
       this.lineCache.set(key, cached);
+    }
+    return cached;
+  }
+
+  /** Lines of one file side that sit inside a literal spanning several lines. */
+  literalLines(fileId: string, side: StorySide): Set<number> {
+    const key = `${side}\u001f${fileId}`;
+    let cached = this.literalCache.get(key);
+    if (cached == null) {
+      cached = multilineLiteralLines(this.lines(fileId, side), this.files.get(fileId)?.path ?? "");
+      this.literalCache.set(key, cached);
     }
     return cached;
   }

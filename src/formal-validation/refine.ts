@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { DiffStoryGenerate } from "../diff-story/generate.js";
 import { deterministicChecks, sortStepsByPriority, stepGaps, unitLabel, type FormalValidationGuide, type GuideStep, type PreparedGuide } from "./guide.js";
-import { higherPriority, type ValidationPriority } from "./priority.js";
+import { comparePriority, higherPriority, type ValidationPriority } from "./priority.js";
 import { singleLine } from "./source.js";
 import type { TestDouble, TestProfile } from "./tests.js";
 
@@ -140,8 +140,8 @@ export function applyRefinement(prepared: PreparedGuide, output: string, model?:
     }
     const hostPriority = roots.reduce<ValidationPriority>((best, id) => higherPriority(best, guide.units[id]!.risk!.priority), roots.length === 0 ? "needed" : "minor");
     let priority = isPriority(entry.priority) ? entry.priority : hostPriority;
-    const liveTests = tests.some((id) => guide.tests[id]!.kind === "test" && guide.tests[id]!.status !== "removed");
-    if (priority === "minor" && (hostPriority === "critical" || liveTests)) {
+    const changedTests = tests.some((id) => guide.tests[id]!.kind === "test");
+    if (priority === "minor" && (hostPriority === "critical" || changedTests)) {
       warnings.push(`Kept step ${position + 1} at needed: it holds ${hostPriority === "critical" ? "critical code" : "changed tests"}.`);
       priority = "needed";
     }
@@ -152,12 +152,16 @@ export function applyRefinement(prepared: PreparedGuide, output: string, model?:
     const fallbackTitle = roots.length === 0
       ? `${guide.tests[tests[0]!]!.path} · changed tests`
       : `${guide.units[roots[0]!]!.path} · ${roots.map((id) => unitLabel(guide.units[id]!)).join(", ")}`;
+    const title = text(entry.title, LIMITS.title) ?? fallbackTitle;
+    if (comparePriority(priority, hostPriority) > 0) {
+      warnings.push(`Lowered step ${position + 1} (${singleLine(title, 80)}) from ${hostPriority} to ${priority}: ${why ?? "no reason given"}`);
+    }
     steps.push({
       key,
-      title: text(entry.title, LIMITS.title) ?? fallbackTitle,
+      title,
       priority,
       reasons: [...new Set([...(why == null ? [] : [why]), ...hostReasons])].slice(0, 5),
-      ordering: typeof entry.ordering === "boolean" ? entry.ordering : roots.some((id) => guide.units[id]!.risk!.ordering),
+      ordering: entry.ordering === true || roots.some((id) => guide.units[id]!.risk!.ordering),
       ...(text(entry.property, LIMITS.property) == null ? {} : { property: text(entry.property, LIMITS.property)! }),
       checks: strings(entry.checks).map((check) => singleLine(check, LIMITS.check)).filter((check) => check.length > 0).slice(0, 6),
       units: roots.flatMap((id) => families.members.get(id)!),
@@ -165,7 +169,7 @@ export function applyRefinement(prepared: PreparedGuide, output: string, model?:
     });
   });
   if (steps.length === 0) throw new Error("The guideline model named no known units.");
-  if (ignored.size > 0) warnings.push(`Ignored unknown or repeated IDs: ${[...ignored].slice(0, 8).join(", ")}.`);
+  if (ignored.size > 0) warnings.push(`Ignored unknown or repeated IDs: ${[...ignored].slice(0, 8).map((id) => singleLine(id, 40)).join(", ")}.`);
 
   // Units the model left out keep their draft step; mechanical ones stay minimized.
   for (const draft of guide.steps) {
@@ -232,6 +236,7 @@ export function applyRefinement(prepared: PreparedGuide, output: string, model?:
   ]));
 
   const claimSteps = new Map<string, string[]>();
+  const emptyAnswers = new Set<string>();
   for (const entry of Array.isArray(raw.claims) ? raw.claims : []) {
     if (!isObject(entry) || typeof entry.id !== "string" || !Array.isArray(entry.steps)) continue;
     const ids = entry.steps
@@ -239,12 +244,15 @@ export function applyRefinement(prepared: PreparedGuide, output: string, model?:
       .map((value) => idOf.get(modelKeys[value - 1] ?? ""))
       .filter((id): id is string => id != null);
     claimSteps.set(entry.id, [...new Set(ids)]);
+    if (entry.steps.length === 0) emptyAnswers.add(entry.id);
   }
   const stepOfUnit = new Map(finalSteps.flatMap((step) => step.units.map((id) => [id, step.id] as const)));
-  const claims = guide.claims.map((claim) => ({
-    ...claim,
-    steps: claimSteps.get(claim.id) ?? [...new Set(claim.units.map((id) => stepOfUnit.get(id)).filter((id): id is string => id != null))],
-  }));
+  const claims = guide.claims.map((claim) => {
+    const hostSteps = [...new Set(claim.units.map((id) => stepOfUnit.get(id)).filter((id): id is string => id != null))];
+    const modelSteps = claimSteps.get(claim.id) ?? [];
+    const steps = modelSteps.length > 0 ? modelSteps : hostSteps;
+    return { ...claim, steps, ...(steps.length === 0 && emptyAnswers.has(claim.id) ? { unmatched: true as const } : {}) };
+  });
 
   const summary = text(raw.summary, LIMITS.summary);
   return {

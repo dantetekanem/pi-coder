@@ -124,7 +124,7 @@ function claimLines(guide: FormalValidationGuide): string[] {
       const steps = claim.steps.map((id) => position.get(id)).filter((value): value is number => value != null).sort((a, b) => a - b);
       const where = steps.length > 0
         ? `step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}`
-        : guide.refinement.status === "applied" ? "not found in the change" : "no unit named in it";
+        : claim.unmatched === true ? "the model found nothing that implements it" : "no step names it";
       lines.push(`  - "${claim.text}" → ${where}`);
     }
   }

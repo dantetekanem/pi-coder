@@ -26,16 +26,17 @@ interface Extent {
  * Story ownership hands a parent's closing line to its last nested declaration, so a parent's
  * extent runs from its declaration line to its own closing line at the same indentation.
  */
-function blockEnd(source: readonly string[], start: number): number {
+function blockEnd(source: readonly string[], start: number, literals: ReadonlySet<number>): number {
   const head = source[start]!;
   if (/\{.*\}\s*[);,]*$/.test(head) || /^\s*def\s+\S+\s*=\s+/.test(head)) return start;
   const indent = head.search(/\S/);
   for (let line = start + 1; line < source.length; line += 1) {
     const text = source[line]!;
-    if (text.trim().length === 0) continue;
+    if (text.trim().length === 0 || literals.has(line + 1)) continue;
     const depth = text.search(/\S/);
     if (depth < indent) return line - 1;
     if (depth !== indent) continue;
+    if (/^\s*(?:rescue|ensure|else|elsif|when|in)\b/.test(text)) continue;
     if (!/^\s*(?:end\b|[}\])])/.test(text)) return line - 1;
     // `): Result {` closes a multi-line signature and opens the body.
     if (!/(?:[{([]|\bdo|=>)\s*$/.test(text)) return line;
@@ -78,11 +79,12 @@ export function unitFamilies(units: readonly StoryUnit[], index: SnapshotIndex):
     let entry = owned.get(key);
     if (entry == null) {
       const source = index.lines(fileId, side);
+      const literals = index.literalLines(fileId, side);
       const owners = functionOwners(source);
       const extents = new Map<string, Extent>();
       owners.forEach((owner, offset) => {
         if (owner == null || extents.has(owner)) return;
-        extents.set(owner, { start: offset + 1, end: blockEnd(source, offset) + 1, head: source[offset]! });
+        extents.set(owner, { start: offset + 1, end: blockEnd(source, offset, literals) + 1, head: source[offset]! });
       });
       entry = { owners, extents };
       owned.set(key, entry);
@@ -165,9 +167,10 @@ export function unitFamilies(units: readonly StoryUnit[], index: SnapshotIndex):
     let found = caseExtents.get(key);
     if (found == null) {
       const source = index.lines(fileId, side);
+      const literals = index.literalLines(fileId, side);
       found = [];
       source.forEach((line, offset) => {
-        if (CASE_LINE.test(line)) found!.push({ start: offset + 1, end: blockEnd(source, offset) + 1, head: line });
+        if (!literals.has(offset + 1) && CASE_LINE.test(line)) found!.push({ start: offset + 1, end: blockEnd(source, offset, literals) + 1, head: line });
       });
       caseExtents.set(key, found);
     }

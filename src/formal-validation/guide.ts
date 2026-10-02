@@ -1,10 +1,10 @@
-import type { StorySnapshot } from "../diff-story/plan.js";
+import type { StorySide, StorySnapshot } from "../diff-story/plan.js";
 import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, type StoryUnit } from "../diff-story/units.js";
 import type { ReviewScope } from "../types.js";
 import { unitFamilies, type UnitFamilies } from "./families.js";
-import { classifyUnitRisk, comparePriority, higherPriority, MINOR_REASONS, type RiskCategory, type UnitRisk, type ValidationPriority } from "./priority.js";
+import { classifyUnitRisk, comparePriority, higherPriority, MINOR_REASONS, type RiskCategory, type UnitBodies, type UnitRisk, type ValidationPriority } from "./priority.js";
 import { fileStem, identifierWords, identifiers, singleLine, SnapshotIndex, type UnitAnchor } from "./source.js";
-import { changedCodeIndex, fileModuleMocks, profileTest, sharedSetupDoubles, type TestDouble, type TestProfile } from "./tests.js";
+import { changedCodeIndex, fileModuleMocks, profileTest, sharedSetupDoubles, testFileContext, type TestDouble, type TestFileContext, type TestProfile } from "./tests.js";
 
 export interface GuidePullRequest {
   number: string;
@@ -62,6 +62,8 @@ export interface DescriptionClaim {
   text: string;
   units: string[];
   steps: string[];
+  /** The guideline model returned no step for this claim and the host found no unit it names. */
+  unmatched?: true;
 }
 
 export interface GuideRefinement {
@@ -177,7 +179,7 @@ export function readDescription(body: string): { claims: string[]; checks: strin
     .replace(/```[\s\S]*?```/g, "")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/<[^>]+>/g, " ");
+    .replace(/(`[^`\n]*`)|<\/?[A-Za-z][\w-]*(?:\s[^<>]*)?\/?>/g, (_match, code?: string) => code ?? " ");
   const claims: string[] = [];
   const checks: string[] = [];
   let section: "claims" | "testing" | "skip" = "claims";
@@ -206,12 +208,17 @@ function singular(word: string): string {
   return word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word;
 }
 
-/** Links a claim to implementation units it names by symbol, path, file stem or every word of a compound symbol. */
+/** Links a claim to implementation units it names by symbol, path, file stem or the words of a compound symbol close together. */
 export function linkClaim(text: string, units: readonly GuideUnit[]): string[] {
   const tokens = new Set<string>();
   for (const match of text.matchAll(/`([^`]+)`/g)) tokens.add(match[1]!.trim());
   for (const match of text.matchAll(/[A-Za-z_]\w*(?:(?:::|#|\.)[A-Za-z_][\w!?]*)+[!?]?|\b[a-z]\w*_\w+[!?]?|\b[a-z]+[A-Z]\w*/g)) tokens.add(match[0]);
-  const words = new Set(identifierWords(text).map(singular));
+  const words = identifierWords(text).map(singular);
+  // Every word of a compound symbol must sit close together; words scattered across a sentence do not name it.
+  const namedTogether = (symbolWords: readonly string[]) => words.some((_word, start) => {
+    const near = words.slice(start, start + symbolWords.length + 1);
+    return symbolWords.every((word) => near.includes(word));
+  });
   return units.filter((unit) => {
     if (unit.test) return false;
     const symbol = unit.symbol.replace(/[!?=]$/, "");
@@ -223,7 +230,7 @@ export function linkClaim(text: string, units: readonly GuideUnit[]): string[] {
     }
     if (unit.symbol.startsWith("lines ")) return false;
     const symbolWords = identifierWords(symbol).map(singular);
-    return symbolWords.length >= 2 && symbolWords.every((word) => words.has(word));
+    return symbolWords.length >= 2 && namedTogether(symbolWords);
   }).map((unit) => unit.id);
 }
 
@@ -269,6 +276,16 @@ export function stepGaps(step: Pick<GuideStep, "units" | "priority">, tests: rea
     if (weak != null) gaps.push(`Weak test ${quote(test.name)}: ${weak.message}`);
   }
   return gaps;
+}
+
+/** Every line of the unit's anchors on each side, in line order. */
+function unitBodies(index: SnapshotIndex, unit: StoryUnit): UnitBodies {
+  const sides = { added: new Map<number, string>(), deleted: new Map<number, string>() };
+  for (const anchor of unit.anchors) {
+    for (const line of index.anchorLines(anchor)) sides[anchor.side].set(line.line, line.text);
+  }
+  const ordered = (lines: ReadonlyMap<number, string>) => [...lines].sort(([a], [b]) => a - b).map(([, text]) => text);
+  return { before: ordered(sides.deleted), after: ordered(sides.added) };
 }
 
 function orderSteps(steps: readonly GuideStep[], references: ReadonlyMap<string, ReadonlySet<string>>): GuideStep[] {
@@ -317,7 +334,7 @@ export function buildGuide(input: GuideInput): PreparedGuide {
       anchors: unit.anchors.map((anchor) => ({ ...anchor })),
       ...(root === unit.id ? {} : { root }),
       ...(families.containers.has(unit.id) ? { container: true as const } : {}),
-      ...(unit.test ? {} : { risk: classifyUnitRisk(unit, change.added.map((line) => line.text), change.deleted.map((line) => line.text)) }),
+      ...(unit.test ? {} : { risk: classifyUnitRisk(unit, change.added.map((line) => line.text), change.deleted.map((line) => line.text), unitBodies(index, unit)) }),
     };
   }
   const roots = [...families.members.keys()].map((id) => guideUnits[id]!);
@@ -329,6 +346,16 @@ export function buildGuide(input: GuideInput): PreparedGuide {
   const moduleMocks = new Map<string, TestDouble[]>();
   const profiles: Record<string, TestProfile> = {};
   const familyPair = new Map<string, string>();
+  const fileContexts = new Map<string, TestFileContext>();
+  const fileContext = (path: string, fileId: string, side: StorySide) => {
+    const key = `${side}\u001f${fileId}`;
+    let context = fileContexts.get(key);
+    if (context == null) {
+      context = testFileContext(path, index.lines(fileId, side).join("\n"));
+      fileContexts.set(key, context);
+    }
+    return context;
+  };
   for (const root of roots) {
     const ids = families.members.get(root.id)!;
     const owner = ids.map((id) => pairs.get(id)).find((id): id is string => id != null);
@@ -336,8 +363,8 @@ export function buildGuide(input: GuideInput): PreparedGuide {
     if (!root.test) continue;
     if (!setupDoubles.has(root.path)) {
       const file = snapshot.files.find((entry) => entry.path === root.path);
-      setupDoubles.set(root.path, file == null ? [] : sharedSetupDoubles(file.contents.modifiedContent, changed));
-      moduleMocks.set(root.path, file == null ? [] : fileModuleMocks(file.contents.modifiedContent, changed));
+      setupDoubles.set(root.path, file == null ? [] : sharedSetupDoubles(file.contents.modifiedContent, changed, root.path));
+      moduleMocks.set(root.path, file == null ? [] : fileModuleMocks(file.contents.modifiedContent, changed, root.path));
     }
     const enclosing = families.enclosing.get(root.id);
     const statuses = new Set(membersOf(root.id).map((member) => member.status));
@@ -354,8 +381,10 @@ export function buildGuide(input: GuideInput): PreparedGuide {
         for (const line of index.anchorLines(anchor)) lines.set(line.line, line.text);
       }
     }
+    const rootUnit = unitById.get(root.id)!;
+    const fileId = enclosing?.fileId ?? rootUnit.anchors[0]!.fileId;
     profiles[root.id] = profileTest({
-      unit: unitById.get(root.id)!,
+      unit: rootUnit,
       ...(families.names.has(root.id) ? { name: families.names.get(root.id)! } : {}),
       members: ids,
       isCase: families.cases.has(root.id),
@@ -365,6 +394,8 @@ export function buildGuide(input: GuideInput): PreparedGuide {
       ...(owner == null ? {} : { pairedWith: rootOf(owner) }),
       setupDoubles: setupDoubles.get(root.path),
       fileMocks: moduleMocks.get(root.path),
+      file: fileContext(root.path, fileId, side),
+      literalLines: index.literalLines(fileId, side),
     });
     profiles[root.id]!.targets = unique(profiles[root.id]!.targets.map(rootOf));
   }

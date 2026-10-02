@@ -51,6 +51,8 @@ interface SignalRule {
   label: string;
   priority: Exclude<ValidationPriority, "minor">;
   ordering?: boolean;
+  /** The rule applies only to files whose path matches. */
+  files?: RegExp;
   path?: RegExp;
   pattern?: RegExp;
   words?: readonly string[];
@@ -59,11 +61,16 @@ interface SignalRule {
 
 const INSTRUCTION_PATH = /(?:^|\/)(?:prompts?|skills?|agents?)\/(?:[^/]+\/)*[^/]+\.md$|(?:^|\/)(?:SKILL|AGENTS|CLAUDE)\.md$/i;
 
+const DEPENDENCY_PATH = /(?:^|\/)(?:package\.json|Gemfile|[^/]+\.gemspec|requirements(?:-\w+)?\.txt|pyproject\.toml|Cargo\.toml|go\.mod|Podfile)$/;
+const RUBY_FILE = /\.(?:rb|rake|ru|gemspec)$/;
+const INDENT_SIGNIFICANT = /\.(?:py|pyi|ya?ml|haml|slim|pug|sass|coffee)$|(?:^|\/)Makefile$/;
+const HASH_COMMENT_FILE = /\.(?:rb|rake|gemspec|ru|py|pyi|sh|bash|zsh|fish|ps1|ya?ml|toml|ini|cfg|conf|properties|env|r|pl|pm|tf|exs?|coffee|cr|jl)$|(?:^|\/)(?:Gemfile|Rakefile|Makefile|Dockerfile|Procfile|Brewfile|Podfile|\.gitignore)$/i;
+
 const MINOR_PATHS: readonly PathRule[] = [
   { category: "lockfile", label: "dependency lockfile", path: /(?:^|\/)(?:Gemfile\.lock|pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|bun\.lockb?|Cargo\.lock|go\.sum|composer\.lock|poetry\.lock|Podfile\.lock|mix\.lock)$/ },
   { category: "snapshot", label: "generated snapshot", path: /(?:^|\/)__snapshots__\/|\.snap$/ },
-  { category: "copy", label: "translation copy", path: /(?:^|\/)(?:locales?|i18n|translations?)\// },
-  { category: "documentation", label: "documentation", path: /\.(?:md|mdx|markdown|txt|rst|adoc)$|(?:^|\/)(?:docs?|documentation)\/|(?:^|\/)(?:CHANGELOG|README|LICENSE|NOTICE|CONTRIBUTING|CODEOWNERS)(?:\.[^/]*)?$/i },
+  { category: "copy", label: "translation copy", path: /(?:^|\/)(?:locales?|i18n|translations?)\/(?:.*\/)?[^/]+\.(?:ya?ml|json|pot?|properties|xlf|xliff|strings|stringsdict|arb|resx|toml|csv)$/ },
+  { category: "documentation", label: "documentation", path: /\.(?:md|mdx|markdown|txt|rst|adoc)$|(?:^|\/)(?:docs?|documentation)\/(?:.*\/)?[^/]+\.(?:md|mdx|markdown|txt|rst|adoc|html?)$|(?:^|\/)(?:CHANGELOG|README|LICENSE|NOTICE|CONTRIBUTING|CODEOWNERS)(?:\.[^/]*)?$/i },
 ];
 
 const SIGNALS: readonly SignalRule[] = [
@@ -97,7 +104,7 @@ const SIGNALS: readonly SignalRule[] = [
     category: "security",
     label: "injection sink or subprocess",
     priority: "critical",
-    pattern: /dangerouslySetInnerHTML|\.html_safe\b|\braw\(|\b(?:instance|class|module)_eval\b|\beval\s*\(|\bconstantize\b|\bOpen3\.|\bsystem\s*\(|\bexec(?:File)?(?:Sync)?\s*\(|\bspawn(?:Sync)?\s*\(|child_process|`[^`\n]*#\{/,
+    pattern: /dangerouslySetInnerHTML|\.html_safe\b|\braw\(|\b(?:instance|class|module)_eval\b|\beval\s*\(|\bconstantize\b|\bOpen3\.|(?<![\w.])system\s*\(|\bKernel\.system\b|(?:(?<![\w.])|\b(?:child_process|cp|childProcess)\.)(?:exec|execFile|spawn)(?:Sync)?\s*\(|child_process|`[^`\n]*#\{/,
   },
   {
     category: "escaping",
@@ -122,7 +129,14 @@ const SIGNALS: readonly SignalRule[] = [
     category: "destructive",
     label: "deletes or bulk-writes data",
     priority: "critical",
-    pattern: /\b(?:destroy_all|delete_all|update_all|update_columns?|insert_all!?|upsert_all|truncate|really_destroy!?|purge(?:_later)?)\b|\bDELETE\s+FROM\b|\bUPDATE\s+[`"\w.]+\s+SET\b|\bDROP\s+(?:TABLE|COLUMN|INDEX)\b|\b(?:rm|rmdir|unlink)(?:Sync)?\s*\(|\brm_rf\b|\.destroy!?(?:\b|\()/i,
+    pattern: /\btruncate\b|\bDELETE\s+FROM\b|\bUPDATE\s+[`"\w.]+\s+SET\b|\bDROP\s+(?:TABLE|COLUMN|INDEX)\b|\b(?:rm|rmdir|unlink)(?:Sync)?\s*\(|\brm_rf\b/i,
+  },
+  {
+    category: "destructive",
+    label: "deletes or bulk-writes data",
+    priority: "critical",
+    files: RUBY_FILE,
+    pattern: /\b(?:destroy_all|delete_all|update_all|update_columns?|insert_all!?|upsert_all|really_destroy!?|purge(?:_later)?)\b|\.destroy!?(?:\b|\()/i,
   },
   {
     category: "ordering",
@@ -158,7 +172,7 @@ const SIGNALS: readonly SignalRule[] = [
     category: "dependency",
     label: "dependency manifest",
     priority: "needed",
-    path: /(?:^|\/)(?:package\.json|Gemfile|[^/]+\.gemspec|requirements(?:-\w+)?\.txt|pyproject\.toml|Cargo\.toml|go\.mod|Podfile)$/,
+    path: DEPENDENCY_PATH,
   },
 ];
 
@@ -169,14 +183,16 @@ const STATE_WRITE = /\b(?:writeFile|rename|appendFile|unlink)(?:Sync)?\s*\(|\.(?
 function writesState(path: string, text: string): boolean {
   return (path.endsWith(".rb") && RUBY_STATE_WRITE.test(text)) || STATE_WRITE.test(text);
 }
-const COMMENT_LINE = /^\s*(?:#(?!\{)|\/\/|\/\*|\*|<!--|-->|--\s|;;)/;
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*(?:\s|\/|$)|<!--|-->|--\s|;;)/;
+const HASH_LINE = /^\s*#(?!\{)/;
 const IMPORT_LINE = /^\s*(?:import[\s({]|export\s+(?:\*|\{[^}]*\})\s+from\s|(?:const|let|var)\s+[\w${},\s]+=\s*require\(|require(?:_relative)?[\s(]|from\s+[\w.]+\s+import\s|using\s+[\w.]+;\s*$|@import\s)/;
 
 export function isImportLine(line: string): boolean {
   return IMPORT_LINE.test(line);
 }
 
-export function isCommentLine(line: string): boolean {
+export function isCommentLine(line: string, path = ""): boolean {
+  if (HASH_LINE.test(line)) return HASH_COMMENT_FILE.test(path);
   return COMMENT_LINE.test(line);
 }
 
@@ -190,24 +206,33 @@ const MECHANICAL_LABELS = {
 /** Reasons that only minimize a unit; they read as noise beside a reason to verify it. */
 export const MINOR_REASONS: ReadonlySet<string> = new Set([...MINOR_PATHS.map((rule) => rule.label), ...Object.values(MECHANICAL_LABELS)]);
 
-function mechanicalChange(added: readonly string[], deleted: readonly string[]): { category: RiskCategory; label: string } | undefined {
+/** Every line of a unit's declaration on each side, in line order. */
+export interface UnitBodies {
+  before: readonly string[];
+  after: readonly string[];
+}
+
+function mechanicalChange(path: string, added: readonly string[], deleted: readonly string[], bodies?: UnitBodies): { category: RiskCategory; label: string } | undefined {
   const all = [...added, ...deleted];
   if (all.length === 0) return undefined;
   const squash = (lines: readonly string[]) => lines.join("").replace(/\s+/g, "");
   // Changed-line snippets cannot establish literal boundaries; keep quoted edits visible.
   const hasQuotes = all.some((line) => /["'`]/.test(line));
-  if (!hasQuotes && added.length > 0 && deleted.length > 0 && squash(added) === squash(deleted)) {
+  // A move keeps every changed line and only reorders them, so compare whole bodies, not pooled changed lines.
+  const sameTokens = squash(bodies?.after ?? added) === squash(bodies?.before ?? deleted);
+  if (!hasQuotes && !INDENT_SIGNIFICANT.test(path) && added.length > 0 && deleted.length > 0 && sameTokens) {
     return { category: "formatting", label: MECHANICAL_LABELS.whitespace };
   }
   const meaningful = all.filter((line) => line.trim().length > 0);
   if (meaningful.length === 0) return { category: "formatting", label: MECHANICAL_LABELS.blank };
-  if (meaningful.every((line) => COMMENT_LINE.test(line))) return { category: "comments", label: MECHANICAL_LABELS.comments };
-  if (meaningful.every((line) => COMMENT_LINE.test(line) || IMPORT_LINE.test(line))) return { category: "imports", label: MECHANICAL_LABELS.imports };
+  if (meaningful.every((line) => isCommentLine(line, path))) return { category: "comments", label: MECHANICAL_LABELS.comments };
+  if (meaningful.every((line) => isCommentLine(line, path) || IMPORT_LINE.test(line))) return { category: "imports", label: MECHANICAL_LABELS.imports };
   return undefined;
 }
 
 function matchedTerms(rule: SignalRule, path: string, text: string, words: ReadonlySet<string>, phrases: ReadonlySet<string>): string[] {
   const terms: string[] = [];
+  if (rule.files != null && !rule.files.test(path)) return [];
   const pathMatch = rule.path?.exec(path);
   if (pathMatch != null) terms.push(pathMatch[0].replace(/^\/|[/_.-]$/g, ""));
   const patternMatch = rule.pattern?.exec(text);
@@ -222,12 +247,12 @@ function matchedTerms(rule: SignalRule, path: string, text: string, words: Reado
  * mechanical rules minimize docs, lockfiles and comment/import/whitespace edits; signal rules
  * raise money, access, data, migration and order-of-steps changes. Reasons name the matched terms.
  */
-export function classifyUnitRisk(unit: { path: string; symbol: string }, added: readonly string[], deleted: readonly string[]): UnitRisk {
+export function classifyUnitRisk(unit: { path: string; symbol: string }, added: readonly string[], deleted: readonly string[], bodies?: UnitBodies): UnitRisk {
   const instructions = INSTRUCTION_PATH.test(unit.path);
   if (!instructions) {
-    const minorPath = MINOR_PATHS.find((rule) => rule.path.test(unit.path));
+    const minorPath = DEPENDENCY_PATH.test(unit.path) ? undefined : MINOR_PATHS.find((rule) => rule.path.test(unit.path));
     if (minorPath != null) return { priority: "minor", categories: [minorPath.category], reasons: [minorPath.label], ordering: false };
-    const mechanical = mechanicalChange(added, deleted);
+    const mechanical = mechanicalChange(unit.path, added, deleted, bodies);
     if (mechanical != null) return { priority: "minor", categories: [mechanical.category], reasons: [mechanical.label], ordering: false };
   }
   const text = [...added, ...deleted].join("\n");
