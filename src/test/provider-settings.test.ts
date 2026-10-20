@@ -172,6 +172,26 @@ describe("provider settings", () => {
     expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: { ...code, command: ["code-open", "{file}"] } })).toThrow(/command.*file/i);
   });
 
+  it("accepts https file and search link templates with their placeholders only", () => {
+    const settings = neutralSettings();
+    const file = "https://code.example/{repo}/blob/{revision}/{path}#L{line}";
+    const search = "https://search.example/results?q=sym:{query}";
+    const withLinks = {
+      ...settings,
+      search,
+      providers: { primary: { ...settings.providers.primary, urls: { ...settings.providers.primary.urls, file } } },
+    };
+    const parsed = parsePiCodeDiffSettings(withLinks);
+    expect(parsed.search).toBe(search);
+    expect(parsed.providers.primary!.urls.file).toBe(file);
+    expect(parsePiCodeDiffSettings(settings).search).toBeUndefined();
+
+    expect(() => parsePiCodeDiffSettings({ ...withLinks, search: "http://search.example/?q={query}" })).toThrow("settings.search must use https.");
+    expect(() => parsePiCodeDiffSettings({ ...withLinks, search: "https://search.example/?q={number}" })).toThrow("settings.search supports only {query}.");
+    const badFile = { ...withLinks, providers: { primary: { ...withLinks.providers.primary, urls: { ...withLinks.providers.primary.urls, file: "https://code.example/{repo}/{branch}" } } } };
+    expect(() => parsePiCodeDiffSettings(badFile)).toThrow("providers.primary.urls.file supports only {repo}, {revision}, {path}, {line}.");
+  });
+
   it("rejects unknown fields and malformed provider values", () => {
     expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), extra: true })).toThrow("settings has unsupported fields: extra.");
     expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), version: 2 })).toThrow("Settings version must be 1.");

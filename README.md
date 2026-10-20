@@ -145,6 +145,9 @@ Common review controls:
 | Arrow keys | Navigate files and changed diff lines by default |
 | `Option`/`Alt` + `↑` / `↓` / `PgUp` / `PgDn` / `Home` / `End` | Reach any code line, revealing collapsed context as needed; add `Shift` to select a range |
 | `c` / `d` | Add a comment / discussion |
+| Mouse drag | Select text and copy it when you release. In a diff, the copy holds only code, without line numbers, `+`/`-` signs, or the other side. Double-click selects a word and triple-click a line. |
+| `gf` | Open the selected line on the code host at the reviewed commit. Needs a pull request review and the provider's `urls.file` setting. |
+| `gd` or Ctrl+click | Search for where the double-clicked or Ctrl+clicked symbol is defined. Needs the `search` setting. |
 | `Enter` or `m` | Edit the selected line |
 | `v` | Toggle unified and side-by-side views; from an opened PR thread, jump to its verified code location |
 | `s` | Finish the review |

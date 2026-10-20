@@ -52,6 +52,7 @@
     "src/sanitize.ts",
     "src/search.ts",
     "src/seed-comments.ts",
+    "src/source-links.ts",
     "src/shortcuts.ts",
     "src/state.ts",
     "src/syntax-highlight.ts",

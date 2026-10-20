@@ -919,7 +919,7 @@ describe("ReviewApp interaction", () => {
       await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
       const rendered = app.render(120);
       const { diff, navigator } = (app as any).mousePaneLayout;
-      expect(terminal.write).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
+      expect(terminal.write).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
       input(`\x1b[<65;${diff.left + 2};${diff.top + 2}M`);
       app.render(120);
       expect((app as any).diffScroll).toBe(1);
@@ -931,14 +931,14 @@ describe("ReviewApp interaction", () => {
       app.dispose();
       tui.stop();
     }
-    expect(terminal.write).toHaveBeenCalledWith("\x1b[?1006l\x1b[?1000l");
+    expect(terminal.write).toHaveBeenCalledWith("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
   });
 
   it("saves unfinished typing and releases regular-mode mouse input when disposed", async () => {
     const onCompositionSave = vi.fn(() => true);
     const { app, loadFileContents, terminalWrite } = createHarness(undefined, undefined, { onCompositionSave });
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
-    expect(terminalWrite).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1006h");
+    expect(terminalWrite).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
     app.handleInput("\r");
     app.handleInput("c");
     app.handleInput("unfinished feedback");
@@ -948,7 +948,7 @@ describe("ReviewApp interaction", () => {
 
     expect(onCompositionSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text: "unfinished feedback" }));
     expect(terminalWrite.mock.calls).toEqual([
-      ["\x1b[?1000h\x1b[?1006h"], ["\x1b[?1006l\x1b[?1000l"],
+      ["\x1b[?1000h\x1b[?1002h\x1b[?1006h"], ["\x1b[?1006l\x1b[?1002l\x1b[?1000l"],
     ]);
   });
 
