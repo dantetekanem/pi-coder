@@ -544,3 +544,22 @@ export function getCommentableVisibleLines(diff: StructuredDiff): number[] {
 export function getFirstCommentableLine(diff: StructuredDiff): number | null {
   return getCommentableVisibleLines(diff)[0] ?? null;
 }
+
+/** Line numbers each side shows in the diff; code hosts accept line comments only on these lines. */
+export function getVisibleSideLines(diff: StructuredDiff): Record<"added" | "deleted", Set<number>> {
+  const lines = { added: new Set<number>(), deleted: new Set<number>() };
+  for (const item of diff.visibleItems) {
+    if (item.type !== "row") continue;
+    if (item.row.newLineNumber != null) lines.added.add(item.row.newLineNumber);
+    if (item.row.oldLineNumber != null) lines.deleted.add(item.row.oldLineNumber);
+  }
+  return lines;
+}
+
+export function isVisibleLineRange(lines: ReadonlySet<number>, startLine: number, endLine: number): boolean {
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) return false;
+  for (let line = startLine; line <= endLine; line += 1) {
+    if (!lines.has(line)) return false;
+  }
+  return true;
+}

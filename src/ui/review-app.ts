@@ -16,8 +16,6 @@ import {
   getScopedFiles,
   getSelectedLineTarget,
   hasDraftContent,
-  hasSubmittableDraftContent,
-  isSubmittableComment,
   moveSelectedCommentIndex,
   moveSelectedLineTarget,
   setActiveFileId,
@@ -3562,28 +3560,17 @@ export class ReviewApp {
   }
 
   private submit(): void {
-    if (!hasSubmittableDraftContent(this.state)) {
-      if (hasDraftContent(this.state)) {
-        this.setMessage("This draft contains only unresolved or stale items. Reanchor or remove them before submitting.");
-        this.requestRender();
-        return;
-      }
-      if (this.options.allowEmptySubmit !== true) {
-        this.setMessage("Add at least one line comment, file/all-lines comment, or review-wide note before submitting.");
-        this.requestRender();
-        return;
-      }
+    if (!hasDraftContent(this.state) && this.options.allowEmptySubmit !== true) {
+      this.setMessage("Add at least one line comment, file/all-lines comment, or review-wide note before submitting.");
+      this.requestRender();
+      return;
     }
     if (!this.persistSession()) {
       this.setMessage("Could not save the full review draft. The review remains open; retry submission after persistence recovers.");
       this.requestRender();
       return;
     }
-    this.done({
-      type: "submit",
-      ...this.state.draft,
-      comments: this.state.draft.comments.filter(isSubmittableComment),
-    });
+    this.done({ type: "submit", ...this.state.draft });
   }
 
   private cancel(disposition: ReviewExitDisposition): void {

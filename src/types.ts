@@ -151,7 +151,7 @@ export interface DiffReviewComment {
   originalText?: string;
   /** Capture-time source hash for line/range drafts. File drafts do not require one. */
   captureHash?: ReviewAnchorHash;
-  /** Unresolved drafts remain visible but are not submittable. */
+  /** Stale drafts still submit: on their lines when the diff shows them with the captured bytes, otherwise as file comments. */
   anchorStatus?: ReviewAnchorStatus;
 }
 
