@@ -567,6 +567,30 @@ describe("rebasing a parked review onto a new head", () => {
     expect(comments.some((comment) => comment.body.includes("Why was this added?"))).toBe(false);
   });
 
+  it("keeps capture hashes and anchor status only on files whose content is unchanged", () => {
+    const captureHash = { algorithm: "sha256" as const, value: "a".repeat(64) };
+    const mapped = (id: string, path: string, line: number, anchorStatus: "mapped" | "stale" = "mapped"): DiffReviewComment => ({
+      id, fileId: `${path}::working::${path}::::`, scope: "git-diff", side: "added", intent: "comment",
+      startLine: line, endLine: line, body: `${id} note`, captureHash, anchorStatus,
+    });
+    const previousFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 1)];
+    const comments = [mapped("same", "src/app.ts", 4), mapped("same-stale", "src/app.ts", 9, "stale"), mapped("changed", "src/api.ts", 7)];
+    const session = {
+      ...sessionData({ state: { ...state(comments), draft: { allComment: "", allIntent: "discuss", comments } } }),
+      id: "rebase", identity: "pr|github|example/widgets|1", generation: 1, updatedAt: new Date().toISOString(),
+      revision: "1111111111111111111111111111111111111111", fileSignatures: buildReviewFileSignatures(previousFiles),
+    } as PersistedReviewSession;
+    const nextFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 6)];
+
+    const rebased = rebaseReviewSession(session, nextFiles, ["git-diff"], buildReviewFileSignatures(nextFiles)).data.state.draft.comments;
+
+    expect(rebased.find((comment) => comment.startLine === 4)).toMatchObject({ captureHash, anchorStatus: "mapped" });
+    expect(rebased.find((comment) => comment.startLine === 9)).toMatchObject({ captureHash, anchorStatus: "stale" });
+    const changed = rebased.find((comment) => comment.startLine === 7)!;
+    expect(changed.captureHash).toBeUndefined();
+    expect(changed.anchorStatus).toBe("stale");
+  });
+
   it("marks same-stat content changes instead of preserving stale anchors", () => {
     const session = parkedSession();
     const nextFiles = [

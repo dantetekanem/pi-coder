@@ -389,14 +389,6 @@ export function moveSelectedCommentIndex(state: ReviewState, totalItems: number,
   return { ...state, selectedCommentIndex: nextIndex };
 }
 
-export function isSubmittableComment(comment: DiffReviewComment): boolean {
-  return comment.side === "file" || comment.anchorStatus === "mapped";
-}
-
 export function hasDraftContent(state: ReviewState): boolean {
   return state.draft.allComment.trim().length > 0 || state.draft.comments.length > 0;
-}
-
-export function hasSubmittableDraftContent(state: ReviewState): boolean {
-  return state.draft.allComment.trim().length > 0 || state.draft.comments.some(isSubmittableComment);
 }
