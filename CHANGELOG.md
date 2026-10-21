@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3 - 2026-10-20
+
+### Fixed
+
+- Disable `gf` inside submodules with an explanatory message instead of opening a parent-repository URL for a child file. Links work again after returning to the parent review.
+
+## 0.9.2 - 2026-10-20
+
+### Added
+
+- Select text with the mouse in `/diff` and `/diff-story`, and copy it when you release. A selection in a diff copies the exact source code, with tabs, and leaves out line numbers, `+`/`-` signs, and the other side of a side-by-side view. It continues across wrapped and truncated lines, and the diff scrolls while you drag past its edge. Double-click selects a word and triple-click a line. Drags in other panes copy that pane's text without its borders. Clicks, wheel scrolling, and keyboard controls work as before.
+- Open the selected line on the code host with `gf`, at the reviewed pull request's exact commit. Search for a symbol's definition with `gd` after double-clicking it, or Ctrl+click the symbol. Both are off until their URL templates are set: `urls.file` on the provider and top-level `search`.
+
 ## 0.9.1 - 2026-09-27
 
 ### Added

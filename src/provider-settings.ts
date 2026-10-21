@@ -13,6 +13,7 @@ export interface ProviderUrlSettings {
   patterns: ProviderUrlPattern[];
   canonical: string;
   clone?: string;
+  file?: string;
 }
 
 export interface ProviderOperationSettings {
@@ -46,6 +47,7 @@ export interface CodeCommandSettings {
 export interface PiCodeDiffSettings {
   version: typeof PI_CODE_DIFF_SETTINGS_VERSION;
   code?: CodeCommandSettings;
+  search?: string;
   providers: Record<string, ProviderSettings>;
   repositories: Record<string, RepositoryProfileSettings>;
 }
@@ -198,16 +200,27 @@ function readUrlPattern(value: unknown, context: string): ProviderUrlPattern {
   return { host, path };
 }
 
+function readUrlTemplate(value: unknown, context: string, placeholders: readonly string[]): string {
+  const template = readNonEmptyString(value, context);
+  if (!template.startsWith("https://")) throw new Error(`${context} must use https.`);
+  const names = [...template.matchAll(/\{([^{}]*)\}/g)].map((match) => match[1]!);
+  if (names.some((name) => !placeholders.includes(name)) || /[{}]/.test(template.replace(/\{[^{}]*\}/g, ""))) {
+    throw new Error(`${context} supports only ${placeholders.map((name) => `{${name}}`).join(", ")}.`);
+  }
+  return template;
+}
+
 function readUrlSettings(value: unknown, context: string): ProviderUrlSettings {
   if (!isRecord(value)) throw new Error(`${context} must be an object.`);
-  rejectUnknownKeys(value, ["patterns", "canonical", "clone"], context);
+  rejectUnknownKeys(value, ["patterns", "canonical", "clone", "file"], context);
   if (!Array.isArray(value.patterns) || value.patterns.length === 0) throw new Error(`${context}.patterns must be a non-empty array.`);
   const patterns = value.patterns.map((entry, index) => readUrlPattern(entry, `${context}.patterns[${index}]`));
   const canonical = readNonEmptyString(value.canonical, `${context}.canonical`);
   if (!canonical.startsWith("https://")) throw new Error(`${context}.canonical must use https.`);
   const clone = value.clone == null ? undefined : readNonEmptyString(value.clone, `${context}.clone`);
   if (clone != null && !clone.startsWith("https://")) throw new Error(`${context}.clone must use https.`);
-  return { patterns, canonical, ...(clone == null ? {} : { clone }) };
+  const file = value.file == null ? undefined : readUrlTemplate(value.file, `${context}.file`, ["repo", "revision", "path", "line"]);
+  return { patterns, canonical, ...(clone == null ? {} : { clone }), ...(file == null ? {} : { file }) };
 }
 
 function readOperation(value: unknown, context: string): ProviderOperationSettings {
@@ -303,15 +316,22 @@ function readCodeSettings(value: unknown): CodeCommandSettings | undefined {
 
 export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
-  rejectUnknownKeys(value, ["version", "code", "providers", "repositories"], "settings");
+  rejectUnknownKeys(value, ["version", "code", "search", "providers", "repositories"], "settings");
   if (value.version !== undefined && value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
   const code = readCodeSettings(value.code);
+  const search = value.search == null ? undefined : readUrlTemplate(value.search, "settings.search", ["query"]);
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
   const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
-  return withBuiltInProviders({ version: PI_CODE_DIFF_SETTINGS_VERSION, ...(code == null ? {} : { code }), providers, repositories });
+  return withBuiltInProviders({
+    version: PI_CODE_DIFF_SETTINGS_VERSION,
+    ...(code == null ? {} : { code }),
+    ...(search == null ? {} : { search }),
+    providers,
+    repositories,
+  });
 }
 
 export function getPiCodeDiffSettingsPath(): string {

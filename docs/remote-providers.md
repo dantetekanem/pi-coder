@@ -13,6 +13,7 @@ Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings 
 ```json
 {
   "version": 1,
+  "search": "https://search.example/results?q=sym:{query}",
   "providers": {
     "secondary": {
       "label": "Secondary code host",
@@ -22,7 +23,8 @@ Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings 
           { "host": "code.example", "path": "/{repo}/change/{number}" }
         ],
         "canonical": "https://code.example/{repo}/change/{number}",
-        "clone": "https://code.example/{repo}.git"
+        "clone": "https://code.example/{repo}.git",
+        "file": "https://code.example/{repo}/blob/{revision}/{path}#L{line}"
       },
       "operations": {
         "pullRequest": { "args": ["change", "show", "{repo}", "{number}"] },
@@ -71,6 +73,11 @@ Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings 
   }
 }
 ```
+
+Two optional link templates open code in the browser. Both must use https, and pi-coder URL-encodes every value it fills in.
+
+- `urls.file` lets `gf` open the selected line of a pull request review on the code host. It accepts `{repo}`, `{revision}`, `{path}`, and `{line}`. The revision is the pull request head commit, or the base commit for a deleted line.
+- Top-level `search` lets `gd` and Ctrl+click search for a symbol's definition. `{query}` is the double-clicked or Ctrl+clicked word. Put any search syntax, such as `sym:`, in the template. The browser opener refuses `&`, so join extra search terms with `+` inside the query instead of adding parameters.
 
 `pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`.
 

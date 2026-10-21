@@ -50,6 +50,16 @@ import { ExactTextEditor } from "./exact-text-editor.js";
 import { restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
 import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
 import { edgeToEdgeOverlayOptions, fullScreenOverlayOptions } from "./full-screen-overlay.js";
+import { layoutCodeLines, parseSgrMouseInput, stripTerminalSequences, type CodeRowText } from "./mouse-selection.js";
+import type { ReviewSourceLinks } from "../source-links.js";
+import {
+  MouseSelectionController,
+  innerRect,
+  type CodeRowModel,
+  type CodeSelectionSide,
+  type DiffSurface,
+  type DiffSurfaceLine,
+} from "./mouse-selection-controller.js";
 import { hashTargetSlice, logicalLineCount } from "../workbench/target.js";
 import { validateReviewDraftAnchor } from "../adapters/pi/review-bridge.js";
 
@@ -132,6 +142,7 @@ interface ReviewAppOptions {
   story?: { plan: DiffStory; snapshot: StorySnapshot };
   orderSignals?: ReviewOrderSignals;
   reviewHeader?: ReviewHeaderInfo;
+  sourceLinks?: ReviewSourceLinks;
   initialSession?: ReviewSessionData;
   onSessionChange?: (data: ReviewSessionData) => boolean | void;
   initialComposition?: ReviewComposition;
@@ -170,6 +181,22 @@ interface MousePaneLayout {
   replies: MousePaneBounds | null;
 }
 
+interface DiffPaneOrigin {
+  row: number;
+  col: number;
+  member: StoryMember | null;
+}
+
+interface ReviewDiffSurface extends DiffSurface {
+  fileId: string;
+  scope: ReviewScope;
+  rows: readonly DisplayRow[] | readonly SideBySideDisplayRow[];
+  paneWidth: number;
+  language: string | undefined;
+  lineComments: Map<string, DiffReviewComment>;
+}
+
+const COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const SEARCHABLE_SCOPES: ReviewScope[] = ["git-diff", "last-commit", "all-files"];
 const DEFAULT_VISIBLE_SCOPES: ReviewScope[] = ["git-diff", "last-commit"];
 const DEFAULT_CONTEXT_LINES = 3;
@@ -1585,6 +1612,20 @@ export class ReviewApp {
   private mousePaneLayout: MousePaneLayout | null = null;
   private readonly navigatorFileRows = new Map<number, string>();
   private ownsMouseReporting = false;
+  private readonly mouseSelection = new MouseSelectionController<ReviewDiffSurface>({
+    codeRow: (surface, rowIndex, side) => this.getCodeRowModel(surface, rowIndex, side),
+    rowText: (surface, rowIndex, side) => this.selectionRow(surface, rowIndex, side)?.text ?? null,
+    copyRows: (surface, side) => this.selectionCopyRows(surface, side),
+    copy: (text, label) => {
+      this.lastSelectedText = text;
+      this.copyText(text, label);
+    },
+    openSymbol: (symbol) => this.openDefinitionSearch(symbol),
+    render: () => this.requestRender(false),
+    scrollDiff: (delta) => this.scrollDiffBy(delta),
+  });
+  private lastSelectedText: string | null = null;
+  private codeRowModels = new WeakMap<object, Map<string, CodeRowModel | null>>();
   private lastWidth = 120;
   private diffActionHintCache: { width: number; line: string } | null = null;
   private pendingVimSequence: "g" | null = null;
@@ -1683,16 +1724,17 @@ export class ReviewApp {
     });
     if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
       this.ownsMouseReporting = true;
-      this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
+      this.tui.terminal.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
     }
   }
 
   dispose(): void {
     this.disposed = true;
+    this.mouseSelection.dispose();
     this.flushComposition();
     if (this.ownsMouseReporting) {
       this.ownsMouseReporting = false;
-      this.tui.terminal.write("\x1b[?1006l\x1b[?1000l");
+      this.tui.terminal.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
     }
     if (this.sessionSaveTimer != null) {
       clearTimeout(this.sessionSaveTimer);
@@ -1708,6 +1750,7 @@ export class ReviewApp {
     this.syntaxLineCache.clear();
     this.diffLayoutCache.clear();
     this.diffActionHintCache = null;
+    this.codeRowModels = new WeakMap();
   }
 
   private syncCursorMode(): void {
@@ -2123,6 +2166,23 @@ export class ReviewApp {
     return highlighted;
   }
 
+  private buildUnifiedRowContent(row: DisplayRow, language: string | undefined, isCurrent: boolean, lineComment: DiffReviewComment | undefined): { contentText: string; code: string; tone: DiffTone } {
+    if (row.kind === "gap") {
+      return { contentText: this.theme.fg("muted", centerText(row.codeText, Math.max(row.codeText.length + 2, 10))), code: "", tone: "context" };
+    }
+    const tone: DiffTone = row.kind === "added" ? "added" : row.kind === "removed" ? "removed" : "context";
+    const lineLabel = row.displayLineNumber == null ? "    " : String(row.displayLineNumber).padStart(4, " ");
+    const gutterLine = this.theme.fg(this.renderingStoryAnchor != null && isCurrent ? "accent" : "borderMuted", lineLabel);
+    const gutterSign = row.sign === "+"
+      ? this.theme.fg("success", row.sign)
+      : row.sign === "-"
+        ? this.theme.fg("error", row.sign)
+        : this.theme.fg("toolDiffContext", row.sign);
+    const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
+    const code = this.getCachedHighlightedCode(tone, row.codeText, language);
+    return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code, tone };
+  }
+
   private buildUnifiedRowLines(
     row: DisplayRow,
     width: number,
@@ -2133,24 +2193,7 @@ export class ReviewApp {
     lineComment: DiffReviewComment | undefined,
     measureOnly = false,
   ): string[] {
-    let contentText: string;
-    let tone: DiffTone = "context";
-    if (row.kind === "gap") {
-      contentText = this.theme.fg("muted", centerText(row.codeText, Math.max(row.codeText.length + 2, 10)));
-    } else {
-      tone = row.kind === "added" ? "added" : row.kind === "removed" ? "removed" : "context";
-      const lineLabel = row.displayLineNumber == null ? "    " : String(row.displayLineNumber).padStart(4, " ");
-      const gutterLine = this.theme.fg(this.renderingStoryAnchor != null && isCurrent ? "accent" : "borderMuted", lineLabel);
-      const gutterSign = row.sign === "+"
-        ? this.theme.fg("success", row.sign)
-        : row.sign === "-"
-          ? this.theme.fg("error", row.sign)
-          : this.theme.fg("toolDiffContext", row.sign);
-      const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
-      const highlightedCode = this.getCachedHighlightedCode(tone, row.codeText, language);
-      contentText = `${gutterLine} ${gutterSign} ${commentIndicator} ${highlightedCode}`;
-    }
-
+    const { contentText, tone } = this.buildUnifiedRowContent(row, language, isCurrent, lineComment);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width - 2), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -3978,6 +4021,42 @@ export class ReviewApp {
     });
   }
 
+  private openSelectedLineSource(): void {
+    const link = this.options.sourceLinks?.file;
+    const file = this.activeFile();
+    const comparison = getScopeComparison(file, this.state.activeScope);
+    const target = getSelectedLineTarget(this.state, file?.id ?? null, this.state.activeScope);
+    let message: string | null = null;
+    if (link == null) message = "gf needs a PR review and urls.file for its provider in pi-code-diff-settings.json.";
+    else if (file == null || comparison == null || target == null) message = "No selected line to open.";
+    else if (file.pathPrefix) message = "gf is unavailable inside submodules because their code host is not configured.";
+    else {
+      const path = target.side === "deleted" ? comparison.oldPath : comparison.newPath;
+      const revision = target.side === "deleted"
+        ? comparison.originalRevision
+        : [this.options.reviewHeader?.revision, comparison.modifiedRevision].find((candidate) => COMMIT_ID_PATTERN.test(candidate ?? ""));
+      if (path == null || revision == null || !COMMIT_ID_PATTERN.test(revision)) message = "This line has no commit on the code host to open.";
+      else {
+        const line = getLineTargetRange(target).startLine;
+        this.openUrlInBrowser(link({ path: joinReviewPath(file.pathPrefix, path), revision, line }), "Code host");
+        return;
+      }
+    }
+    this.setMessage(message);
+    this.requestRender();
+  }
+
+  private openDefinitionSearch(symbol = this.lastSelectedText): void {
+    const link = this.options.sourceLinks?.search;
+    const query = symbol?.trim() ?? "";
+    if (link != null && query.length > 0 && !/\s/.test(query) && /[\p{L}\p{N}_]/u.test(query)) {
+      this.openUrlInBrowser(link(query), "Search");
+      return;
+    }
+    this.setMessage(link == null ? "gd needs \"search\" in pi-code-diff-settings.json." : "Double-click a symbol first, then press gd.");
+    this.requestRender();
+  }
+
   private openPullRequestUrl(): void {
     const url = this.options.contextPanelSource?.url;
     if (url == null || url.trim().length === 0) {
@@ -4145,26 +4224,41 @@ export class ReviewApp {
     screenX?: number;
     screenY?: number;
     wheelDelta?: number;
-  }): { handled: true } | undefined {
+    ctrl?: boolean;
+  }): { handled: true; capture?: true } | undefined {
     const col = (event.screenX ?? event.x) + 1;
     const row = (event.screenY ?? event.y) + 1;
+    const point = { row: row - 1, col: col - 1 };
     if (event.type === "wheel") {
       this.scrollMousePane(col, row, event.wheelDelta ?? 0);
       return { handled: true };
     }
-    if (event.type === "press" && event.button === "left" && this.selectNavigatorAtMouse(col, row)) {
+    if (event.type === "drag" && this.mouseSelection.dragging) {
+      this.mouseSelection.drag(point);
       return { handled: true };
     }
-    return undefined;
+    if (event.type === "release" && this.mouseSelection.dragging) {
+      this.mouseSelection.release(point);
+      return { handled: true };
+    }
+    if (event.type !== "press" || event.button !== "left") return undefined;
+    const selectedFile = this.selectNavigatorAtMouse(col, row);
+    if (this.mouseSelection.press(point, event.ctrl === true)) return { handled: true, capture: true };
+    return selectedFile ? { handled: true } : undefined;
   }
 
   private handleMouseInput(data: string): boolean {
+    const mouse = parseSgrMouseInput(data);
+    if (mouse == null) return false;
     const wheel = parseMouseWheelInput(data);
     if (wheel != null) return this.scrollMousePane(wheel.col, wheel.row, wheel.direction === "down" ? 1 : -1);
-    const mouse = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
-    if (mouse == null) return false;
-    if (mouse[1] === "0" && mouse[4] === "M") {
-      this.selectNavigatorAtMouse(Number(mouse[2]), Number(mouse[3]));
+    if ((mouse.button & 64) !== 0 || (mouse.button & 3) !== 0) return true;
+    const point = { row: mouse.row, col: mouse.col };
+    if (mouse.release) this.mouseSelection.release(point);
+    else if ((mouse.button & 32) !== 0) this.mouseSelection.drag(point);
+    else {
+      this.selectNavigatorAtMouse(mouse.col + 1, mouse.row + 1);
+      this.mouseSelection.press(point, (mouse.button & 16) !== 0);
     }
     return true;
   }
@@ -4188,6 +4282,7 @@ export class ReviewApp {
   }
 
   private scrollMousePane(col: number, row: number, delta: number): boolean {
+    this.mouseSelection.clearScreenSelection();
     if (delta === 0 || this.mouseNavigationBlocked()) return true;
     const pane = this.getPaneAtMousePosition(col, row);
     if (pane == null) return true;
@@ -4221,6 +4316,89 @@ export class ReviewApp {
     }
 
     return true;
+  }
+
+  private scrollDiffBy(delta: number): boolean {
+    const next = Math.max(0, Math.min(this.diffMaxScroll, this.diffScroll + delta));
+    if (next === this.diffScroll) return false;
+    this.diffWheelScrolling = true;
+    this.diffScroll = next;
+    return true;
+  }
+
+  private selectionRow(surface: ReviewDiffSurface, rowIndex: number, side: CodeSelectionSide): { text: string; side: ReviewLineTarget["side"] | null; line: number | null } | null {
+    if (surface.mode === "unified") {
+      const entry = (surface.rows as readonly DisplayRow[])[rowIndex];
+      return entry == null || entry.kind === "gap" ? null : { text: entry.codeText, side: entry.commentSide, line: entry.commentLineNumber };
+    }
+    const entry = (surface.rows as readonly SideBySideDisplayRow[])[rowIndex];
+    const cell = side === "deleted" ? entry?.oldCell : entry?.newCell;
+    return cell == null ? null : { text: cell.text, side: cell.side, line: cell.lineNumber };
+  }
+
+  private selectionCopyRows(surface: ReviewDiffSurface, side: CodeSelectionSide): (rowIndex: number) => CodeRowText | null {
+    const sourceLine = this.sourceLineReader(surface.fileId, surface.scope);
+    return (rowIndex) => {
+      const entry = this.selectionRow(surface, rowIndex, side);
+      if (entry == null) return null;
+      return { text: entry.text, source: entry.side == null || entry.line == null ? undefined : sourceLine(entry.side, entry.line) };
+    };
+  }
+
+  private sourceLineReader(fileId: string, scope: ReviewScope): (side: ReviewLineTarget["side"], line: number) => string | undefined {
+    const linesBySide = new Map<ReviewLineTarget["side"], string[]>();
+    return (side, line) => {
+      let lines = linesBySide.get(side);
+      if (lines == null) {
+        lines = this.getSourceContent(fileId, scope, side).split(/\r\n|\n|\r/);
+        linesBySide.set(side, lines);
+      }
+      return lines[line - 1];
+    };
+  }
+
+  private getCodeRowModel(surface: ReviewDiffSurface, rowIndex: number, side: CodeSelectionSide): CodeRowModel | null {
+    const wrap = this.state.wrapLines ? 1 : 0;
+    if (surface.mode === "unified") {
+      const row = (surface.rows as readonly DisplayRow[])[rowIndex];
+      if (row == null || row.kind === "gap") return null;
+      const lineComment = row.commentLineNumber == null || row.commentSide == null
+        ? undefined
+        : surface.lineComments.get(`${row.commentSide}:${row.commentLineNumber}`);
+      return this.cachedCodeRowModel(row, `${surface.paneWidth}:${wrap}:${lineComment?.intent ?? "-"}`, row.codeText, () => ({
+        content: this.buildUnifiedRowContent(row, surface.language, false, lineComment),
+        visual: this.buildUnifiedRowLines(row, surface.paneWidth, surface.language, false, false, false, lineComment, true),
+      }));
+    }
+    const row = (surface.rows as readonly SideBySideDisplayRow[])[rowIndex];
+    const cell = side === "deleted" ? row?.oldCell : row?.newCell;
+    if (cell == null) return null;
+    const width = side === "deleted" ? surface.oldWidth : surface.newWidth;
+    const intent = surface.lineComments.get(`${cell.side}:${cell.lineNumber}`)?.intent ?? "-";
+    return this.cachedCodeRowModel(cell, `${width}:${wrap}:${intent}`, cell.text, () => ({
+      content: this.buildSideBySideCellContent(cell, surface.language, surface.lineComments),
+      visual: this.renderSideBySideCellLines(cell, width, surface.language, false, false, false, surface.lineComments, true),
+    }));
+  }
+
+  private cachedCodeRowModel(
+    owner: object,
+    key: string,
+    source: string,
+    build: () => { content: { contentText: string; code: string }; visual: string[] },
+  ): CodeRowModel | null {
+    let models = this.codeRowModels.get(owner);
+    if (models == null) {
+      models = new Map();
+      this.codeRowModels.set(owner, models);
+    }
+    const cached = models.get(key);
+    if (cached !== undefined) return cached;
+    const { content, visual } = build();
+    const lines = layoutCodeLines(visual.map(stripTerminalSequences), stripTerminalSequences(content.contentText), stripTerminalSequences(content.code), source);
+    const model = lines == null ? null : { text: source, lines };
+    models.set(key, model);
+    return model;
   }
 
   private applyShortcutByKey(key: string): void {
@@ -4296,6 +4474,11 @@ export class ReviewApp {
 
   handleInput(data: string): void {
     this.inputEpoch += 1;
+    if (parseSgrMouseInput(data) != null) {
+      if (!this.recoveringComposition) this.handleMouseInput(data);
+      return;
+    }
+    this.mouseSelection.clear();
     if (this.editingResponse != null) {
       const id = this.editingResponse;
       if (matchesKey(data, Key.shift("enter"))) this.editor.handleInput("\n");
@@ -4317,7 +4500,6 @@ export class ReviewApp {
       this.handleReanchorInput(data);
       return;
     }
-    if ((this.story == null || this.storyBrowsingDiff) && this.handleMouseInput(data)) return;
     this.diffWheelScrolling = false;
 
     if (this.editTarget != null) {
@@ -4381,6 +4563,14 @@ export class ReviewApp {
       this.pendingVimSequence = null;
       if (data === "g") {
         this.jumpToBoundary("start");
+        return;
+      }
+      if (data === "f") {
+        this.openSelectedLineSource();
+        return;
+      }
+      if (data === "d") {
+        this.openDefinitionSearch();
         return;
       }
     }
@@ -4806,9 +4996,7 @@ export class ReviewApp {
     return renderBox("Navigator", width, height, this.theme, lines, this.state.focus === "navigator");
   }
 
-  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false): string[] {
-    if (cell == null) return [" ".repeat(Math.max(1, width))];
-
+  private buildSideBySideCellContent(cell: SideBySideCell, language: string | undefined, lineComments: Map<string, DiffReviewComment>): { contentText: string; code: string } {
     const lineComment = lineComments.get(`${cell.side}:${cell.lineNumber}`);
     const lineLabel = String(cell.lineNumber).padStart(4, " ");
     const gutterLine = this.theme.fg("borderMuted", lineLabel);
@@ -4818,9 +5006,14 @@ export class ReviewApp {
         ? this.theme.fg("error", cell.sign)
         : this.theme.fg("toolDiffContext", cell.sign);
     const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
-    const highlightedCode = this.getCachedHighlightedCode(cell.tone, cell.text, language);
-    const contentText = `${gutterLine} ${gutterSign} ${commentIndicator} ${highlightedCode}`;
+    const code = this.getCachedHighlightedCode(cell.tone, cell.text, language);
+    return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code };
+  }
 
+  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false): string[] {
+    if (cell == null) return [" ".repeat(Math.max(1, width))];
+
+    const { contentText } = this.buildSideBySideCellContent(cell, language, lineComments);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -4832,7 +5025,7 @@ export class ReviewApp {
     });
   }
 
-  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number): { lines: string[]; selectedIndex: number; selectedEndIndex: number; renderedStartOffset: number } {
+  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number): { lines: string[]; meta: Array<DiffSurfaceLine | null>; rows: readonly SideBySideDisplayRow[]; oldWidth: number; newWidth: number; newLeft: number; selectedIndex: number; selectedEndIndex: number; renderedStartOffset: number } {
     const innerWidth = Math.max(1, width - 2);
     const separator = this.theme.fg("borderMuted", " │ ");
     const separatorWidth = visibleWidth(separator);
@@ -4871,18 +5064,21 @@ export class ReviewApp {
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const lines: string[] = [];
+    const meta: Array<DiffSurfaceLine | null> = [];
     const oldHeaderActive = selectedTarget?.side === "deleted";
     const newHeaderActive = selectedTarget?.side === "added";
 
     for (let itemIndex = virtualRange.startRow; itemIndex < virtualRange.endRow; itemIndex += 1) {
       if (itemIndex === 0) {
         lines.push(`${padLine(this.theme.fg(oldHeaderActive ? "accent" : "muted", "Deleted / Old"), oldWidth)}${separator}${padLine(this.theme.fg(newHeaderActive ? "accent" : "muted", "Added / New"), newWidth)}`);
+        meta.push(null);
         continue;
       }
       const rowIndex = itemIndex - 1;
       const row = rows[rowIndex]!;
       if (row.kind === "gap") {
         lines.push(this.theme.fg("muted", centerText(row.label, innerWidth)));
+        meta.push(null);
         continue;
       }
 
@@ -4919,6 +5115,7 @@ export class ReviewApp {
       const rowHeight = Math.max(cachedLines.oldLines.length, cachedLines.newLines.length);
       for (let index = 0; index < rowHeight; index += 1) {
         lines.push(`${cachedLines.oldLines[index] ?? " ".repeat(oldWidth)}${separator}${cachedLines.newLines[index] ?? " ".repeat(newWidth)}`);
+        meta.push({ rowIndex, visual: index });
       }
       if (oldCurrent || newCurrent) {
         selectedIndex = virtualRange.offsets[itemIndex] ?? selectedIndex;
@@ -4926,7 +5123,7 @@ export class ReviewApp {
       }
     }
 
-    return { lines, selectedIndex, selectedEndIndex, renderedStartOffset: virtualRange.startOffset };
+    return { lines, meta, rows, oldWidth, newWidth, newLeft: oldWidth + separatorWidth, selectedIndex, selectedEndIndex, renderedStartOffset: virtualRange.startOffset };
   }
 
   private renderExactEditor(width: number, height?: number): string[] {
@@ -4985,7 +5182,7 @@ export class ReviewApp {
     return [header, hints, ...conflict, ...preview, ...editorLines.map((line) => `${bar} ${line}`)];
   }
 
-  private renderDiff(width: number, height: number, storyTitle?: string): string[] {
+  private renderDiff(width: number, height: number, storyTitle?: string, origin?: DiffPaneOrigin): string[] {
     const file = this.activeFile();
     const lines: string[] = [];
     if (this.editTarget != null && (this.recoveryEditor || file == null || this.getEntry(file.id, this.state.activeScope)?.status === "error")) {
@@ -5055,12 +5252,22 @@ export class ReviewApp {
     }
     const maxBody = Math.max(1, height - lines.length - 2);
     let rendered: string[];
+    let renderedMeta: Array<DiffSurfaceLine | null>;
+    let surfaceRows: readonly DisplayRow[] | readonly SideBySideDisplayRow[];
+    let oldWidth = 0;
+    let newWidth = 0;
+    let newLeft = 0;
     let renderedStartOffset = 0;
     let selectedIndex = 0;
     let selectedEndIndex = 0;
     if (this.diffViewMode === "side-by-side") {
       const sideBySide = this.renderSideBySideDiff(diff, width, file.id, language, selectedTarget, lineComments, maxBody);
       rendered = sideBySide.lines;
+      renderedMeta = sideBySide.meta;
+      surfaceRows = sideBySide.rows;
+      oldWidth = sideBySide.oldWidth;
+      newWidth = sideBySide.newWidth;
+      newLeft = sideBySide.newLeft;
       renderedStartOffset = sideBySide.renderedStartOffset;
       selectedIndex = sideBySide.selectedIndex;
       selectedEndIndex = sideBySide.selectedEndIndex;
@@ -5068,6 +5275,8 @@ export class ReviewApp {
       const displayRows = layout.unifiedRows;
       const rowRenderCache = layout.rowRenderCache;
       rendered = [];
+      renderedMeta = [];
+      surfaceRows = displayRows;
       const selectedRange = selectedTarget == null ? null : getLineTargetRange(selectedTarget);
       const selectedSide = selectedTarget?.side ?? null;
       const wrapFlag = this.state.wrapLines ? 1 : 0;
@@ -5131,6 +5340,7 @@ export class ReviewApp {
 
         if (isCurrentTarget) selectedIndex = virtualRange.offsets[rowIndex] ?? selectedIndex;
         rendered.push(...renderedLines);
+        for (let visual = 0; visual < renderedLines.length; visual += 1) renderedMeta.push(row.kind === "gap" ? null : { rowIndex, visual });
         if (isCurrentTarget) selectedEndIndex = virtualRange.offsets[rowIndex + 1] ?? selectedIndex + renderedLines.length;
       }
     }
@@ -5146,6 +5356,7 @@ export class ReviewApp {
       const block = this.buildInlineEditorBlock(width);
       if (block.length > 0) {
         rendered.splice(insertIndex, 0, ...block);
+        renderedMeta.splice(insertIndex, 0, ...block.map(() => null));
         editorStart = absoluteInsertIndex;
         editorEnd = absoluteInsertIndex + block.length - 1;
       }
@@ -5161,7 +5372,28 @@ export class ReviewApp {
     }
     this.diffScroll = Math.max(0, this.diffScroll);
     const visibleStart = Math.max(0, this.diffScroll - renderedStartOffset);
-    lines.push(...rendered.slice(visibleStart, visibleStart + maxBody));
+    const visibleLines = rendered.slice(visibleStart, visibleStart + maxBody);
+    if (origin != null) {
+      this.mouseSelection.addSurface({
+        key: `${file.id}\u001f${this.state.activeScope}\u001f${this.diffViewMode}\u001f${origin.member ?? ""}`,
+        fileId: file.id,
+        scope: this.state.activeScope,
+        mode: this.diffViewMode,
+        rows: surfaceRows,
+        top: origin.row + 1 + lines.length,
+        left: origin.col + 1,
+        width: Math.max(1, width - 2),
+        paneWidth: width,
+        oldWidth,
+        newWidth,
+        newLeft,
+        language,
+        lineComments,
+        lines: renderedMeta.slice(visibleStart, visibleStart + maxBody),
+        scrollable: this.renderingStoryAnchor == null,
+      }, visibleLines);
+    }
+    lines.push(...visibleLines);
 
     return renderBox(storyTitle ?? `Diff ${diff.hunks.length > 0 ? `(${diff.hunks.length} hunk${diff.hunks.length === 1 ? "" : "s"})` : ""}`.trim(), width, height, this.theme, lines, this.state.focus === "diff");
   }
@@ -5276,7 +5508,7 @@ export class ReviewApp {
     return target.kind === "all" || target.fileId !== storyAnchor(this.story)?.fileId;
   }
 
-  private renderStoryMember(member: StoryMember, width: number, height: number): string[] {
+  private renderStoryMember(member: StoryMember, width: number, height: number, origin: DiffPaneOrigin): string[] {
     const story = this.story!;
     const page = storyPage(story, member);
     const anchor = page?.anchor;
@@ -5303,7 +5535,7 @@ export class ReviewApp {
       this.diffScroll = Number.isFinite(view?.scroll) ? Math.max(0, view!.scroll) : 0;
       if (!active) this.editTarget = null;
       const count = storyPages(story, member).length;
-      const lines = this.renderDiff(width, height, `${title}${count > 1 ? ` ${story.related[member] + 1}/${count}` : ""}`);
+      const lines = this.renderDiff(width, height, `${title}${count > 1 ? ` ${story.related[member] + 1}/${count}` : ""}`, origin);
       story.viewports[storyViewportKey(story, member)] = {
         scroll: this.diffScroll,
         initialized: true,
@@ -5331,14 +5563,16 @@ export class ReviewApp {
   private renderStory(width: number): string[] {
     this.lastWidth = width;
     this.mousePaneLayout = null;
+    this.mouseSelection.beginFrame();
     const height = Math.max(1, this.tui.terminal?.rows ?? 32);
     const inner = Math.max(1, width - 2);
+    const frameBox = { top: 0, bottom: height - 1, left: 0, right: width - 1 };
     if (width < 40 || height < 27) {
       let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
       if (this.storyContextReturnFocus != null) compact = this.renderContextPanel(width, height);
       if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
       if (this.confirmCancel) compact = renderCenteredOverlay(compact, this.renderCancelConfirmation(), width, height);
-      return compact;
+      return this.mouseSelection.finishFrame(compact, frameBox, [], true);
     }
     const story = this.captureStorySession();
     const snapshot = this.options.story!.snapshot;
@@ -5367,8 +5601,19 @@ export class ReviewApp {
     const stacked = inner < 100;
     const leftWidth = stacked ? inner : Math.floor((inner - 1) / 2);
     const leftHeight = stacked ? Math.floor((bodyHeight - 1) / 2) : bodyHeight;
-    const left = this.renderStoryMember("implementation", leftWidth, leftHeight);
-    const right = this.renderStoryMember("tests", stacked ? inner : inner - leftWidth - 1, stacked ? bodyHeight - leftHeight - 1 : bodyHeight);
+    const rightWidth = stacked ? inner : inner - leftWidth - 1;
+    const rightHeight = stacked ? bodyHeight - leftHeight - 1 : bodyHeight;
+    const bodyTop = 1 + header.length;
+    const leftOrigin = { row: bodyTop, col: 1, member: "implementation" as const };
+    const rightOrigin = stacked
+      ? { row: bodyTop + leftHeight + 1, col: 1, member: "tests" as const }
+      : { row: bodyTop, col: 1 + leftWidth + 1, member: "tests" as const };
+    const left = this.renderStoryMember("implementation", leftWidth, leftHeight, leftOrigin);
+    const right = this.renderStoryMember("tests", rightWidth, rightHeight, rightOrigin);
+    const panes = [
+      { top: leftOrigin.row, bottom: leftOrigin.row + leftHeight - 1, left: leftOrigin.col, right: leftOrigin.col + leftWidth - 1 },
+      { top: rightOrigin.row, bottom: rightOrigin.row + rightHeight - 1, left: rightOrigin.col, right: rightOrigin.col + rightWidth - 1 },
+    ].map((box) => ({ box, inner: innerRect(box) }));
     const body = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
     let rendered = renderBox("diff-story", width, height, this.theme, [...header, ...body, ...footer], true);
     if (this.storyInventory) {
@@ -5395,7 +5640,9 @@ export class ReviewApp {
       rendered = renderCenteredOverlay(rendered, editor, width, height);
     }
     if (this.confirmCancel) rendered = renderCenteredOverlay(rendered, this.renderCancelConfirmation(), width, height);
-    return rendered;
+    const covered = this.storyInventory || this.storyContextReturnFocus != null || this.helpMode || this.state.focus === "comments"
+      || this.needsStoryEditorOverlay() || this.confirmCancel;
+    return this.mouseSelection.finishFrame(rendered, frameBox, panes, covered);
   }
 
   private renderHelpPanel(width: number, height: number): string[] {
@@ -5716,9 +5963,9 @@ export class ReviewApp {
     return renderBox("Comments", width, height, this.theme, lines, this.state.focus === "comments");
   }
 
-  private renderReviewPane(pane: ReviewPaneName, width: number, height: number): string[] {
+  private renderReviewPane(pane: ReviewPaneName, width: number, height: number, origin?: DiffPaneOrigin): string[] {
     if (pane === "navigator") return this.renderNavigator(width, height);
-    if (pane === "diff") return this.renderDiff(width, height);
+    if (pane === "diff") return this.renderDiff(width, height, undefined, origin);
     if (pane === "comments") return this.renderComments(width, height);
     if (pane === "context") return this.renderContextPanel(width, height);
     this.ensureRepliesPanel();
@@ -5727,6 +5974,7 @@ export class ReviewApp {
 
   render(width: number): string[] {
     if (this.story != null && !this.storyBrowsingDiff) return this.renderStory(width);
+    this.mouseSelection.beginFrame();
     this.lastWidth = Math.max(40, width);
     const terminalRows = this.tui?.terminal?.rows ?? 28;
     const totalHeight = this.story != null ? Math.max(1, terminalRows) : Math.max(20, terminalRows - 4);
@@ -5806,7 +6054,7 @@ export class ReviewApp {
           left: contentLeft,
           right: contentLeft + frameInnerWidth - 1,
         };
-        body.push(...this.renderReviewPane(pane, frameInnerWidth, paneHeight));
+        body.push(...this.renderReviewPane(pane, frameInnerWidth, paneHeight, { row: paneTop, col: contentLeft, member: null }));
         paneTop += paneHeight;
       }
     } else {
@@ -5821,7 +6069,7 @@ export class ReviewApp {
           left: paneLeft,
           right: paneLeft + paneWidth - 1,
         };
-        renderedPanes.push({ pane, lines: this.renderReviewPane(pane, paneWidth, bodyHeight) });
+        renderedPanes.push({ pane, lines: this.renderReviewPane(pane, paneWidth, bodyHeight, { row: bodyTop, col: paneLeft, member: null }) });
         paneLeft += paneWidth + 1;
       }
       for (let index = 0; index < bodyHeight; index += 1) {
@@ -5837,9 +6085,13 @@ export class ReviewApp {
       replies: mouseBounds.replies ?? null,
     };
 
-    const rendered = renderOuterFrame(this.lastWidth, totalHeight, this.theme, "code-diff", [...headerLines, ...body, ...footer], frameColor);
-    if (!this.confirmCancel) return rendered;
-    return renderCenteredOverlay(rendered, this.renderCancelConfirmation(), this.lastWidth, totalHeight);
+    const framed = renderOuterFrame(this.lastWidth, totalHeight, this.theme, "code-diff", [...headerLines, ...body, ...footer], frameColor);
+    const rendered = this.confirmCancel ? renderCenteredOverlay(framed, this.renderCancelConfirmation(), this.lastWidth, totalHeight) : framed;
+    const panes = Object.values(mouseBounds)
+      .filter((box): box is MousePaneBounds => box != null)
+      .map((box) => ({ box, inner: innerRect(box) }));
+    const frameBox = { top: overlayOriginRow, bottom: overlayOriginRow + totalHeight - 1, left: overlayOriginCol, right: overlayOriginCol + this.lastWidth - 1 };
+    return this.mouseSelection.finishFrame(rendered, frameBox, panes, this.confirmCancel);
   }
 }
 

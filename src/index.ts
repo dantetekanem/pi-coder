@@ -11,7 +11,8 @@ import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
 import { createRemotePullRequestSources } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
-import { getProviderCapability, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
+import { getProviderCapability, getProviderSettings, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
+import { createReviewSourceLinks, type ReviewSourceLinks } from "./source-links.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { listReviewCompositions, removeReviewComposition, saveReviewComposition } from "./review-composition.js";
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
@@ -245,6 +246,17 @@ function providerForTarget(target: RemoteReviewTarget): ProviderSettings {
   const providerId = target.provider ?? target.handoff?.provider;
   if (providerId == null) throw new Error("Remote pull request provider is not configured.");
   return requireProviderSettings(providerId);
+}
+
+function loadReviewSourceLinks(target: RemoteReviewTarget | undefined): ReviewSourceLinks | undefined {
+  try {
+    const settings = loadPiCodeDiffSettings();
+    const providerId = target?.pullRequest == null ? undefined : target.provider ?? target.handoff?.provider;
+    const provider = providerId == null ? undefined : getProviderSettings(providerId, settings);
+    return createReviewSourceLinks(settings, provider, target?.repo ?? target?.pullRequest?.repo);
+  } catch {
+    return undefined;
+  }
 }
 
 function pullRequestProviderName(target: RemoteReviewTarget): string {
@@ -1046,6 +1058,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           };
 
       const pullRequestSources = createRemotePullRequestSources(pi, ctx, remoteTarget);
+      const sourceLinks = loadReviewSourceLinks(remoteTarget);
       let story: PreparedDiffStory | undefined;
       if (sessionOptions?.story || initialSession?.story != null) {
         const scope = initialSession?.state.activeScope ?? getDefaultScope(files);
@@ -1114,6 +1127,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           ...(firstReview ? pullRequestSources : createRemotePullRequestSources(pi, ctx, remoteTarget)),
           orderSignals: buildReviewOrderSignals(handoff),
           reviewHeader,
+          sourceLinks,
           story,
           initialSession: initialSession ?? undefined,
           reviewIdentity: sessionIdentity,
