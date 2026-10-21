@@ -4029,6 +4029,7 @@ export class ReviewApp {
     let message: string | null = null;
     if (link == null) message = "gf needs a PR review and urls.file for its provider in pi-code-diff-settings.json.";
     else if (file == null || comparison == null || target == null) message = "No selected line to open.";
+    else if (file.pathPrefix) message = "gf is unavailable inside submodules because their code host is not configured.";
     else {
       const path = target.side === "deleted" ? comparison.oldPath : comparison.newPath;
       const revision = target.side === "deleted"

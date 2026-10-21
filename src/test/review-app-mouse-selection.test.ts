@@ -444,6 +444,52 @@ describe("ReviewApp code host links", () => {
     }
   });
 
+  it.each(["added", "deleted"] as const)("declines gf for %s submodule lines and restores parent links", async (side) => {
+    const parent = makeFile("vendor/child");
+    parent.gitDiff = { ...parent.gitDiff!, originalRevision: base, modifiedRevision: head };
+    parent.submodule = { "git-diff": {
+      repoRoot: "/repo/vendor/child", path: parent.path,
+      oldSha: "c".repeat(40), newSha: "d".repeat(40), available: true,
+    } };
+    const child = makeFile("src/child.ts");
+    child.gitDiff = { ...child.gitDiff!, originalRevision: "c".repeat(40), modifiedRevision: "d".repeat(40) };
+    const loadSubmoduleReviewData = vi.fn(async () => ({
+      repoRoot: "/repo/vendor/child", files: [child], visibleScopes: ["git-diff" as const],
+    }));
+    const parentSource = makeFile();
+    parentSource.gitDiff = { ...parentSource.gitDiff!, originalRevision: base, modifiedRevision: head };
+    const { app, openUrl, file } = linkHarness({ files: [parent, parentSource], loadSubmoduleReviewData });
+    try {
+      (app as any).state = { ...(app as any).state, activeFileId: parent.id };
+      app.handleInput("\r");
+      await vi.waitFor(() => {
+        const active = (app as any).activeFile();
+        expect(active.pathPrefix).toBe("vendor/child");
+        expect((app as any).getEntry(active.id, "git-diff")?.status).toBe("ready");
+      });
+      expect(loadSubmoduleReviewData).toHaveBeenCalledWith(parent.submodule["git-diff"]);
+      const nestedId = (app as any).state.activeFileId;
+      (app as any).state = setSelectedLineTarget((app as any).state, nestedId, "git-diff", { side, line: 1 });
+      app.handleInput("g");
+      app.handleInput("f");
+      expect(file).not.toHaveBeenCalled();
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(String((app as any).message)).toBe("gf is unavailable inside submodules because their code host is not configured.");
+
+      app.handleInput("b");
+      expect((app as any).state.activeFileId).toBe(parent.id);
+      (app as any).state = { ...(app as any).state, activeFileId: parentSource.id };
+      await (app as any).ensureActiveEntry();
+      (app as any).state = setSelectedLineTarget((app as any).state, parentSource.id, "git-diff", { side, line: 1 });
+      app.handleInput("g");
+      app.handleInput("f");
+      expect(file).toHaveBeenLastCalledWith({ path: parentSource.path, revision: side === "deleted" ? base : head, line: 1 });
+      expect(openUrl).toHaveBeenCalledOnce();
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("searches the double-clicked symbol with gd and a Ctrl+clicked symbol directly", async () => {
     const { app, loadFileContents, openUrl, search } = linkHarness();
     try {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3 - 2026-10-20
+
+### Fixed
+
+- Disable `gf` inside submodules with an explanatory message instead of opening a parent-repository URL for a child file. Links work again after returning to the parent review.
+
 ## 0.9.2 - 2026-10-20
 
 ### Added
