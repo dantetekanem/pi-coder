@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fetch a pinned review's base and head branches again from the provider's `urls.clone` when the checkout's `origin` lacks them, serves an older head, or serves a base without `baseRefOid`. A checkout whose `origin` is a mirror or another host no longer fails the review while the provider has the right commits.
+
 ## 0.9.3 - 2026-10-20
 
 ### Fixed
