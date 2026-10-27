@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fetch a pinned review's base and head branches again from the provider's `urls.clone` when the checkout's `origin` lacks them, serves an older head, or serves a base without `baseRefOid`. A checkout whose `origin` is a mirror or another host no longer fails the review while the provider has the right commits.
 - Submit a review with `s` at any time, even when every comment is stale. A stale comment still posts on its lines when the diff shows them and they hold the code it was written on. Otherwise it posts as a file comment that names its original lines and quotes that code when known. Comments on files that left the review stay in the saved draft, and a local review with nothing else to send is not reported as approved.
 - Anchor comments that agents prepopulate through `open_code_diff` to the reviewed code when the diff shows their lines, so they no longer start stale. A prepopulated MODIFY comment now carries the original lines and posts as a suggested change. When a parked review moves to a new pull request head, comments on unchanged files keep their anchors.
 
