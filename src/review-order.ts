@@ -24,6 +24,9 @@ const REFERENCE_WEIGHT = 20;
 const MAX_SCORED_REFERENCES = 10;
 const SIZE_WEIGHT = 25;
 const STATUS_WEIGHT = 10;
+const TEST_DIRECTORIES = new Set(["test", "tests", "spec", "specs", "__tests__"]);
+const SOURCE_DIRECTORIES = new Set(["app", "lib", "src"]);
+const TEST_NAME_SUFFIX = /(?:[._](?:test|spec)|_tests)$/;
 
 export function normalizeOrderPath(path: string): string {
   return path.replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
@@ -109,32 +112,92 @@ export interface NavigatorOrderOptions {
   signals?: ReviewOrderSignals;
 }
 
+function testSubjectName(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const subject = stem.replace(TEST_NAME_SUFFIX, "");
+  return subject.length === 0 || subject === stem ? null : `${subject}${name.slice(stem.length)}`;
+}
+
+function testPairingKey(pathPrefix: string | undefined, directories: string[], name: string): string {
+  const kept = directories.filter((directory) => !TEST_DIRECTORIES.has(directory) && !SOURCE_DIRECTORIES.has(directory));
+  return `${pathPrefix ?? ""}\u0000${[...kept, name].join("/")}`;
+}
+
+/**
+ * Maps each changed test file to the changed file it tests, when their paths match after dropping
+ * test and source root folders: `test/models/user_test.rb` tests `app/models/user.rb`, and
+ * `src/ui/button.test.tsx` tests `src/ui/button.tsx`.
+ */
+export function pairTestFiles(files: ReviewFile[]): Map<string, ReviewFile> {
+  const implementations = new Map<string, ReviewFile>();
+  const subjects: Array<{ test: ReviewFile; key: string }> = [];
+  const byPath = [...files].sort((left, right) => joinReviewPath(left.pathPrefix, left.path).localeCompare(joinReviewPath(right.pathPrefix, right.path)));
+  for (const file of byPath) {
+    const directories = file.path.split("/").filter((part) => part.length > 0);
+    const name = directories.pop() ?? file.path;
+    const key = testPairingKey(file.pathPrefix, directories, name);
+    if (!implementations.has(key)) implementations.set(key, file);
+    const subject = testSubjectName(name);
+    if (subject != null) subjects.push({ test: file, key: testPairingKey(file.pathPrefix, directories, subject) });
+  }
+
+  const pairs = new Map<string, ReviewFile>();
+  for (const { test, key } of subjects) {
+    const implementation = implementations.get(key);
+    if (implementation != null && implementation.id !== test.id) pairs.set(test.id, implementation);
+  }
+  for (const [testId, implementation] of pairs) {
+    if (pairs.has(implementation.id)) pairs.delete(testId);
+  }
+  return pairs;
+}
+
+function placeTestsAfterImplementations(files: ReviewFile[], implementations: Map<string, ReviewFile>): ReviewFile[] {
+  const testsByImplementation = new Map<string, ReviewFile[]>();
+  for (const file of files) {
+    const implementation = implementations.get(file.id);
+    if (implementation != null) testsByImplementation.set(implementation.id, [...testsByImplementation.get(implementation.id) ?? [], file]);
+  }
+
+  const placed = new Set<string>();
+  return files.flatMap((file) => {
+    const implementation = implementations.get(file.id) ?? file;
+    if (placed.has(implementation.id)) return [];
+    placed.add(implementation.id);
+    return [implementation, ...testsByImplementation.get(implementation.id) ?? []];
+  });
+}
+
+/** A paired test sits right after the file it tests, in that file's group, wherever either would rank first. */
 export function orderNavigatorFiles(files: ReviewFile[], options: NavigatorOrderOptions): ReviewFile[] {
+  const implementations = pairTestFiles(files);
+  const groupOf = (file: ReviewFile) => options.groupOf(implementations.get(file.id) ?? file);
   const compareFiles = options.mode === "alphabetical"
     ? (left: ReviewFile, right: ReviewFile) => left.path.localeCompare(right.path)
     : compareReviewFilesByRisk(options.scope, options.signals);
 
-  if (!options.treeMode) return [...files].sort(compareFiles);
+  if (!options.treeMode) return placeTestsAfterImplementations([...files].sort(compareFiles), implementations);
 
   const groupRank = new Map<string, number>();
   if (options.mode === "risk") {
     for (const file of files) {
-      const group = options.groupOf(file);
+      const group = groupOf(file);
       const score = getReviewFileRiskScore(file, options.scope, options.signals);
       groupRank.set(group, Math.max(groupRank.get(group) ?? Number.NEGATIVE_INFINITY, score));
     }
   }
 
-  return [...files].sort((left, right) => {
-    const leftGroup = options.groupOf(left);
-    const rightGroup = options.groupOf(right);
+  return placeTestsAfterImplementations([...files].sort((left, right) => {
+    const leftGroup = groupOf(left);
+    const rightGroup = groupOf(right);
     if (leftGroup !== rightGroup) {
       const rankDelta = (groupRank.get(rightGroup) ?? 0) - (groupRank.get(leftGroup) ?? 0);
       if (rankDelta !== 0) return rankDelta;
       return leftGroup.localeCompare(rightGroup);
     }
     return compareFiles(left, right);
-  });
+  }), implementations);
 }
 
 export function buildReviewOrderSignals(handoff: PullRequestHandoff | undefined): ReviewOrderSignals | undefined {

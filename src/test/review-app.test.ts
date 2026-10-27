@@ -231,10 +231,11 @@ describe("pane layout", () => {
     expect(hidden.diffWidth).toBeGreaterThan(shown.diffWidth);
   });
 
-  it("keeps navigator and comments panes the same width", () => {
+  it("makes the navigator 20% wider than comments", () => {
     const shown = getPaneLayout(120, false);
 
-    expect(shown.navigatorWidth).toBe(shown.commentsWidth);
+    expect(shown).toMatchObject({ navigatorWidth: 37, commentsWidth: 31, diffWidth: 50 });
+    expect(shown.navigatorWidth + shown.diffWidth + shown.commentsWidth + 2).toBe(120);
   });
 
   it("keeps remote comments narrow while PR context stays wider", () => {
@@ -242,10 +243,10 @@ describe("pane layout", () => {
     const remote = getPaneLayoutWithContext(200, false, true);
 
     expect(remote.navigatorWidth).toBeLessThanOrEqual(local.navigatorWidth);
-    expect(remote.commentsWidth).toBe(remote.navigatorWidth);
+    expect(remote.navigatorWidth).toBe(Math.round(remote.commentsWidth * 1.2));
     expect(remote.contextWidth).toBeGreaterThan(remote.commentsWidth);
     expect(remote.diffWidth).toBeLessThan(local.diffWidth);
-    expect(remote).toMatchObject({ navigatorWidth: 32, commentsWidth: 32, contextWidth: 58, diffWidth: 75 });
+    expect(remote).toMatchObject({ navigatorWidth: 38, commentsWidth: 32, contextWidth: 55, diffWidth: 72 });
     expect(remote.navigatorWidth + remote.diffWidth + remote.commentsWidth + remote.contextWidth + 3).toBe(200);
   });
 

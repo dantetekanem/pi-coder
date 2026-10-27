@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parsePullRequestHandoff } from "../pr-handoff.js";
 import type { PiCoderSettings } from "../provider-settings.js";
-import { buildReviewOrderSignals, compareReviewFilesByRisk, countHandoffThreads, getReviewFileRiskScore, orderNavigatorFiles } from "../review-order.js";
+import { buildReviewOrderSignals, compareReviewFilesByRisk, countHandoffThreads, getReviewFileRiskScore, orderNavigatorFiles, pairTestFiles } from "../review-order.js";
 import type { ChangeStatus, ReviewFile } from "../types.js";
 
 function makeFile(
@@ -187,5 +187,77 @@ describe("navigator ordering", () => {
     );
 
     expect(priority).toBeGreaterThan(derivedMax);
+  });
+});
+
+describe("navigator test pairing", () => {
+  const paths = (files: ReviewFile[]) => files.map((file) => file.path);
+  const pairedPaths = (files: ReviewFile[]) => Object.fromEntries(
+    [...pairTestFiles(files)].map(([testId, implementation]) => [files.find((file) => file.id === testId)!.path, implementation.path]),
+  );
+  const topFolder = (file: ReviewFile) => file.path.split("/")[0]!;
+
+  it("pairs tests with the files they test in Rails, engine, lib and JavaScript layouts", () => {
+    const files = [
+      makeFile("app/models/user.rb"),
+      makeFile("test/models/user_test.rb"),
+      makeFile("spec/models/user_spec.rb"),
+      makeFile("engines/messaging/app/mailers/messages_mailer.rb"),
+      makeFile("engines/messaging/test/mailers/messages_mailer_test.rb"),
+      makeFile("lib/billing/invoice.rb"),
+      makeFile("test/lib/billing/invoice_test.rb"),
+      makeFile("src/ui/button.tsx"),
+      makeFile("src/ui/button.test.tsx"),
+      makeFile("src/review-order.ts"),
+      makeFile("src/test/review-order.test.ts"),
+    ];
+
+    expect(pairedPaths(files)).toEqual({
+      "test/models/user_test.rb": "app/models/user.rb",
+      "spec/models/user_spec.rb": "app/models/user.rb",
+      "engines/messaging/test/mailers/messages_mailer_test.rb": "engines/messaging/app/mailers/messages_mailer.rb",
+      "test/lib/billing/invoice_test.rb": "lib/billing/invoice.rb",
+      "src/ui/button.test.tsx": "src/ui/button.tsx",
+      "src/test/review-order.test.ts": "src/review-order.ts",
+    });
+  });
+
+  it("leaves helpers, tests without a changed subject and look-alike names unpaired", () => {
+    const files = [
+      makeFile("app/models/ab_test.rb"),
+      makeFile("test/models/ab_test_test.rb"),
+      makeFile("test/test_helper.rb"),
+      makeFile("test/integration/checkout_test.rb"),
+      makeFile("app/models/admin/user.rb"),
+      makeFile("test/models/user_test.rb"),
+    ];
+
+    expect(pairedPaths(files)).toEqual({ "test/models/ab_test_test.rb": "app/models/ab_test.rb" });
+  });
+
+  it("never pairs files from different repositories", () => {
+    const vendored = { ...makeFile("lib/foo.rb"), id: "vendor/gem/lib/foo.rb::git-diff", pathPrefix: "vendor/gem" };
+
+    expect(pairTestFiles([vendored, makeFile("test/foo_test.rb")]).size).toBe(0);
+  });
+
+  it("lists a changed test right after its implementation, where the riskier of the two would rank", () => {
+    const files = [
+      makeFile("app/models/order.rb", { additions: 30 }),
+      makeFile("test/models/user_test.rb", { additions: 80 }),
+      makeFile("test/integration/checkout_test.rb", { additions: 5 }),
+      makeFile("app/models/user.rb", { additions: 1 }),
+    ];
+    const expected = ["app/models/user.rb", "test/models/user_test.rb", "app/models/order.rb", "test/integration/checkout_test.rb"];
+
+    expect(paths(orderNavigatorFiles(files, { mode: "risk", scope: "git-diff", treeMode: false, groupOf: topFolder }))).toEqual(expected);
+    expect(paths(orderNavigatorFiles(files, { mode: "risk", scope: "git-diff", treeMode: true, groupOf: topFolder }))).toEqual(expected);
+  });
+
+  it("keeps the implementation ahead of its test in alphabetical order", () => {
+    const files = [makeFile("src/ui/button.test.tsx"), makeFile("src/ui/button.tsx"), makeFile("src/ui/alert.tsx")];
+    const ordered = orderNavigatorFiles(files, { mode: "alphabetical", scope: "git-diff", treeMode: true, groupOf: topFolder });
+
+    expect(paths(ordered)).toEqual(["src/ui/alert.tsx", "src/ui/button.tsx", "src/ui/button.test.tsx"]);
   });
 });

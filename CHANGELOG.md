@@ -5,9 +5,14 @@
 ### Changed
 
 - Settings, caches, and environment variables now use the pi-coder name: `~/.pi/agent/pi-coder-settings.json`, `~/.pi/agent/cache/pi-coder/`, and `PI_CODER_*` variables such as `PI_CODER_SETTINGS_PATH` and `PI_CODER_HERDR_FULLSCREEN`. Rename an existing settings file, cache folder, and variables to these names when you upgrade.
+- List each changed test right after the file it tests in the `/diff` Navigator, such as `test/models/user_test.rb` after `app/models/user.rb`. The test joins that file's folder group in risk and a-z order. A test without a changed match keeps its place.
+- Color each Navigator status letter. `A`, `M`, `D`, and `R` use soft versions of the theme's success, warning, error, and link colors, and the change counts match. File names keep the text color. Terminals without truecolor keep the theme colors.
+- Show the file count and total line changes at the top of the Navigator, such as `7 files - +123/-321`, in place of the reviewed count and order hint. `O` still reports the new order.
+- Give the Navigator 20% more width, inner padding, a blank line between folders, and aligned change counts. Long file names keep both ends, so `messages_mailer_test.rb` stays distinct from `messages_mailer.rb`.
 
 ### Fixed
 
+- Fetch a pinned review's base and head branches again from the provider's `urls.clone` when the checkout's `origin` lacks them, serves an older head, or serves a base without `baseRefOid`. A checkout whose `origin` is a mirror or another host no longer fails the review while the provider has the right commits.
 - Submit a review with `s` at any time, even when every comment is stale. A stale comment still posts on its lines when the diff shows them and they hold the code it was written on. Otherwise it posts as a file comment that names its original lines and quotes that code when known. Comments on files that left the review stay in the saved draft, and a local review with nothing else to send is not reported as approved.
 - Anchor comments that agents prepopulate through `open_code_diff` to the reviewed code when the diff shows their lines, so they no longer start stale. A prepopulated MODIFY comment now carries the original lines and posts as a suggested change. When a parked review moves to a new pull request head, comments on unchanged files keep their anchors.
 - Post reviews to a code host that is slow or busy. A review write now waits up to two minutes instead of 20 seconds. A write refused with HTTP 429 saved nothing, so it is sent again after its Retry-After delay, up to four times. If a confirmed review still fails or ends uncertain, pi-coder gives the agent the exact review, its attempt, the provider command, and the payload, with steps to check the PR before it posts what is missing. A refused self-approval tells the agent to post nothing.

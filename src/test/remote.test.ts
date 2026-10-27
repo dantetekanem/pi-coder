@@ -257,6 +257,7 @@ describe("remote review helpers", () => {
       baseRef: "base-oid",
       headRef: "origin/review/8/head",
     });
+    expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]).toContain("+refs/heads/main:refs/remotes/origin/review/8/base");
     expect(fetchCalls[0]).toContain("+refs/heads/feature/review:refs/remotes/origin/review/8/head");
   });
@@ -282,6 +283,64 @@ describe("remote review helpers", () => {
     )).rejects.toThrow(/head changed while preparing the review/i);
     expect(fetchCalls[0]).toContain("+refs/heads/main:refs/remotes/origin/review/8/base");
     expect(fetchCalls[0]).toContain("+refs/heads/feature/review:refs/remotes/origin/review/8/head");
+    expect(fetchCalls[1]?.[3]).toBe("https://mirror.example/example/widgets.git");
+  });
+
+  it.each([
+    ["lacks the pinned branches", false, suppliedHead, true],
+    ["serves an older head", true, "c".repeat(40), true],
+    ["serves a base without the pinned base revision", true, suppliedHead, false],
+  ])("refetches pinned refs from the clone URL when origin %s", async (_origin, hasBranches, head, hasBase) => {
+    const fetchCalls: string[][] = [];
+    const fetchedFromOrigin = () => fetchCalls.length === 1;
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
+      if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
+      if (command === "git" && args[1] === "fetch") {
+        fetchCalls.push(args);
+        return fetchedFromOrigin() && !hasBranches
+          ? { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/feature/review", killed: false }
+          : { code: 0, stdout: "", stderr: "", killed: false };
+      }
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${fetchedFromOrigin() ? head : suppliedHead}\n`, stderr: "", killed: false };
+      if (command === "git" && args[1] === "--is-ancestor") return { code: fetchedFromOrigin() && !hasBase ? 1 : 0, stdout: "", stderr: "", killed: false };
+      if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "base-oid\n", stderr: "", killed: false };
+      return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+    });
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).resolves.toMatchObject({ baseRef: "base-oid", headRef: "origin/review/8/head" });
+    expect(fetchCalls.map((args) => args[3])).toEqual(["origin", "https://mirror.example/example/widgets.git"]);
+    expect(fetchCalls[1]).toContain("+refs/heads/main:refs/remotes/origin/review/8/base");
+    expect(fetchCalls[1]).toContain("+refs/heads/feature/review:refs/remotes/origin/review/8/head");
+  });
+
+  it("reports the origin fetch failure when a pinned provider has no clone URL", async () => {
+    const settings = neutralSettings();
+    delete (settings.providers.pinned.urls as { clone?: string }).clone;
+    writeFileSync(settingsPath, JSON.stringify(settings), "utf8");
+    const fetchCalls: string[][] = [];
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
+      if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
+      if (command === "git" && args[1] === "fetch") {
+        fetchCalls.push(args);
+        return { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/feature/review", killed: false };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+    });
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).rejects.toThrow("couldn't find remote ref refs/heads/feature/review");
+    expect(fetchCalls).toHaveLength(1);
   });
 
   it("loads repository profiles from provider settings", async () => {

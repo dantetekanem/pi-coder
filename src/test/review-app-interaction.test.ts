@@ -1003,6 +1003,26 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
+  it("shows a paired test inside its implementation's folder, right after it", async () => {
+    const files = [makeFile("test/integration/checkout_test.rb"), makeFile("test/models/user_test.rb"), makeFile("app/models/user.rb")];
+    const { app, loadFileContents } = createHarness(undefined, files);
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+
+    const rows = ((app as any).renderNavigator(60, 20) as string[]).map((line) => line.replace(/^│|│$/g, "").trim());
+
+    expect((app as any).getNavigatorFiles().map((file: ReviewFile) => file.path)).toEqual([
+      "app/models/user.rb",
+      "test/models/user_test.rb",
+      "test/integration/checkout_test.rb",
+    ]);
+    expect(rows.filter((row) => row === "app/" || row === "test/")).toEqual(["app/", "test/"]);
+    const implementationRow = rows.findIndex((row) => row.includes("models/user.rb"));
+    expect(rows[implementationRow - 1]).toBe("app/");
+    expect(rows[implementationRow + 1]).toContain("test/models/user_test.rb");
+    expect(rows.findIndex((row) => row === "test/")).toBeGreaterThan(implementationRow + 1);
+    app.dispose();
+  });
+
   it("hides unrelated locale files until the locale visibility toggle is used", async () => {
     const files = [
       makeFile("src/app.ts"),
@@ -1045,7 +1065,7 @@ describe("ReviewApp interaction", () => {
       "src/zzz.ts",
       "src/aaa.ts",
     ]);
-    expect(app.render(220).join("\n")).toContain("risk order");
+    expect(app.render(220).join("\n")).toContain("3 files - +431/-0");
 
     app.handleInput("O");
 
@@ -1054,7 +1074,7 @@ describe("ReviewApp interaction", () => {
       "src/mmm.ts",
       "src/zzz.ts",
     ]);
-    expect(app.render(220).join("\n")).toContain("a-z order");
+    expect(app.render(220).join("\n")).toContain("Navigator ordered alphabetically.");
     expect(JSON.parse(readFileSync(process.env.PI_CODER_PREFERENCES_PATH!, "utf8")).navigatorFileOrder).toBe("alphabetical");
     app.dispose();
   });
