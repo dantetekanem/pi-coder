@@ -18,7 +18,7 @@ import { listReviewCompositions, removeReviewComposition, saveReviewComposition 
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
 import { buildReviewFileSignatures, createReviewInstanceId, createReviewSessionId, deleteReviewSession, hasReviewSessionIdentity, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
 import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscussContinuation, type RemoteReviewTarget } from "./remote.js";
-import { buildProviderComments, buildReviewBody, prepareSubmissionHandoff, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict, type SubmitReviewInput, type SubmitReviewOptions, type SubmitReviewResult } from "./review-submit.js";
+import { buildProviderComments, buildReviewBody, composeSubmissionRecovery, prepareSubmissionHandoff, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict, type SubmitReviewInput, type SubmitReviewOptions, type SubmitReviewResult } from "./review-submit.js";
 import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionDraftBinding } from "./review-submission-journal.js";
 import { hasConsumableConfirmedSubmissionDraft } from "./review-submission-consumption.js";
 import { anchorResolvedSeedComments, partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
@@ -535,11 +535,19 @@ async function deliverConfirmedReview(
   options?: SubmitReviewOptions,
 ): Promise<UiConfirmedReviewOutcome> {
   const pr = target.pullRequest!;
-  const submission = options == null
-    ? await submitPullRequestReview(pi, input)
-    : await submitPullRequestReview(pi, input, options);
+  ctx.ui.setStatus("pi-coder-submit", `Posting the review to ${pullRequestProviderName(target)}...`);
+  let submission: SubmitReviewResult;
+  try {
+    submission = options == null
+      ? await submitPullRequestReview(pi, input)
+      : await submitPullRequestReview(pi, input, options);
+  } finally {
+    ctx.ui.setStatus("pi-coder-submit", undefined);
+  }
   ctx.ui.notify(submission.message, submission.ok ? "info" : "warning");
   if (!submission.ok) {
+    const recovery = composeSubmissionRecovery(input, submission);
+    if (recovery != null) sendReviewFollowUp(pi, ctx, recovery);
     return unsubmittedReviewOutcome({ started: true, message: submission.message, submission, context: formatPullRequestContext(pr) });
   }
 
@@ -2050,6 +2058,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       "Only call submit_pr_review after the user explicitly confirms the verdict and review text. The review UI confirmation also authorizes grammar, spelling, capitalization, punctuation, and meaning-preserving syntax corrections without another confirmation.",
       "Fix only grammar and English in the body and comment text; never change meaning, intent, tone, technical substance, or requested scope. Only changes that may cross those boundaries require exact approval before submission.",
       "Never approve a pull request the user authored; the tool blocks self-approval and you should not retry as approve.",
+      "When a submission fails or its outcome is unknown, follow the recovery steps in the result: check the PR first, then finish posting the missing review, through the provider CLI if the tool keeps failing.",
       "Keep existing inline comments in the comments array for approve, request_changes, and comment verdicts.",
       "After a successful submission, report the PR link and short summary returned by the tool.",
       "Pass repo as owner/repo, the prNumber, the commitId (PR head SHA), and prAuthorLogin so self-approval can be blocked.",
@@ -2101,7 +2110,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         handoffCommentIndexes?: number[];
         newIntent?: boolean;
       };
-      const result = await submitPullRequestReview(pi, {
+      const submitInput: SubmitReviewInput = {
         provider: input.provider,
         repo: input.repo,
         prNumber: input.prNumber,
@@ -2112,13 +2121,15 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         comments: input.comments,
         prAuthorLogin: input.prAuthorLogin,
         gitRoot: input.cwd,
-      }, { attemptId: input.attemptId, newIntent: input.newIntent,
+      };
+      const result = await submitPullRequestReview(pi, submitInput, { attemptId: input.attemptId, newIntent: input.newIntent,
         ...(input.handoffId == null ? {} : { handoffId: input.handoffId }),
         ...(input.handoffCommentIndexes == null ? {} : { handoffCommentIndexes: input.handoffCommentIndexes }),
       });
       if (ctx.hasUI) ctx.ui.notify(result.message, result.ok ? "info" : "warning");
+      const recovery = composeSubmissionRecovery(submitInput, result);
       return {
-        content: [{ type: "text" as const, text: result.message }],
+        content: [{ type: "text" as const, text: recovery == null ? result.message : `${result.message}\n\n${recovery}` }],
         details: { result },
       };
     },

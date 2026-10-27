@@ -7,6 +7,7 @@ import {
   buildProviderComments,
   buildReviewBody,
   buildReviewPayload,
+  composeSubmissionRecovery,
   submitPullRequestReview,
 } from "../review-submit.js";
 import type { DiffReviewComment, ReviewFile, ReviewSubmitPayload } from "../types.js";
@@ -392,6 +393,87 @@ describe("configured review submission", () => {
     const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : { code: 0, stdout: JSON.stringify({ id: 9, state: "COMMENTED" }), stderr: "" });
     expect(await submitPullRequestReview({ exec } as never, { ...input(), body: "Summary" })).toMatchObject({ status: "submitted", ok: true, receiptStatus: "failed", receipt: null });
     expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits two minutes for a slow review write instead of abandoning it after 20 seconds", async () => {
+    const exec = vi.fn(async (_command: string, args: string[], _options?: unknown) => isIdentity(args) ? identityResponse() : { code: 0, stdout: JSON.stringify({ id: 9, state: "COMMENTED" }), stderr: "" });
+    expect(await submitPullRequestReview({ exec } as never, input())).toMatchObject({ status: "submitted" });
+    expect(exec.mock.calls.find(([, args]) => args[0] === "review")?.[2]).toEqual({ cwd: "/repo", timeout: 120_000 });
+  });
+
+  describe("busy provider writes", () => {
+    beforeEach(() => { vi.useFakeTimers({ toFake: ["setTimeout"] }); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("resends a review the provider refused as busy and posts it once", async () => {
+      const payloads: string[] = [];
+      const exec = vi.fn(async (_command: string, args: string[]) => {
+        if (isIdentity(args)) return identityResponse();
+        payloads.push(readFileSync(args.at(-1)!, "utf8"));
+        return payloads.length < 3
+          ? { code: 1, stdout: "", stderr: "Error: 429: repository is busy" }
+          : { code: 0, stdout: JSON.stringify({ id: 9, state: "COMMENTED" }), stderr: "" };
+      });
+      const pending = submitPullRequestReview({ exec } as never, { ...input(), comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Note" }] });
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ status: "submitted", ok: true, steps: [{ status: "submitted", reviewId: "9" }] });
+      expect(payloads).toHaveLength(3);
+      expect(new Set(payloads).size).toBe(1);
+    });
+
+    it("reports a review that stays busy as rejected because nothing was saved", async () => {
+      const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : { code: 1, stdout: "HTTP/2.0 429 Too Many Requests\r\nretry-after: 2\r\n\r\n{}", stderr: "" });
+      const pending = submitPullRequestReview({ exec } as never, input());
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(result).toMatchObject({ status: "rejected", ok: false, steps: [{ status: "rejected" }] });
+      expect(result.message).toContain("busy and refused the review 4 times (HTTP 429). Nothing was saved.");
+      expect(exec.mock.calls.filter(([, args]) => args[0] === "review")).toHaveLength(4);
+    });
+
+    it("never resends a write that timed out, because it may have landed", async () => {
+      const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : { code: 1, stdout: "", stderr: "Error: 429: repository is busy", killed: true });
+      const pending = submitPullRequestReview({ exec } as never, input());
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ status: "unknown" });
+      expect(exec.mock.calls.filter(([, args]) => args[0] === "review")).toHaveLength(1);
+    });
+  });
+
+  it("treats an HTTP error printed by the provider CLI as a definite rejection", async () => {
+    const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : { code: 1, stdout: "", stderr: "Error: 422: line 40 is not part of the diff" });
+    const result = await submitPullRequestReview({ exec } as never, input());
+    expect(result).toMatchObject({ status: "rejected", steps: [{ status: "rejected", message: "Error: 422: line 40 is not part of the diff" }] });
+    expect(exec.mock.calls.filter(([, args]) => args[0] === "review")).toHaveLength(1);
+  });
+
+  it("gives the agent the exact missing review, the attempt, and the provider command after an uncertain write", async () => {
+    const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : args[0] === "change"
+      ? { code: 0, stdout: JSON.stringify({ state: "open", head: "abc123" }), stderr: "" }
+      : { code: 1, stdout: "", stderr: "", killed: true });
+    const review = { ...input("secondary"), verdict: "approve" as const, prAuthorLogin: "author", comments: [{ path: "src/app.ts", line: 4, side: "RIGHT" as const, body: "Note" }] };
+    const result = await submitPullRequestReview({ exec } as never, review);
+    const recovery = composeSubmissionRecovery(review, result)!;
+
+    expect(result.status).toBe("unknown");
+    expect(recovery).toContain("https://secondary.code.example/example/widgets/change/12");
+    expect(recovery).toContain(`attemptId "${result.attemptId}"`);
+    expect(recovery).toContain("newIntent: true");
+    expect(recovery).toContain("cli-two review create example/widgets 12 --input <payload.json>");
+    const blocks = recovery.split("```json\n").slice(1).map((block) => JSON.parse(block.split("\n```")[0]!) as unknown);
+    expect(blocks).toEqual([
+      { ...review, cwd: "/repo", gitRoot: undefined, baseCommitId: "base123" },
+      { event: "APPROVE", commit_id: "abc123", comments: review.comments },
+    ].map((value) => JSON.parse(JSON.stringify(value)) as unknown));
+  });
+
+  it("tells the agent to post nothing after a refused self-approval", async () => {
+    const exec = vi.fn(async () => ({ code: 0, stdout: JSON.stringify({ actor: { name: "alice" } }), stderr: "", killed: false }));
+    const review = { ...input("primary"), verdict: "approve" as const, prAuthorLogin: "alice" };
+    const recovery = composeSubmissionRecovery(review, await submitPullRequestReview({ exec } as never, review));
+    expect(recovery).toContain("does not allow self-approval. Nothing was posted.");
+    expect(recovery).toContain("Post nothing unless the user picks another verdict.");
+    expect(recovery).not.toContain("submit_pr_review");
   });
 
   it("rejects missing write configuration before executing any provider command", async () => {
