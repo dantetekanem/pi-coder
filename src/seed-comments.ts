@@ -1,5 +1,7 @@
+import { buildStructuredDiff, getVisibleSideLines, isVisibleLineRange } from "./diff.js";
 import { getScopedFiles, upsertFileComment, upsertLineComment } from "./state.js";
-import type { CommentIntent, CommentSide, ReviewFile, ReviewScope, ReviewState } from "./types.js";
+import type { CommentIntent, CommentSide, ReviewAnchorHash, ReviewFile, ReviewFileContents, ReviewScope, ReviewState } from "./types.js";
+import { hashTargetSlice, rawTextSliceForRange } from "./workbench/target.js";
 
 export interface SeedReviewComment {
   path: string;
@@ -19,6 +21,8 @@ export interface ResolvedSeedComment {
   startLine: number | null;
   endLine: number | null;
   body: string;
+  originalText?: string;
+  captureHash?: ReviewAnchorHash;
 }
 
 export interface SeedResolution {
@@ -114,6 +118,45 @@ export function partitionResolvedSeedComments(state: ReviewState, resolved: Reso
   return { applicable, conflicts };
 }
 
+/**
+ * Captures the reviewed bytes under each line seed shown in the diff, so it starts mapped like a comment written
+ * in the UI. Seeds outside the diff stay unanchored because a code host would reject them as line comments.
+ */
+export async function anchorResolvedSeedComments(
+  resolved: ResolvedSeedComment[],
+  files: readonly ReviewFile[],
+  loadContents: (file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>,
+): Promise<ResolvedSeedComment[]> {
+  const byId = new Map(files.map((file) => [file.id, file]));
+  const loaded = new Map<string, Promise<{ contents: ReviewFileContents; lines: ReturnType<typeof getVisibleSideLines> } | undefined>>();
+  return Promise.all(resolved.map(async (seed) => {
+    const file = byId.get(seed.fileId);
+    if (seed.side === "file" || seed.startLine == null || file == null) return seed;
+    const key = `${seed.scope}::${file.id}`;
+    let pending = loaded.get(key);
+    if (pending == null) {
+      pending = Promise.resolve()
+        .then(() => loadContents(file, seed.scope))
+        .then((contents) => ({ contents, lines: getVisibleSideLines(buildStructuredDiff(contents.originalContent, contents.modifiedContent)) }))
+        .catch(() => undefined);
+      loaded.set(key, pending);
+    }
+    const review = await pending;
+    if (review == null) return seed;
+    const { contents, lines } = review;
+    const available = seed.side === "deleted" ? contents.originalAvailable !== false : contents.modifiedAvailable !== false;
+    const source = seed.side === "deleted" ? contents.originalContent : contents.modifiedContent;
+    const endLine = seed.endLine ?? seed.startLine;
+    const range = { startLine: Math.min(seed.startLine, endLine), endLine: Math.max(seed.startLine, endLine) };
+    if (!available || !isVisibleLineRange(lines[seed.side], range.startLine, range.endLine)) return seed;
+    return {
+      ...seed,
+      ...(seed.intent === "modify" ? { originalText: rawTextSliceForRange(source, range) } : {}),
+      captureHash: hashTargetSlice(source, range),
+    };
+  }));
+}
+
 export function applyResolvedSeedComments(state: ReviewState, resolved: ResolvedSeedComment[]): ReviewState {
   let next = state;
   for (const comment of resolved) {
@@ -121,7 +164,18 @@ export function applyResolvedSeedComments(state: ReviewState, resolved: Resolved
       next = upsertFileComment(next, comment.fileId, comment.scope, comment.body, comment.intent);
       continue;
     }
-    next = upsertLineComment(next, comment.fileId, comment.scope, comment.side, comment.startLine, comment.body, comment.intent, comment.endLine ?? comment.startLine);
+    next = upsertLineComment(
+      next,
+      comment.fileId,
+      comment.scope,
+      comment.side,
+      comment.startLine,
+      comment.body,
+      comment.intent,
+      comment.endLine ?? comment.startLine,
+      comment.intent === "modify" ? comment.originalText : undefined,
+      comment.captureHash,
+    );
   }
   return next;
 }

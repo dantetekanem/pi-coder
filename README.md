@@ -108,6 +108,8 @@ In `/diff` and `/diff-story`, `d` opens the normal comment editor with DISCUSS i
 
 ### Review submission and recovery
 
+`s` submits at any time. A stale line comment still posts on its lines when the diff shows them and they hold the code it was written on. Otherwise it posts as a file comment that names its original lines and quotes that code when known. Comments on files that left the review stay in the saved draft.
+
 GitHub reviews pin the reviewed commit for every verdict, including approvals without comments. An approval with inline feedback uses one atomic review. Submission reports `submitted`, `partial`, `unknown`, or `rejected`; a timeout is not proof that nothing was posted.
 
 Approved input is saved under an attempt ID before any write. Pass `attemptId` to reuse that decision. The UI resumes unfinished submissions or exact accepted feedback still awaiting cleanup. After a submission completes, remaining unsubmitted feedback can be reviewed or discussed. Confirmed steps are not reposted; uncertain steps require attributable provider evidence. Use `newIntent` only for an explicitly approved new review. A failed grammar pass keeps a separate, unconfirmed handoff until the final text is approved.
@@ -125,7 +127,7 @@ While a comment editor is active, its target, intent, original selection/anchor,
 - `Enter` flushes the buffer and commits feedback before closing the editor. Failed writes keep it open and leave recovery copies intact.
 - `Ctrl+C` inside the editor flushes and parks without committing the buffer. `Esc` cancels a new editor; for a recovered editor it leaves the text saved for later recovery.
 - Explicit resume offers unfinished editor copies. Recovery opens editable text at its saved cursor; it never submits feedback. Each opening gets a separate composition ID, so two processes resuming one instance do not overwrite each other's buffers.
-- Recovery checks the original file, scope and exact source anchor. Changed or unavailable bytes produce a stale draft requiring manual reanchor. A renamed/missing file or repository frame leaves the text editable but blocks saving it onto another target: copy it and manually choose the intended anchor.
+- Recovery checks the original file, scope and exact source anchor. Changed or unavailable bytes produce a stale draft; reanchor it manually to keep it on lines. A renamed/missing file or repository frame leaves the text editable but blocks saving it onto another target: copy it and manually choose the intended anchor.
 - If recovered text conflicts with the current note or selected comment, `Enter` asks **"Replace with recovered text; keep current text as recovery?"** Only `k` confirms. The exact current text and its intent/target are saved as a separate recovery before the generation-checked replacement. Any preservation or snapshot failure keeps the editor open. `Esc` returns to editing. If a recovered range would also remove other comments, saving is refused instead: the current comments and recovered buffer stay intact for manual merging.
 
 Recovered buffers use the owned exact-text editor: arrows move the cursor, `Ctrl+A` selects all and `Ctrl+Z` undoes; `Tab` changes intent and `Shift+Enter` inserts a newline. New COMMENT/DISCUSS editors retain Pi's editor controls. Their completed bracketed pastes now remain expanded rather than collapsing into Pi paste markers, so cursor positions refer to the saved text. Chunked pastes are inserted when the closing paste marker arrives; an incomplete paste is not yet part of the editor buffer.
