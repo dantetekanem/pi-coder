@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.9.4 - 2026-10-27
+
+### Changed
+
+- List each changed test right after the file it tests in the `/diff` Navigator, such as `test/models/user_test.rb` after `app/models/user.rb`. The test joins that file's folder group in risk and a-z order. A test without a changed match keeps its place.
+- Color each Navigator status letter. `A`, `M`, `D`, and `R` use soft versions of the theme's success, warning, error, and link colors, and the change counts match. File names keep the text color. Terminals without truecolor keep the theme colors.
+- Show the file count and total line changes at the top of the Navigator, such as `7 files - +123/-321`, in place of the reviewed count and order hint. `O` still reports the new order.
+- Give the Navigator 20% more width, inner padding, a blank line between folders, and aligned change counts. Long file names keep both ends, so `messages_mailer_test.rb` stays distinct from `messages_mailer.rb`.
 
 ### Fixed
 
