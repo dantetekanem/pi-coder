@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parsePiCodeDiffSettings } from "../provider-settings.js";
+import { parsePiCoderSettings } from "../provider-settings.js";
 import { createReviewSourceLinks } from "../source-links.js";
 import { normalizeExternalUrl } from "../ui/open-url.js";
 
-const settings = parsePiCodeDiffSettings({
+const settings = parsePiCoderSettings({
   search: "https://search.example/results?q=sym:{query}",
   providers: {
     host: {

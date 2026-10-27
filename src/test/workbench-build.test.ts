@@ -22,7 +22,7 @@ async function fakeCompile(outputRoot: string, label = "new"): Promise<void> {
 }
 
 async function seedCurrent(globalRoot: string): Promise<{ cacheRoot: string; launcher: string }> {
-  const cacheRoot = resolve(globalRoot, "agent/cache/pi-code-diff/workbench");
+  const cacheRoot = resolve(globalRoot, "agent/cache/pi-coder/workbench");
   const oldRelease = resolve(cacheRoot, "release-old");
   await fakeCompile(oldRelease, "old");
   await mkdir(resolve(globalRoot, "agent/bin"), { recursive: true });

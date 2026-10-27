@@ -3,17 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  getPiCodeDiffSettingsPath,
+  getPiCoderSettingsPath,
   getProviderCapability,
-  loadPiCodeDiffSettings,
-  parsePiCodeDiffSettings,
+  loadPiCoderSettings,
+  parsePiCoderSettings,
   readConfiguredField,
   renderProviderOperation,
   renderProviderTemplate,
   requireProviderSettings,
 } from "../provider-settings.js";
 
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;
 let settingsPath: string;
 
@@ -57,14 +57,14 @@ function neutralSettings() {
 }
 
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), "pi-code-diff-settings-"));
+  directory = mkdtempSync(join(tmpdir(), "pi-coder-settings-"));
   settingsPath = join(directory, "settings.json");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
 });
 
 afterEach(() => {
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(directory, { recursive: true, force: true });
 });
 
@@ -72,10 +72,10 @@ describe("provider settings", () => {
   it("loads arbitrary providers and repository profiles from the configured local file", () => {
     writeFileSync(settingsPath, JSON.stringify(neutralSettings()), "utf8");
 
-    const settings = loadPiCodeDiffSettings();
+    const settings = loadPiCoderSettings();
     const provider = requireProviderSettings("primary", settings);
 
-    expect(getPiCodeDiffSettingsPath()).toBe(settingsPath);
+    expect(getPiCoderSettingsPath()).toBe(settingsPath);
     expect(provider).toMatchObject({
       id: "primary",
       label: "Primary code host",
@@ -92,7 +92,7 @@ describe("provider settings", () => {
   });
 
   it("loads GitHub as the built-in provider when no settings file exists", () => {
-    const settings = loadPiCodeDiffSettings();
+    const settings = loadPiCoderSettings();
 
     expect(settings.code).toBeUndefined();
     expect(settings.repositories).toEqual({});
@@ -121,7 +121,7 @@ describe("provider settings", () => {
   });
 
   it.each([["reviewComments", "pulls", "comments"], ["pullRequestComments", "issues", "comments"], ["pullRequestReviews", "pulls", "reviews"]])("renders bounded %s pages against the configured repository", (operation, resource, collection) => {
-    const provider = loadPiCodeDiffSettings().providers.github!;
+    const provider = loadPiCoderSettings().providers.github!;
     expect(renderProviderOperation(provider, `${operation}Page`, { repo: "example/widgets", number: 18, page: 2 }).args)
       .toEqual(["api", "--include", `repos/example/widgets/${resource}/18/${collection}?per_page=100&page=2`]);
   });
@@ -139,7 +139,7 @@ describe("provider settings", () => {
   });
 
   it("renders configured operations without invoking a shell", () => {
-    const provider = parsePiCodeDiffSettings(neutralSettings()).providers.primary!;
+    const provider = parsePiCoderSettings(neutralSettings()).providers.primary!;
 
     expect(renderProviderTemplate(provider.urls.canonical, { repo: "example/widgets", number: 42 })).toBe(
       "https://code.example/example/widgets/change/42",
@@ -152,7 +152,7 @@ describe("provider settings", () => {
   });
 
   it("reads configured response fields and capabilities", () => {
-    const provider = parsePiCodeDiffSettings(neutralSettings()).providers.primary!;
+    const provider = parsePiCoderSettings(neutralSettings()).providers.primary!;
     const payload = { actor: { name: "reviewer" }, metadata: { resolved: false } };
 
     expect(readConfiguredField(provider, "login", payload)).toBe("reviewer");
@@ -166,10 +166,10 @@ describe("provider settings", () => {
   it("accepts one direct code command", () => {
     const code = { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}"] };
     const { version: _version, ...withoutVersion } = neutralSettings();
-    expect(parsePiCodeDiffSettings({ ...withoutVersion, code }).code).toEqual(code);
-    expect(parsePiCodeDiffSettings({ ...withoutVersion, code: { command: ["code-open"] } }).code).toEqual({ command: ["code-open"], targetArgs: [] });
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: "code-open" })).toThrow(/settings.code must be an object/i);
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), code: { ...code, command: ["code-open", "{file}"] } })).toThrow(/command.*file/i);
+    expect(parsePiCoderSettings({ ...withoutVersion, code }).code).toEqual(code);
+    expect(parsePiCoderSettings({ ...withoutVersion, code: { command: ["code-open"] } }).code).toEqual({ command: ["code-open"], targetArgs: [] });
+    expect(() => parsePiCoderSettings({ ...neutralSettings(), code: "code-open" })).toThrow(/settings.code must be an object/i);
+    expect(() => parsePiCoderSettings({ ...neutralSettings(), code: { ...code, command: ["code-open", "{file}"] } })).toThrow(/command.*file/i);
   });
 
   it("accepts https file and search link templates with their placeholders only", () => {
@@ -181,24 +181,24 @@ describe("provider settings", () => {
       search,
       providers: { primary: { ...settings.providers.primary, urls: { ...settings.providers.primary.urls, file } } },
     };
-    const parsed = parsePiCodeDiffSettings(withLinks);
+    const parsed = parsePiCoderSettings(withLinks);
     expect(parsed.search).toBe(search);
     expect(parsed.providers.primary!.urls.file).toBe(file);
-    expect(parsePiCodeDiffSettings(settings).search).toBeUndefined();
+    expect(parsePiCoderSettings(settings).search).toBeUndefined();
 
-    expect(() => parsePiCodeDiffSettings({ ...withLinks, search: "http://search.example/?q={query}" })).toThrow("settings.search must use https.");
-    expect(() => parsePiCodeDiffSettings({ ...withLinks, search: "https://search.example/?q={number}" })).toThrow("settings.search supports only {query}.");
+    expect(() => parsePiCoderSettings({ ...withLinks, search: "http://search.example/?q={query}" })).toThrow("settings.search must use https.");
+    expect(() => parsePiCoderSettings({ ...withLinks, search: "https://search.example/?q={number}" })).toThrow("settings.search supports only {query}.");
     const badFile = { ...withLinks, providers: { primary: { ...withLinks.providers.primary, urls: { ...withLinks.providers.primary.urls, file: "https://code.example/{repo}/{branch}" } } } };
-    expect(() => parsePiCodeDiffSettings(badFile)).toThrow("providers.primary.urls.file supports only {repo}, {revision}, {path}, {line}.");
+    expect(() => parsePiCoderSettings(badFile)).toThrow("providers.primary.urls.file supports only {repo}, {revision}, {path}, {line}.");
   });
 
   it("rejects unknown fields and malformed provider values", () => {
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), extra: true })).toThrow("settings has unsupported fields: extra.");
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), version: 2 })).toThrow("Settings version must be 1.");
-    expect(() => parsePiCodeDiffSettings({ ...neutralSettings(), version: null })).toThrow("Settings version must be 1.");
+    expect(() => parsePiCoderSettings({ ...neutralSettings(), extra: true })).toThrow("settings has unsupported fields: extra.");
+    expect(() => parsePiCoderSettings({ ...neutralSettings(), version: 2 })).toThrow("Settings version must be 1.");
+    expect(() => parsePiCoderSettings({ ...neutralSettings(), version: null })).toThrow("Settings version must be 1.");
 
     const invalid = neutralSettings();
     invalid.providers.primary.urls.patterns[0]!.host = "https://code.example";
-    expect(() => parsePiCodeDiffSettings(invalid)).toThrow("providers.primary.urls.patterns[0].host is invalid.");
+    expect(() => parsePiCoderSettings(invalid)).toThrow("providers.primary.urls.patterns[0].host is invalid.");
   });
 });

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getReviewSessionPathForDiagnostics, listReviewSessions, loadReviewSession, saveReviewSession, saveReviewSessionWithStatus, type ReviewSessionData } from "../review-session.js";
 import { ReviewSessionLockedError } from "../review-session-persistence.js";
 
-const originalDirectory = process.env.PI_CODE_DIFF_SESSIONS_DIR;
+const originalDirectory = process.env.PI_CODER_SESSIONS_DIR;
 let directory: string;
 let barrier: string;
 let children: ChildProcess[];
@@ -28,7 +28,7 @@ const data = (): ReviewSessionData => ({
 async function writer(identity: string): Promise<ChildProcess> {
   const child = fork(new URL("./helpers/review-session-process.mjs", import.meta.url), [], {
     silent: true, execArgv: ["--experimental-strip-types"],
-    env: { ...process.env, PI_CODE_DIFF_SESSIONS_DIR: directory },
+    env: { ...process.env, PI_CODER_SESSIONS_DIR: directory },
   });
   children.push(child);
   expect((await once(child, "message"))[0]).toEqual({ kind: "ready" });
@@ -44,7 +44,7 @@ async function command(child: ChildProcess, value: object) {
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "pi-session-processes-"));
-  process.env.PI_CODE_DIFF_SESSIONS_DIR = directory;
+  process.env.PI_CODER_SESSIONS_DIR = directory;
   barrier = join(directory, "replacement-barrier");
   execFileSync("mkfifo", [barrier]);
   children = [];
@@ -57,8 +57,8 @@ afterEach(async () => {
     child.kill("SIGKILL");
     await exited;
   }));
-  if (originalDirectory == null) delete process.env.PI_CODE_DIFF_SESSIONS_DIR;
-  else process.env.PI_CODE_DIFF_SESSIONS_DIR = originalDirectory;
+  if (originalDirectory == null) delete process.env.PI_CODER_SESSIONS_DIR;
+  else process.env.PI_CODER_SESSIONS_DIR = originalDirectory;
   await rm(directory, { recursive: true, force: true });
 });
 

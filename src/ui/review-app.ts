@@ -4014,7 +4014,7 @@ export class ReviewApp {
     const comparison = getScopeComparison(file, this.state.activeScope);
     const target = getSelectedLineTarget(this.state, file?.id ?? null, this.state.activeScope);
     let message: string | null = null;
-    if (link == null) message = "gf needs a PR review and urls.file for its provider in pi-code-diff-settings.json.";
+    if (link == null) message = "gf needs a PR review and urls.file for its provider in pi-coder-settings.json.";
     else if (file == null || comparison == null || target == null) message = "No selected line to open.";
     else if (file.pathPrefix) message = "gf is unavailable inside submodules because their code host is not configured.";
     else {
@@ -4040,7 +4040,7 @@ export class ReviewApp {
       this.openUrlInBrowser(link(query), "Search");
       return;
     }
-    this.setMessage(link == null ? "gd needs \"search\" in pi-code-diff-settings.json." : "Double-click a symbol first, then press gd.");
+    this.setMessage(link == null ? "gd needs \"search\" in pi-coder-settings.json." : "Double-click a symbol first, then press gd.");
     this.requestRender();
   }
 

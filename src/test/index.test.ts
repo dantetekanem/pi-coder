@@ -48,25 +48,25 @@ vi.mock("../shortcuts.js", () => ({
   getShortcutConfigPath: () => join(preferencesDir, "code-diff.json"),
 }));
 
-const preferencesDir = mkdtempSync(join(tmpdir(), "pi-code-diff-index-"));
+const preferencesDir = mkdtempSync(join(tmpdir(), "pi-coder-index-"));
 const preferencesPath = join(preferencesDir, "code-diff-preferences.json");
 const settingsPath = join(preferencesDir, "provider-settings.json");
-const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
-const originalHerdrFullscreen = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
-const storeEnvs = ["PI_CODE_DIFF_SUBMISSIONS_DIR", "PI_CODE_DIFF_RECEIPTS_DIR", "PI_CODE_DIFF_SESSIONS_DIR"];
+const originalPreferencesPath = process.env.PI_CODER_PREFERENCES_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
+const originalHerdrFullscreen = process.env.PI_CODER_HERDR_FULLSCREEN;
+const storeEnvs = ["PI_CODER_SUBMISSIONS_DIR", "PI_CODER_RECEIPTS_DIR", "PI_CODER_SESSIONS_DIR"];
 const originalStores = storeEnvs.map((key) => process.env[key]);
 storeEnvs.forEach((key) => { process.env[key] = join(preferencesDir, key); });
-process.env.PI_CODE_DIFF_PREFERENCES_PATH = preferencesPath;
-process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+process.env.PI_CODER_PREFERENCES_PATH = preferencesPath;
+process.env.PI_CODER_SETTINGS_PATH = settingsPath;
 
 afterAll(() => {
-  if (originalPreferencesPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
-  if (originalHerdrFullscreen == null) delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
-  else process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = originalHerdrFullscreen;
+  if (originalPreferencesPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = originalPreferencesPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
+  if (originalHerdrFullscreen == null) delete process.env.PI_CODER_HERDR_FULLSCREEN;
+  else process.env.PI_CODER_HERDR_FULLSCREEN = originalHerdrFullscreen;
   storeEnvs.forEach((key, index) => {
     if (originalStores[index] == null) delete process.env[key];
     else process.env[key] = originalStores[index];
@@ -294,7 +294,7 @@ function reviewSessionData(
 describe("code diff extension", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
+    delete process.env.PI_CODER_HERDR_FULLSCREEN;
     rmSync(preferencesPath, { force: true });
     writeFileSync(settingsPath, JSON.stringify(testSettings()), "utf8");
     mocks.findForDraft.mockReset().mockReturnValue(null);
@@ -859,7 +859,7 @@ describe("code diff extension", () => {
   it("honors a process-scoped Herdr fullscreen override without changing preferences", async () => {
     const tools = new Map<string, any>();
     writeFileSync(preferencesPath, JSON.stringify({ herdrFullscreen: true }), "utf8");
-    process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = "off";
+    process.env.PI_CODER_HERDR_FULLSCREEN = "off";
     mocks.getReviewWindowData.mockResolvedValue({
       repoRoot: "/repo",
       files: [localReviewFile()],
@@ -3249,7 +3249,7 @@ describe("code diff extension", () => {
 
   it("treats a bare existing local directory as the diff cwd", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    const localRepo = await mkdtemp(join(tmpdir(), "pi-code-diff-local-"));
+    const localRepo = await mkdtemp(join(tmpdir(), "pi-coder-local-"));
     const files = [{
       id: "src/app.ts::working::::",
       path: "src/app.ts",
@@ -3439,7 +3439,7 @@ describe("code diff extension", () => {
 
       resolveData({ repoRoot: "/repo", files: [], branchBaseRevision: "main", modifiedRevision: "HEAD" });
       await vi.advanceTimersByTimeAsync(0);
-      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-code-diff-local", undefined);
+      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-coder-local", undefined);
       expect(ctx.ui.notify).toHaveBeenCalledWith("No reviewable files found for this diff.", "info");
     } finally {
       vi.useRealTimers();
@@ -3474,7 +3474,7 @@ describe("code diff extension", () => {
       expect(ctx.ui.setWidget).toHaveBeenCalledTimes(1);
 
       await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
-      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-code-diff-local", undefined);
+      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-coder-local", undefined);
       const callsAfterShutdown = ctx.ui.setWidget.mock.calls.length;
 
       await vi.advanceTimersByTimeAsync(5_000);

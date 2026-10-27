@@ -13,11 +13,11 @@ import {
 import type { DiffReviewComment, ReviewFile, ReviewSubmitPayload } from "../types.js";
 import { loadReviewReceipt } from "../review-receipts.js";
 
-const originalReceiptsDir = process.env.PI_CODE_DIFF_RECEIPTS_DIR;
-const originalSubmissionsDir = process.env.PI_CODE_DIFF_SUBMISSIONS_DIR;
+const originalReceiptsDir = process.env.PI_CODER_RECEIPTS_DIR;
+const originalSubmissionsDir = process.env.PI_CODER_SUBMISSIONS_DIR;
 const isIdentity = (args: string[]) => args[0] === "identity" || (args[0] === "api" && args[1] === "user");
 const identityResponse = () => ({ code: 0, stdout: JSON.stringify({ id: 42, login: "reviewer", actor: { name: "reviewer" } }), stderr: "", killed: false });
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;
 let settingsPath: string;
 
@@ -118,19 +118,19 @@ function input(providerId = "primary") {
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "review-submit-settings-"));
   settingsPath = join(directory, "settings.json");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
-  process.env.PI_CODE_DIFF_RECEIPTS_DIR = join(directory, "receipts");
-  process.env.PI_CODE_DIFF_SUBMISSIONS_DIR = join(directory, "attempts");
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_RECEIPTS_DIR = join(directory, "receipts");
+  process.env.PI_CODER_SUBMISSIONS_DIR = join(directory, "attempts");
   writeFileSync(settingsPath, JSON.stringify(settings()), "utf8");
 });
 
 afterEach(() => {
-  if (originalSubmissionsDir == null) delete process.env.PI_CODE_DIFF_SUBMISSIONS_DIR;
-  else process.env.PI_CODE_DIFF_SUBMISSIONS_DIR = originalSubmissionsDir;
-  if (originalReceiptsDir == null) delete process.env.PI_CODE_DIFF_RECEIPTS_DIR;
-  else process.env.PI_CODE_DIFF_RECEIPTS_DIR = originalReceiptsDir;
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalSubmissionsDir == null) delete process.env.PI_CODER_SUBMISSIONS_DIR;
+  else process.env.PI_CODER_SUBMISSIONS_DIR = originalSubmissionsDir;
+  if (originalReceiptsDir == null) delete process.env.PI_CODER_RECEIPTS_DIR;
+  else process.env.PI_CODER_RECEIPTS_DIR = originalReceiptsDir;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(directory, { recursive: true, force: true });
 });
 
@@ -389,7 +389,7 @@ describe("configured review submission", () => {
   it("reports local receipt failure without turning confirmed remote acceptance into a retryable failure", async () => {
     const blocked = join(directory, "not-a-directory");
     writeFileSync(blocked, "blocked");
-    process.env.PI_CODE_DIFF_RECEIPTS_DIR = blocked;
+    process.env.PI_CODER_RECEIPTS_DIR = blocked;
     const exec = vi.fn(async (_command: string, args: string[]) => isIdentity(args) ? identityResponse() : { code: 0, stdout: JSON.stringify({ id: 9, state: "COMMENTED" }), stderr: "" });
     expect(await submitPullRequestReview({ exec } as never, { ...input(), body: "Summary" })).toMatchObject({ status: "submitted", ok: true, receiptStatus: "failed", receipt: null });
     expect(exec).toHaveBeenCalledTimes(2);

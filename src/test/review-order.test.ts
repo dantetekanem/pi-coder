@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parsePullRequestHandoff } from "../pr-handoff.js";
-import type { PiCodeDiffSettings } from "../provider-settings.js";
+import type { PiCoderSettings } from "../provider-settings.js";
 import { buildReviewOrderSignals, compareReviewFilesByRisk, countHandoffThreads, getReviewFileRiskScore, orderNavigatorFiles } from "../review-order.js";
 import type { ChangeStatus, ReviewFile } from "../types.js";
 
@@ -37,7 +37,7 @@ function order(files: ReviewFile[], signals?: ReturnType<typeof buildReviewOrder
   return [...files].sort(compareReviewFilesByRisk("git-diff", signals)).map((file) => file.path);
 }
 
-const testSettings: PiCodeDiffSettings = {
+const testSettings: PiCoderSettings = {
   version: 1,
   providers: {
     github: {

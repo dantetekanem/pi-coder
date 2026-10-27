@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const PI_CODE_DIFF_SETTINGS_VERSION = 1;
+export const PI_CODER_SETTINGS_VERSION = 1;
 
 export interface ProviderUrlPattern {
   host: string;
@@ -44,8 +44,8 @@ export interface CodeCommandSettings {
   targetArgs?: string[];
 }
 
-export interface PiCodeDiffSettings {
-  version: typeof PI_CODE_DIFF_SETTINGS_VERSION;
+export interface PiCoderSettings {
+  version: typeof PI_CODER_SETTINGS_VERSION;
   code?: CodeCommandSettings;
   search?: string;
   providers: Record<string, ProviderSettings>;
@@ -152,16 +152,16 @@ const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
   },
 };
 
-function withBuiltInProviders(settings: PiCodeDiffSettings): PiCodeDiffSettings {
+function withBuiltInProviders(settings: PiCoderSettings): PiCoderSettings {
   return {
     ...settings,
     providers: { github: BUILT_IN_GITHUB_PROVIDER, ...settings.providers },
   };
 }
 
-function defaultSettings(): PiCodeDiffSettings {
+function defaultSettings(): PiCoderSettings {
   return withBuiltInProviders({
-    version: PI_CODE_DIFF_SETTINGS_VERSION,
+    version: PI_CODER_SETTINGS_VERSION,
     providers: {},
     repositories: {},
   });
@@ -314,10 +314,10 @@ function readCodeSettings(value: unknown): CodeCommandSettings | undefined {
   return { command, targetArgs: readCodeArgs(value.targetArgs, "settings.code.targetArgs", true) };
 }
 
-export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
+export function parsePiCoderSettings(value: unknown): PiCoderSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
   rejectUnknownKeys(value, ["version", "code", "search", "providers", "repositories"], "settings");
-  if (value.version !== undefined && value.version !== PI_CODE_DIFF_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODE_DIFF_SETTINGS_VERSION}.`);
+  if (value.version !== undefined && value.version !== PI_CODER_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODER_SETTINGS_VERSION}.`);
   const code = readCodeSettings(value.code);
   const search = value.search == null ? undefined : readUrlTemplate(value.search, "settings.search", ["query"]);
   if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
@@ -326,7 +326,7 @@ export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
   return withBuiltInProviders({
-    version: PI_CODE_DIFF_SETTINGS_VERSION,
+    version: PI_CODER_SETTINGS_VERSION,
     ...(code == null ? {} : { code }),
     ...(search == null ? {} : { search }),
     providers,
@@ -334,23 +334,23 @@ export function parsePiCodeDiffSettings(value: unknown): PiCodeDiffSettings {
   });
 }
 
-export function getPiCodeDiffSettingsPath(): string {
-  return process.env.PI_CODE_DIFF_SETTINGS_PATH ?? join(getAgentDir(), "pi-code-diff-settings.json");
+export function getPiCoderSettingsPath(): string {
+  return process.env.PI_CODER_SETTINGS_PATH ?? join(getAgentDir(), "pi-coder-settings.json");
 }
 
-export function loadPiCodeDiffSettings(): PiCodeDiffSettings {
-  const path = getPiCodeDiffSettingsPath();
+export function loadPiCoderSettings(): PiCoderSettings {
+  const path = getPiCoderSettingsPath();
   if (!existsSync(path)) return defaultSettings();
-  return parsePiCodeDiffSettings(JSON.parse(readFileSync(path, "utf8")) as unknown);
+  return parsePiCoderSettings(JSON.parse(readFileSync(path, "utf8")) as unknown);
 }
 
-export function getProviderSettings(id: string, settings = loadPiCodeDiffSettings()): ProviderSettings | undefined {
+export function getProviderSettings(id: string, settings = loadPiCoderSettings()): ProviderSettings | undefined {
   return settings.providers[id];
 }
 
-export function requireProviderSettings(id: string, settings = loadPiCodeDiffSettings()): ProviderSettings {
+export function requireProviderSettings(id: string, settings = loadPiCoderSettings()): ProviderSettings {
   const provider = getProviderSettings(id, settings);
-  if (provider == null) throw new Error(`Provider ${id} is not configured in ${getPiCodeDiffSettingsPath()}.`);
+  if (provider == null) throw new Error(`Provider ${id} is not configured in ${getPiCoderSettingsPath()}.`);
   return provider;
 }
 

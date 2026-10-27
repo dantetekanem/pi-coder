@@ -76,7 +76,7 @@ export interface ReviewReceiptInput {
 }
 
 export function getReviewReceiptsDir(): string {
-  return process.env.PI_CODE_DIFF_RECEIPTS_DIR ?? join(getAgentDir(), "cache", "pi-code-diff", "receipts");
+  return process.env.PI_CODER_RECEIPTS_DIR ?? join(getAgentDir(), "cache", "pi-coder", "receipts");
 }
 
 function sanitizeKeySegment(value: string): string {

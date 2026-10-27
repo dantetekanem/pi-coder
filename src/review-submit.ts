@@ -359,7 +359,7 @@ async function postReview(pi: ExtensionAPI, input: SubmitReviewInput, provider: 
   let outcome: ReviewSubmissionStep = { ...planned, status: "rejected" };
   try {
     const payload = buildReviewPayload({ ...input, verdict: planned.verdict, body: planned.bodyIncluded ? input.body : undefined, comments: planned.commentIndexes.map((index) => input.comments![index]!) }, provider);
-    directory = mkdtempSync(join(tmpdir(), "pi-code-diff-review-"));
+    directory = mkdtempSync(join(tmpdir(), "pi-coder-review-"));
     const payloadPath = join(directory, "review.json");
     writeFileSync(payloadPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
     const operation = renderProviderOperation(provider, "submitReview", { repo: input.repo, number: input.prNumber, payloadPath });

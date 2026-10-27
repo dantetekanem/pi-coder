@@ -9,7 +9,7 @@ import { createWorkbench } from "../workbench/app.js";
 import { createNodeFileAccess } from "../workbench/node/repository.js";
 
 async function withTempDirectory(run: (directory: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-code-diff-workbench-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-coder-workbench-"));
   try {
     await run(directory);
   } finally {

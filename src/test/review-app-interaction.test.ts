@@ -31,17 +31,17 @@ function expectSafeStatus(app: ReviewApp, marker: string): void {
   }
 }
 
-const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
+const originalPreferencesPath = process.env.PI_CODER_PREFERENCES_PATH;
 let preferencesDir: string;
 
 beforeEach(() => {
-  preferencesDir = mkdtempSync(join(tmpdir(), "pi-code-diff-review-app-"));
-  process.env.PI_CODE_DIFF_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
+  preferencesDir = mkdtempSync(join(tmpdir(), "pi-coder-review-app-"));
+  process.env.PI_CODER_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
 });
 
 afterEach(() => {
-  if (originalPreferencesPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
+  if (originalPreferencesPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = originalPreferencesPath;
   rmSync(preferencesDir, { recursive: true, force: true });
 });
 
@@ -1055,7 +1055,7 @@ describe("ReviewApp interaction", () => {
       "src/zzz.ts",
     ]);
     expect(app.render(220).join("\n")).toContain("a-z order");
-    expect(JSON.parse(readFileSync(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, "utf8")).navigatorFileOrder).toBe("alphabetical");
+    expect(JSON.parse(readFileSync(process.env.PI_CODER_PREFERENCES_PATH!, "utf8")).navigatorFileOrder).toBe("alphabetical");
     app.dispose();
   });
 

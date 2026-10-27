@@ -55,7 +55,7 @@ async function defaultInstallLauncher(launcher, entry) {
 export async function buildWorkbench(options = {}) {
   const globalRoot = resolve(options.globalRoot ?? resolve(homedir(), ".pi"));
   const sourceRoot = resolve(options.sourceRoot ?? defaultSourceRoot);
-  const cacheRoot = resolve(globalRoot, "agent/cache/pi-code-diff/workbench");
+  const cacheRoot = resolve(globalRoot, "agent/cache/pi-coder/workbench");
   const binRoot = resolve(globalRoot, "agent/bin");
   const launcher = resolve(binRoot, "pi-code-workbench");
   const id = randomUUID();

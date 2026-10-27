@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Settings, caches, and environment variables now use the pi-coder name: `~/.pi/agent/pi-coder-settings.json`, `~/.pi/agent/cache/pi-coder/`, and `PI_CODER_*` variables such as `PI_CODER_SETTINGS_PATH` and `PI_CODER_HERDR_FULLSCREEN`. Rename an existing settings file, cache folder, and variables to these names when you upgrade.
+
 ### Fixed
 
 - Submit a review with `s` at any time, even when every comment is stale. A stale comment still posts on its lines when the diff shows them and they hold the code it was written on. Otherwise it posts as a file comment that names its original lines and quotes that code when known. Comments on files that left the review stay in the saved draft, and a local review with nothing else to send is not reported as approved.
@@ -105,7 +109,7 @@
 
 ### Added
 
-- Allow launchers to override Herdr fullscreen for one Pi process with `PI_CODE_DIFF_HERDR_FULLSCREEN=on|off` without changing the saved preference.
+- Allow launchers to override Herdr fullscreen for one Pi process with `PI_CODER_HERDR_FULLSCREEN=on|off` without changing the saved preference.
 
 ## 0.6.0 - 2026-08-24
 

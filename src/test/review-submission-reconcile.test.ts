@@ -3,7 +3,7 @@ import { requireProviderSettings } from "../provider-settings.js";
 import { matchesSubmissionActor, reconcileSubmissionStep } from "../review-submission-reconcile.js";
 import type { ReviewSubmissionStep, SubmitReviewInput } from "../review-submit.js";
 
-beforeEach(() => { vi.stubEnv("PI_CODE_DIFF_SETTINGS_PATH", "/nonexistent/submission-reconcile-settings.json"); });
+beforeEach(() => { vi.stubEnv("PI_CODER_SETTINGS_PATH", "/nonexistent/submission-reconcile-settings.json"); });
 afterEach(() => { vi.unstubAllEnvs(); });
 const input: SubmitReviewInput = { provider: "github", repo: "example/widgets", prNumber: "12", commitId: "abc123", gitRoot: "/reviewed-checkout", verdict: "comment", body: " Summary ", comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Exact note\n" }] };
 const actor = { kind: "id" as const, value: "42", login: "reviewer" };

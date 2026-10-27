@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parsePullRequestHandoff } from "../pr-handoff.js";
 import { clearRemoteReviewTargetCache, extractBranchFromRemote, formatPullRequestContext, getRemoteCacheRoot, resolveRemoteReviewTarget } from "../remote.js";
 
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
-const originalCacheRoot = process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
+const originalCacheRoot = process.env.PI_CODER_REMOTE_CACHE_ROOT;
 const suppliedHead = "a".repeat(40);
 let directory: string;
 let settingsPath: string;
@@ -116,18 +116,18 @@ function suppliedHandoff() {
 }
 
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), "pi-code-diff-remote-"));
+  directory = mkdtempSync(join(tmpdir(), "pi-coder-remote-"));
   settingsPath = join(directory, "settings.json");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
   writeSettings();
   clearRemoteReviewTargetCache();
 });
 
 afterEach(() => {
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
-  if (originalCacheRoot == null) delete process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT;
-  else process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT = originalCacheRoot;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
+  if (originalCacheRoot == null) delete process.env.PI_CODER_REMOTE_CACHE_ROOT;
+  else process.env.PI_CODER_REMOTE_CACHE_ROOT = originalCacheRoot;
   rmSync(directory, { recursive: true, force: true });
   vi.useRealTimers();
 });
@@ -169,7 +169,7 @@ describe("remote review helpers", () => {
 
   it("keeps cache paths inside the configured root and rejects dot segments", () => {
     const root = join(directory, "cache-root");
-    process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT = root;
+    process.env.PI_CODER_REMOTE_CACHE_ROOT = root;
 
     expect(getRemoteCacheRoot("example/widgets")).toBe(join(root, "example", "widgets"));
     expect(() => getRemoteCacheRoot("../..")).toThrow("Invalid repository name");
@@ -314,7 +314,7 @@ describe("remote review helpers", () => {
 
   it("uses a local cache and the rendered clone URL for an unmatched repository", async () => {
     const cacheRoot = join(directory, "cache");
-    process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT = cacheRoot;
+    process.env.PI_CODER_REMOTE_CACHE_ROOT = cacheRoot;
     const exec = vi.fn(async (command: string, args: string[], options?: { cwd?: string }) => {
       if (command === "git" && args[0] === "init") return { code: 0, stdout: "initialized", stderr: "", killed: false };
       if (command === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") {

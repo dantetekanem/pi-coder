@@ -11,7 +11,7 @@ import { composeDiscussionPrompt, composeReviewPrompt } from "./prompt.js";
 import { parsePullRequestHandoff, type PullRequestHandoff } from "./pr-handoff.js";
 import { createRemotePullRequestSources } from "./pr-summary.js";
 import { loadReviewPreferences, saveReviewPreference, type PersistedReviewVerdict } from "./preferences.js";
-import { getProviderCapability, getProviderSettings, loadPiCodeDiffSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
+import { getProviderCapability, getProviderSettings, loadPiCoderSettings, renderProviderTemplate, requireProviderSettings, type CodeCommandSettings, type ProviderSettings } from "./provider-settings.js";
 import { createReviewSourceLinks, type ReviewSourceLinks } from "./source-links.js";
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { listReviewCompositions, removeReviewComposition, saveReviewComposition } from "./review-composition.js";
@@ -230,11 +230,11 @@ function setReviewProgress(ctx: ExtensionContext, key: string, message: string |
 }
 
 function setRemoteProgress(ctx: ExtensionContext, message: string | undefined): void {
-  setReviewProgress(ctx, "pi-code-diff-remote", message);
+  setReviewProgress(ctx, "pi-coder-remote", message);
 }
 
 function setLocalProgress(ctx: ExtensionContext, message: string | undefined): void {
-  setReviewProgress(ctx, "pi-code-diff-local", message);
+  setReviewProgress(ctx, "pi-coder-local", message);
 }
 
 export function mergeReviewBodies(...bodies: Array<string | undefined>): string | undefined {
@@ -250,7 +250,7 @@ function providerForTarget(target: RemoteReviewTarget): ProviderSettings {
 
 function loadReviewSourceLinks(target: RemoteReviewTarget | undefined): ReviewSourceLinks | undefined {
   try {
-    const settings = loadPiCodeDiffSettings();
+    const settings = loadPiCoderSettings();
     const providerId = target?.pullRequest == null ? undefined : target.provider ?? target.handoff?.provider;
     const provider = providerId == null ? undefined : getProviderSettings(providerId, settings);
     return createReviewSourceLinks(settings, provider, target?.repo ?? target?.pullRequest?.repo);
@@ -464,11 +464,11 @@ async function submitUiConfirmedReviewWithOutcome(
   let grammarResult: GrammarReviewResult = { status: "safe", corrected: original, changes: [] };
 
   if (body != null || comments.length > 0) {
-    ctx.ui.setStatus("pi-code-diff-grammar", `Checking review grammar with ${ctx.model?.id ?? "the active model"}...`);
+    ctx.ui.setStatus("pi-coder-grammar", `Checking review grammar with ${ctx.model?.id ?? "the active model"}...`);
     try {
       grammarResult = await reviewGrammar(ctx, original);
     } finally {
-      ctx.ui.setStatus("pi-code-diff-grammar", undefined);
+      ctx.ui.setStatus("pi-coder-grammar", undefined);
     }
   }
 
@@ -820,7 +820,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
   const initialShortcutConfig = loadCommentShortcuts();
   const initialPreferences = loadReviewPreferences();
   const launchExternalEditor = options.runExternalEditor ?? runExternalEditor;
-  const fullscreenOverride = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN?.trim().toLowerCase();
+  const fullscreenOverride = process.env.PI_CODER_HERDR_FULLSCREEN?.trim().toLowerCase();
   let herdrFullscreen = fullscreenOverride === "off"
     ? false
     : fullscreenOverride === "on"
@@ -1712,7 +1712,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
     launch: WorkbenchLaunch,
   ): Promise<{ ok: boolean; message: string } | undefined> {
     let setting: CodeCommandSettings | undefined;
-    try { setting = loadPiCodeDiffSettings().code; }
+    try { setting = loadPiCoderSettings().code; }
     catch (error) { return { ok: false, message: `Could not load code settings: ${error instanceof Error ? error.message : String(error)}` }; }
     if (setting == null) return undefined;
     if ((launch.stories?.length ?? 0) > 0) return { ok: false, message: "Code stories require the built-in Workbench." };

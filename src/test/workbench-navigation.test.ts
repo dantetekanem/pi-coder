@@ -27,7 +27,7 @@ function fakeDirectoryHandle(entries: Dirent[]) {
 }
 
 async function withTempDirectory(run: (directory: string) => Promise<void>): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-code-diff-workbench-listing-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-coder-workbench-listing-"));
   try { await run(directory); }
   finally { await rm(directory, { recursive: true, force: true }); }
 }
