@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { composeReviewPrompt } from "../prompt.js";
-import { applyResolvedSeedComments, partitionResolvedSeedComments, resolveSeedComments } from "../seed-comments.js";
+import { anchorResolvedSeedComments, applyResolvedSeedComments, partitionResolvedSeedComments, resolveSeedComments } from "../seed-comments.js";
 import { createInitialReviewState, getFileComment, getLineComment, upsertLineComment } from "../state.js";
-import type { ChangeStatus, ReviewFile, ReviewFileComparison } from "../types.js";
+import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents } from "../types.js";
+import { hashTargetSlice } from "../workbench/target.js";
 
 function makeComparison(path: string, status: ChangeStatus = "modified"): ReviewFileComparison {
   return {
@@ -147,6 +148,61 @@ describe("partitionResolvedSeedComments", () => {
   });
 });
 
+describe("anchorResolvedSeedComments", () => {
+  it("captures the reviewed bytes of each side and loads each file scope once", async () => {
+    const files = [makeFile("src/app.ts")];
+    const contents: ReviewFileContents = { originalContent: "old()\r\nkept()\n", modifiedContent: "one()\ntwo()\nthree()\n" };
+    const load = vi.fn(async () => contents);
+    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+      { path: "src/app.ts", body: "Range", startLine: 3, endLine: 2 },
+      { path: "src/app.ts", body: "new()", side: "deleted", line: 1, intent: "modify" },
+      { path: "src/app.ts", body: "Whole file", side: "file" },
+    ]);
+
+    const anchored = await anchorResolvedSeedComments(resolved, files, load);
+
+    expect(anchored[0]).toEqual({ ...resolved[0], captureHash: hashTargetSlice(contents.modifiedContent, { startLine: 2, endLine: 3 }) });
+    expect(anchored[1]).toEqual({ ...resolved[1], originalText: "old()", captureHash: hashTargetSlice(contents.originalContent, { startLine: 1, endLine: 1 }) });
+    expect(anchored[2]).toEqual(resolved[2]);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(files[0], "git-diff");
+  });
+
+  it("leaves seeds unanchored past the end, on unavailable sides, and after load errors", async () => {
+    const files = [makeFile("src/app.ts"), makeFile("src/broken.ts")];
+    const load = vi.fn(async (file: ReviewFile): Promise<ReviewFileContents> => {
+      if (file.id === "src/broken.ts") throw new Error("no bytes");
+      return { originalContent: "", modifiedContent: "only()\n", originalAvailable: false };
+    });
+    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+      { path: "src/app.ts", body: "Past the end", line: 4 },
+      { path: "src/app.ts", body: "No base side", side: "deleted", line: 1 },
+      { path: "src/broken.ts", body: "Load error", line: 1 },
+    ]);
+
+    expect(await anchorResolvedSeedComments(resolved, files, load)).toEqual(resolved);
+  });
+
+  it("anchors only lines the diff shows, so a code host can take them as line comments", async () => {
+    const files = [makeFile("src/app.ts")];
+    const original = Array.from({ length: 12 }, (_, index) => `line${index + 1}()`).join("\n") + "\n";
+    const modifiedContent = original.replace("line12()", "changed()");
+    const load = vi.fn(async () => ({ originalContent: original, modifiedContent }));
+    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+      { path: "src/app.ts", body: "Context line", line: 10 },
+      { path: "src/app.ts", body: "Outside the hunk", line: 3 },
+      { path: "src/app.ts", body: "Range leaving the hunk", startLine: 8, endLine: 11 },
+      { path: "src/app.ts", body: "After the final newline", line: 13 },
+      { path: "src/app.ts", body: "Fractional", line: 10.5 },
+    ]);
+
+    const anchored = await anchorResolvedSeedComments(resolved, files, load);
+
+    expect(anchored[0]).toEqual({ ...resolved[0], captureHash: hashTargetSlice(modifiedContent, { startLine: 10, endLine: 10 }) });
+    expect(anchored.slice(1)).toEqual(resolved.slice(1));
+  });
+});
+
 describe("applyResolvedSeedComments", () => {
   it("seeds line and file comments into the draft so they are retrievable like user comments", () => {
     const files = [makeFile("src/app.ts")];
@@ -162,6 +218,20 @@ describe("applyResolvedSeedComments", () => {
     expect(getLineComment(state, "src/app.ts", "git-diff", "added", 4)?.intent).toBe("comment");
     expect(getFileComment(state, "src/app.ts", "git-diff")?.body).toBe("File note");
     expect(getFileComment(state, "src/app.ts", "git-diff")?.intent).toBe("discuss");
+  });
+
+  it("starts anchored seeds mapped and unanchored line seeds stale", () => {
+    const files = [makeFile("src/app.ts")];
+    const captureHash = hashTargetSlice("a\nb\n", { startLine: 2, endLine: 2 });
+    const state = applyResolvedSeedComments(createInitialReviewState(files), [
+      { fileId: "src/app.ts", scope: "git-diff", side: "added", intent: "comment", startLine: 2, endLine: 2, body: "Anchored", captureHash },
+      { fileId: "src/app.ts", scope: "git-diff", side: "added", intent: "modify", startLine: 5, endLine: 5, body: "new()", originalText: "old()", captureHash },
+      { fileId: "src/app.ts", scope: "git-diff", side: "deleted", intent: "comment", startLine: 9, endLine: 9, body: "Unanchored" },
+    ]);
+
+    expect(getLineComment(state, "src/app.ts", "git-diff", "added", 2)).toMatchObject({ captureHash, anchorStatus: "mapped" });
+    expect(getLineComment(state, "src/app.ts", "git-diff", "added", 5)).toMatchObject({ originalText: "old()", captureHash, anchorStatus: "mapped" });
+    expect(getLineComment(state, "src/app.ts", "git-diff", "deleted", 9)?.anchorStatus).toBe("stale");
   });
 
   it("flows seeded comments through composeReviewPrompt like hand-written ones", () => {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
-import type { DiffReviewComment, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewResumeReference, ReviewScope, ReviewState } from "../../types.js";
-import { buildStructuredDiff } from "../../diff.js";
+import type { DiffReviewComment, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmitPayload } from "../../types.js";
+import { buildStructuredDiff, getVisibleSideLines, isVisibleLineRange } from "../../diff.js";
 import { scopeFileKey } from "../../types.js";
 import { hashTargetSlice, logicalLineCount } from "../../workbench/target.js";
 
@@ -112,6 +112,96 @@ export async function revalidateReviewDraftAnchors(
     }
   }));
   return { ...state, draft: { ...state.draft, comments } };
+}
+
+export interface ReviewSubmitPlacement {
+  payload: ReviewSubmitPayload;
+  /** Stale line drafts sent as file comments because their saved lines could not be confirmed. */
+  fileNotes: number;
+  /** Stale drafts left out because their file is no longer in the review; they stay saved. */
+  dropped: number;
+}
+
+function fenced(text: string, language = ""): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+
+function staleFileNote(comment: DiffReviewComment): DiffReviewComment {
+  const { startLine, endLine, originalText = "" } = comment;
+  const lines = startLine == null ? "a line" : endLine == null || endLine === startLine ? `line ${startLine}` : `lines ${startLine}-${endLine}`;
+  const origin = `Originally on ${comment.side === "deleted" ? "deleted " : ""}${lines}`;
+  let body: string;
+  if (comment.intent === "modify") {
+    const replacement = comment.body.length === 0 ? [] : comment.body.split(/\r\n|\n|\r/);
+    const change = originalText.length === 0
+      ? fenced(comment.body)
+      : fenced([...originalText.split(/\r\n|\n|\r/).map((line) => `- ${line}`), ...replacement.map((line) => `+ ${line}`)].join("\n"), "diff");
+    body = `${origin}. Suggested change:\n\n${change}`;
+  } else {
+    const quote = originalText.length === 0 ? `${origin}:` : `${origin}:\n\n${fenced(originalText)}`;
+    body = `${quote}\n\n${comment.body.trim()}`;
+  }
+  return {
+    id: comment.id,
+    fileId: comment.fileId,
+    scope: comment.scope,
+    side: "file",
+    intent: comment.intent === "modify" ? "comment" : comment.intent,
+    startLine: null,
+    endLine: null,
+    body,
+    fileTarget: "file",
+    anchorStatus: "mapped",
+  };
+}
+
+/**
+ * Places every draft for submission. A stale line draft keeps its lines only while they still hold its captured
+ * bytes and show in the diff; otherwise it becomes a file comment that names those lines. Drafts whose file left
+ * the review stay saved.
+ */
+export async function placeReviewSubmitComments(
+  payload: ReviewSubmitPayload,
+  files: readonly ReviewFile[],
+  loadContents: (file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>,
+): Promise<ReviewSubmitPlacement> {
+  const byId = new Map(files.map((file) => [file.id, file]));
+  const loaded = new Map<string, Promise<{ contents: ReviewFileContents; lines: ReturnType<typeof getVisibleSideLines> } | undefined>>();
+  let fileNotes = 0;
+  let dropped = 0;
+  const placed = await Promise.all(payload.comments.map(async (comment): Promise<DiffReviewComment | null> => {
+    const { side, startLine, endLine } = comment;
+    if (side === "file" || comment.anchorStatus !== "stale") return comment;
+    const file = byId.get(comment.fileId);
+    if (file == null) {
+      dropped += 1;
+      return null;
+    }
+    const key = `${comment.scope}::${file.id}`;
+    let pending = loaded.get(key);
+    if (pending == null) {
+      pending = Promise.resolve()
+        .then(() => loadContents(file, comment.scope))
+        .then((contents) => ({ contents, lines: getVisibleSideLines(buildStructuredDiff(contents.originalContent, contents.modifiedContent)) }))
+        .catch(() => undefined);
+      loaded.set(key, pending);
+    }
+    const review = await pending;
+    if (review != null && startLine != null && endLine != null
+      && validateReviewDraftAnchor({ ...comment, anchorStatus: "mapped" }, file, review.contents) === "mapped"
+      && isVisibleLineRange(review.lines[side], startLine, endLine)) {
+      return { ...comment, anchorStatus: "mapped" };
+    }
+    fileNotes += 1;
+    return staleFileNote(comment);
+  }));
+  return {
+    payload: { ...payload, comments: placed.filter((comment): comment is DiffReviewComment => comment != null) },
+    fileNotes,
+    dropped,
+  };
 }
 
 export interface ReviewResumeResolution {

@@ -1615,7 +1615,7 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
-  it("keeps a stale-only draft in the open overlay instead of approving it as empty", async () => {
+  it("submits a stale-only draft instead of keeping the review open", async () => {
     const stale = {
       id: "stable-stale-id",
       fileId: "src/app.ts::working::::",
@@ -1638,13 +1638,11 @@ describe("ReviewApp interaction", () => {
 
     app.handleInput("s");
 
-    expect(done).not.toHaveBeenCalled();
-    expect((app as any).state.draft.comments).toEqual([stale]);
-    expect(String((app as any).message)).toMatch(/unresolved|stale/i);
+    expect(done).toHaveBeenCalledWith({ type: "submit", allComment: "", allIntent: "discuss", comments: [stale] });
     app.dispose();
   });
 
-  it("flushes the full draft but submits only mapped stable IDs and the review-wide note", async () => {
+  it("flushes the full draft and submits mapped and stale items with the review-wide note", async () => {
     const mapped = {
       id: "mapped-file-note",
       fileId: "src/app.ts::working::::",
@@ -1689,7 +1687,7 @@ describe("ReviewApp interaction", () => {
       type: "submit",
       allComment: "Review-wide note",
       allIntent: "comment",
-      comments: [mapped],
+      comments: [mapped, stale],
     });
     app.dispose();
   });

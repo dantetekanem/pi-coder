@@ -21,7 +21,7 @@ import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscuss
 import { buildProviderComments, buildReviewBody, prepareSubmissionHandoff, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict, type SubmitReviewInput, type SubmitReviewOptions, type SubmitReviewResult } from "./review-submit.js";
 import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionDraftBinding } from "./review-submission-journal.js";
 import { hasConsumableConfirmedSubmissionDraft } from "./review-submission-consumption.js";
-import { partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
+import { anchorResolvedSeedComments, partitionResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
 import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
@@ -31,7 +31,7 @@ import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
 import { composeCodeDiscussionPrompt, parseDirectCodeArgs, runGuardedPiWorkbench } from "./adapters/pi/coordinator.js";
-import { createReviewScopeFingerprint, resolveReviewResume, revalidateReviewDraftAnchors } from "./adapters/pi/review-bridge.js";
+import { createReviewScopeFingerprint, placeReviewSubmitComments, resolveReviewResume, revalidateReviewDraftAnchors } from "./adapters/pi/review-bridge.js";
 import { ReviewInvocationCoordinator } from "./adapters/pi/review-invocation.js";
 import { listBundledShikiThemes } from "./workbench/node/shiki.js";
 import { normalizeWorkbenchLaunch } from "./workbench/target.js";
@@ -1096,6 +1096,11 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         const seedLabel = partitionedSeed.conflicts.length === 1 ? "comment" : "comments";
         ctx.ui.notify(`pi-coder: kept ${partitionedSeed.conflicts.length} existing review ${existingLabel}; skipped conflicting prepopulated ${seedLabel}.`, "warning");
       }
+      const applicableSeeds = await anchorResolvedSeedComments(
+        partitionedSeed.applicable,
+        files,
+        (file, scope) => loadFileContentsForReview(repoRoot, file, scope),
+      );
 
       let result: Awaited<ReturnType<typeof runReviewApp>>;
       let firstReview = true;
@@ -1123,7 +1128,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           commentShortcuts: shortcutConfig.shortcuts,
           allowEmptySubmit: remoteTarget == null || remoteTarget.pullRequest != null,
           visibleScopes,
-          seedComments: firstReview ? partitionedSeed.applicable : [],
+          seedComments: firstReview ? applicableSeeds : [],
           ...(firstReview ? pullRequestSources : createRemotePullRequestSources(pi, ctx, remoteTarget)),
           orderSignals: buildReviewOrderSignals(handoff),
           reviewHeader,
@@ -1300,14 +1305,18 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       }
 
       const fullSession = latestSession ?? loadReviewSession(storageIdentity, sessionId);
-      if (!hasSubmitPayloadContent(result) && fullSession != null && countDraftItems(fullSession) > 0) {
-        const message = `Review not submitted because unresolved drafts remain in session ${sessionId}. Reanchor or remove them before submitting.`;
-        ctx.ui.notify(message, "warning");
-        return { started: true, message };
+      const placement = await placeReviewSubmitComments(result, files, (file, scope) => loadFileContentsForReview(repoRoot, file, scope));
+      const submitted = placement.payload;
+      if (placement.fileNotes > 0) {
+        ctx.ui.notify(placement.fileNotes === 1
+          ? "1 stale comment will go out as a file comment that names its original lines."
+          : `${placement.fileNotes} stale comments will go out as file comments that name their original lines.`, "info");
       }
+      const droppedLabel = placement.dropped === 1 ? "1 comment on a file that left the review stays" : `${placement.dropped} comments on files that left the review stay`;
+      if (placement.dropped > 0) ctx.ui.notify(`${droppedLabel} saved in review session ${sessionId}.`, "warning");
 
       if (remoteTarget?.pullRequest != null) {
-        const finished = await finishRemotePrReview(ctx, files, result, remoteTarget, sessionId, fullSession?.state.draft ?? result);
+        const finished = await finishRemotePrReview(ctx, files, submitted, remoteTarget, sessionId, fullSession?.state.draft ?? result);
         let status = finished.status;
         // Provider submissions are consumed by the shared service; only DISCUSS remains caller-owned.
         if (finished.consumption != null) {
@@ -1319,16 +1328,19 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         return { ...status, nextCandidate };
       }
 
-      if (remoteTarget == null && !hasSubmitPayloadContent(result)) {
+      if (!hasSubmitPayloadContent(submitted) && placement.dropped > 0) {
+        return { started: true, message: `Nothing was submitted. ${droppedLabel} saved in review session ${sessionId}.` };
+      }
+      if (remoteTarget == null && !hasSubmitPayloadContent(submitted)) {
         const retained = persistDraftConsumption({ commentIds: [], consumeAllComment: false }, "old draft items");
         const approvalMessage = "PR approved";
         return { started: true, prompt: approvalMessage, ...(retained.message == null ? {} : { message: retained.message }) };
       }
-      const reviewPrompt = composeReviewPrompt(files, result);
+      const reviewPrompt = composeReviewPrompt(files, submitted);
       const prompt = remoteTarget == null ? reviewPrompt : composeRemoteReviewPrompt(remoteTarget, reviewPrompt);
       const retained = persistDraftConsumption({
-        commentIds: result.comments.map((comment) => comment.id),
-        consumeAllComment: result.allComment.trim().length > 0,
+        commentIds: submitted.comments.map((comment) => comment.id),
+        consumeAllComment: submitted.allComment.trim().length > 0,
       });
       return { started: true, prompt, ...(retained.message == null ? {} : { message: retained.message }) };
     } catch (error) {

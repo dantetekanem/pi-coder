@@ -491,6 +491,24 @@ async function fetchBranchBasedPullRequestRefs(
   }
 }
 
+async function fetchedRevision(pi: ExtensionAPI, gitRoot: string, branch: string): Promise<string> {
+  const result = await pi.exec("git", ["rev-parse", originRef(branch)], { cwd: gitRoot, timeout: 10000 });
+  return result.code === 0 ? result.stdout.trim().toLowerCase() : "";
+}
+
+async function hasPinnedRevisions(
+  pi: ExtensionAPI,
+  gitRoot: string,
+  metadata: PullRequestMetadata,
+  baseBranch: string,
+  headBranch: string,
+): Promise<boolean> {
+  const fetchedHead = await fetchedRevision(pi, gitRoot, headBranch);
+  if (metadata.baseRefOid == null || fetchedHead !== metadata.headRefOid.toLowerCase()) return false;
+  const base = await pi.exec("git", ["merge-base", "--is-ancestor", metadata.baseRefOid, originRef(baseBranch)], { cwd: gitRoot, timeout: 10000 });
+  return base.code === 0;
+}
+
 async function fetchRevisionPinnedPullRequestRefs(
   pi: ExtensionAPI,
   gitRoot: string,
@@ -503,14 +521,24 @@ async function fetchRevisionPinnedPullRequestRefs(
   const values = { repo: metadata.repo ?? "", number: metadata.number };
   const baseBranch = configuredTrackingBranch(provider, "base", values);
   const headBranch = configuredTrackingBranch(provider, "head", values);
-  await fetchRemoteRefs(pi, gitRoot, [
+  const fetchPinnedRefs = (source: string) => fetchRemoteRefs(pi, gitRoot, [
     `+${sourceBranchRef(metadata.baseRefName)}:${originRef(baseBranch)}`,
     `+${sourceBranchRef(metadata.headRefName)}:${originRef(headBranch)}`,
-  ], remote, onProgress);
+  ], source, onProgress);
+  const providerRemote = remote === "origin" && provider.urls.clone != null && metadata.repo != null
+    ? renderProviderTemplate(provider.urls.clone, { repo: metadata.repo })
+    : undefined;
 
-  const headResult = await pi.exec("git", ["rev-parse", originRef(headBranch)], { cwd: gitRoot, timeout: 10000 });
-  const fetchedHead = headResult.code === 0 ? headResult.stdout.trim().toLowerCase() : "";
-  if (fetchedHead !== metadata.headRefOid.toLowerCase()) {
+  let servedByRemote = false;
+  try {
+    await fetchPinnedRefs(remote);
+    servedByRemote = providerRemote == null || await hasPinnedRevisions(pi, gitRoot, metadata, baseBranch, headBranch);
+  } catch (error) {
+    if (providerRemote == null) throw error;
+  }
+  if (!servedByRemote && providerRemote != null) await fetchPinnedRefs(providerRemote);
+
+  if (await fetchedRevision(pi, gitRoot, headBranch) !== metadata.headRefOid.toLowerCase()) {
     throw new Error(`${provider.label} PR #${metadata.number} head changed while preparing the review. Reopen it to review the latest head.`);
   }
   const baseRef = originShortRef(baseBranch);

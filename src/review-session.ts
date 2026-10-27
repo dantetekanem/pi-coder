@@ -572,6 +572,7 @@ export function rebaseReviewSession(
   const commentBySeed = new Map<SeedReviewComment, DiffReviewComment>();
   const markedSeeds = new Set<SeedReviewComment>();
   const originalTextByKey = new Map<string, string>();
+  const anchorByKey = new Map<string, Pick<DiffReviewComment, "captureHash" | "anchorStatus">>();
 
   for (const comment of session.state.draft.comments) {
     const path = commentFilePath(comment.fileId);
@@ -580,8 +581,10 @@ export function rebaseReviewSession(
     const unchanged = previous != null && current != null && previous === current;
     const body = stripNeedsAttention(comment.body);
     const marked = !unchanged && comment.side !== "file";
-    if (comment.originalText != null && comment.startLine != null) {
-      originalTextByKey.set(`${path}:${comment.scope}:${comment.side}:${comment.startLine}`, comment.originalText);
+    const key = `${path}:${comment.scope}:${comment.side}:${comment.startLine}`;
+    if (comment.originalText != null && comment.startLine != null) originalTextByKey.set(key, comment.originalText);
+    if (unchanged && comment.captureHash != null && comment.startLine != null) {
+      anchorByKey.set(key, { captureHash: comment.captureHash, anchorStatus: comment.anchorStatus === "mapped" ? "mapped" : "stale" });
     }
     const seed: SeedReviewComment = {
       path,
@@ -624,7 +627,7 @@ export function rebaseReviewSession(
   const comments = rebasedState.draft.comments.map((comment) => {
     const key = `${commentFilePath(comment.fileId)}:${comment.scope}:${comment.side}:${comment.startLine}`;
     const originalText = originalTextByKey.get(key);
-    return originalText == null ? comment : { ...comment, originalText };
+    return { ...comment, ...(originalText == null ? {} : { originalText }), ...anchorByKey.get(key) };
   });
 
   const idsByPath = new Map(files.map((file) => [file.path, file.id]));
