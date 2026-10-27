@@ -22,7 +22,7 @@ import {
 } from "../review-session.js";
 import type { DiffReviewComment, ReviewFile, ReviewState } from "../types.js";
 
-const originalSessionsDir = process.env.PI_CODE_DIFF_SESSIONS_DIR;
+const originalSessionsDir = process.env.PI_CODER_SESSIONS_DIR;
 let sessionsDir: string;
 
 function state(comments?: DiffReviewComment[]): ReviewState {
@@ -94,14 +94,14 @@ function reviewFile(path: string, additions: number, modifiedBlobSha = `${path}:
 }
 
 beforeEach(async () => {
-  sessionsDir = await mkdtemp(join(tmpdir(), "pi-code-diff-sessions-"));
-  process.env.PI_CODE_DIFF_SESSIONS_DIR = sessionsDir;
+  sessionsDir = await mkdtemp(join(tmpdir(), "pi-coder-sessions-"));
+  process.env.PI_CODER_SESSIONS_DIR = sessionsDir;
 });
 
 afterEach(async () => {
   vi.useRealTimers();
-  if (originalSessionsDir == null) delete process.env.PI_CODE_DIFF_SESSIONS_DIR;
-  else process.env.PI_CODE_DIFF_SESSIONS_DIR = originalSessionsDir;
+  if (originalSessionsDir == null) delete process.env.PI_CODER_SESSIONS_DIR;
+  else process.env.PI_CODER_SESSIONS_DIR = originalSessionsDir;
   await rm(sessionsDir, { recursive: true, force: true });
 });
 
@@ -248,7 +248,7 @@ describe("review sessions", () => {
     const identity = "/repo|base|head";
     const invalidParent = join(sessionsDir, "not-a-directory");
     await writeFile(invalidParent, "occupied", "utf8");
-    process.env.PI_CODE_DIFF_SESSIONS_DIR = invalidParent;
+    process.env.PI_CODER_SESSIONS_DIR = invalidParent;
 
     expect(saveReviewSessionWithStatus(identity, sessionData())).toMatchObject({ id: createReviewSessionId(identity), saved: false, status: "error" });
   });

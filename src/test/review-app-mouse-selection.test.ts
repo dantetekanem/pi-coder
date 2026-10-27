@@ -16,18 +16,18 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
   copyToClipboard: clipboard.copy,
 }));
 
-const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
+const originalPreferencesPath = process.env.PI_CODER_PREFERENCES_PATH;
 let preferencesDir: string;
 
 beforeEach(() => {
   clipboard.copy.mockClear();
-  preferencesDir = mkdtempSync(join(tmpdir(), "pi-code-diff-mouse-selection-"));
-  process.env.PI_CODE_DIFF_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
+  preferencesDir = mkdtempSync(join(tmpdir(), "pi-coder-mouse-selection-"));
+  process.env.PI_CODER_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
 });
 
 afterEach(() => {
-  if (originalPreferencesPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
+  if (originalPreferencesPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = originalPreferencesPath;
   rmSync(preferencesDir, { recursive: true, force: true });
 });
 

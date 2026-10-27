@@ -3,7 +3,7 @@ import { devNull } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { FILTER_CONFIG_ARGS, filterOverrideArgs, parseFilterConfigPrefixes } from "./git-filter-policy.js";
 
-export const REPOSITORY_CHANGE_STATUS_KEY = "pi-code-diff-local-changes";
+export const REPOSITORY_CHANGE_STATUS_KEY = "pi-coder-local-changes";
 const COMMAND_TIMEOUT_MS = 3_000;
 const OUTPUT_CAP_BYTES = 64 * 1024;
 const STATUS_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"] as const;

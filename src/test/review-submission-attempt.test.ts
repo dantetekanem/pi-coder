@@ -14,10 +14,10 @@ let journalPath: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "submission-attempt-"));
   journalPath = join(directory, "attempts");
-  vi.stubEnv("PI_CODE_DIFF_SETTINGS_PATH", join(directory, "settings.json"));
-  vi.stubEnv("PI_CODE_DIFF_SUBMISSIONS_DIR", journalPath);
-  vi.stubEnv("PI_CODE_DIFF_RECEIPTS_DIR", join(directory, "receipts"));
-  vi.stubEnv("PI_CODE_DIFF_SESSIONS_DIR", join(directory, "sessions"));
+  vi.stubEnv("PI_CODER_SETTINGS_PATH", join(directory, "settings.json"));
+  vi.stubEnv("PI_CODER_SUBMISSIONS_DIR", journalPath);
+  vi.stubEnv("PI_CODER_RECEIPTS_DIR", join(directory, "receipts"));
+  vi.stubEnv("PI_CODER_SESSIONS_DIR", join(directory, "sessions"));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
 function input(): SubmitReviewInput { return { provider: "github", repo: "example/widgets", prNumber: "12", commitId: "a".repeat(40), verdict: "comment", body: "Approved text" }; }

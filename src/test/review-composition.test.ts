@@ -10,7 +10,7 @@ import { ReviewApp } from "../ui/review-app.js";
 
 const identity = "/repo|working|local";
 const sessionId = "instance";
-const originalDirectory = process.env.PI_CODE_DIFF_SESSIONS_DIR;
+const originalDirectory = process.env.PI_CODER_SESSIONS_DIR;
 let directory: string;
 const session: ReviewSessionData = {
   state: createInitialReviewState([]), diffViewMode: "unified", navigatorTreeMode: false,
@@ -22,13 +22,13 @@ function composition(text = "unfinished"): ReviewComposition {
 }
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "pi-composition-"));
-  process.env.PI_CODE_DIFF_SESSIONS_DIR = directory;
+  process.env.PI_CODER_SESSIONS_DIR = directory;
   saveReviewSession(identity, session, { id: sessionId, revision: "worktree" });
 });
 afterEach(() => {
   vi.useRealTimers();
-  if (originalDirectory == null) delete process.env.PI_CODE_DIFF_SESSIONS_DIR;
-  else process.env.PI_CODE_DIFF_SESSIONS_DIR = originalDirectory;
+  if (originalDirectory == null) delete process.env.PI_CODER_SESSIONS_DIR;
+  else process.env.PI_CODER_SESSIONS_DIR = originalDirectory;
   rmSync(directory, { recursive: true, force: true });
 });
 

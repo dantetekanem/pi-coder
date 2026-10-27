@@ -10,12 +10,12 @@ import {
   saveReviewReceipt,
 } from "../review-receipts.js";
 
-const receiptsDir = join(tmpdir(), `pi-code-diff-receipts-${process.pid}`);
-const settingsPath = join(tmpdir(), `pi-code-diff-receipt-settings-${process.pid}.json`);
-const originalReceiptsDir = process.env.PI_CODE_DIFF_RECEIPTS_DIR;
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
-process.env.PI_CODE_DIFF_RECEIPTS_DIR = receiptsDir;
-process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+const receiptsDir = join(tmpdir(), `pi-coder-receipts-${process.pid}`);
+const settingsPath = join(tmpdir(), `pi-coder-receipt-settings-${process.pid}.json`);
+const originalReceiptsDir = process.env.PI_CODER_RECEIPTS_DIR;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
+process.env.PI_CODER_RECEIPTS_DIR = receiptsDir;
+process.env.PI_CODER_SETTINGS_PATH = settingsPath;
 
 function provider(id: string) {
   return {
@@ -33,10 +33,10 @@ function provider(id: string) {
 }
 
 afterAll(() => {
-  if (originalReceiptsDir == null) delete process.env.PI_CODE_DIFF_RECEIPTS_DIR;
-  else process.env.PI_CODE_DIFF_RECEIPTS_DIR = originalReceiptsDir;
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalReceiptsDir == null) delete process.env.PI_CODER_RECEIPTS_DIR;
+  else process.env.PI_CODER_RECEIPTS_DIR = originalReceiptsDir;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(receiptsDir, { recursive: true, force: true });
   rmSync(settingsPath, { force: true });
 });

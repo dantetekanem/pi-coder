@@ -55,7 +55,7 @@ export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
 };
 
 function getPreferencesPath(): string {
-  return process.env.PI_CODE_DIFF_PREFERENCES_PATH ?? join(dirname(getShortcutConfigPath()), "code-diff-preferences.json");
+  return process.env.PI_CODER_PREFERENCES_PATH ?? join(dirname(getShortcutConfigPath()), "code-diff-preferences.json");
 }
 
 function isPersistedDiffViewMode(value: unknown): value is PersistedDiffViewMode {

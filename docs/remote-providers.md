@@ -8,7 +8,7 @@ GitHub pull requests work through the authenticated [`gh`](https://cli.github.co
 
 Run `gh auth login` first.
 
-Add other providers in `~/.pi/agent/pi-code-diff-settings.json`. Local settings extend the built-in GitHub provider; a local `providers.github` entry explicitly overrides it. Provider operations are executable-plus-argument arrays, never shell commands. Template values such as `{repo}`, `{number}`, `{branch}`, and `{payloadPath}` are passed as individual arguments.
+Add other providers in `~/.pi/agent/pi-coder-settings.json`. Local settings extend the built-in GitHub provider; a local `providers.github` entry explicitly overrides it. Provider operations are executable-plus-argument arrays, never shell commands. Template values such as `{repo}`, `{number}`, `{branch}`, and `{payloadPath}` are passed as individual arguments.
 
 ```json
 {
@@ -125,4 +125,4 @@ Recovery uses only a review ID returned by this step's own write. The scoped rev
 
 The result exposes `attemptId` and separate `journalStatus`. If the server accepted the review but its local journal update failed, the result retains that remote evidence and warns against reposting. A repeated completed intent reports its previous acceptance without inventing a new posting time. Client admission and observation timestamps do not establish when the server finished processing an uncertain request.
 
-The journal is stored in `~/.pi/agent/cache/pi-code-diff/submissions` (override with `PI_CODE_DIFF_SUBMISSIONS_DIR`). Attempts and unconfirmed handoffs share a limit of 1,024 records, 4 MiB per record and 64 MiB of retained data including atomic replacement. Capacity and corruption failures preserve existing records; they do not truncate or evict intents. Do not delete an uncertain record to force a retry. The local filesystem mutex uses the draft store's manual-only lock recovery: stop all writers before recovery. Atomic replacement covers process interruption, not power loss, shared filesystems or older writers that bypass the mutex. These storage bounds are not peak-memory guarantees.
+The journal is stored in `~/.pi/agent/cache/pi-coder/submissions` (override with `PI_CODER_SUBMISSIONS_DIR`). Attempts and unconfirmed handoffs share a limit of 1,024 records, 4 MiB per record and 64 MiB of retained data including atomic replacement. Capacity and corruption failures preserve existing records; they do not truncate or evict intents. Do not delete an uncertain record to force a retry. The local filesystem mutex uses the draft store's manual-only lock recovery: stop all writers before recovery. Atomic replacement covers process interruption, not power loss, shared filesystems or older writers that bypass the mutex. These storage bounds are not peak-memory guarantees.

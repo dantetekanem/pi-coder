@@ -163,7 +163,7 @@ function parseHandoff(value: unknown, id: string): SubmissionHandoff {
  * Unknown/completed intents are never silently evicted. No fsync or shared-filesystem guarantee.
  */
 export function createSubmissionJournal(options: { directory?: string; maxRecords?: number; maxRecordBytes?: number; maxBytes?: number } = {}) {
-  const directory = options.directory ?? process.env.PI_CODE_DIFF_SUBMISSIONS_DIR ?? join(getAgentDir(), "cache", "pi-code-diff", "submissions");
+  const directory = options.directory ?? process.env.PI_CODER_SUBMISSIONS_DIR ?? join(getAgentDir(), "cache", "pi-coder", "submissions");
   const maxRecords = options.maxRecords ?? 1024;
   const maxRecordBytes = options.maxRecordBytes ?? 4 * 1024 * 1024;
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;

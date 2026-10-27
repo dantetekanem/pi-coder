@@ -1,4 +1,4 @@
-import { renderProviderTemplate, type PiCodeDiffSettings, type ProviderSettings } from "./provider-settings.js";
+import { renderProviderTemplate, type PiCoderSettings, type ProviderSettings } from "./provider-settings.js";
 
 export interface ReviewSourceLocation {
   path: string;
@@ -22,7 +22,7 @@ function encodeUrlPath(value: string): string {
 }
 
 export function createReviewSourceLinks(
-  settings: Pick<PiCodeDiffSettings, "search">,
+  settings: Pick<PiCoderSettings, "search">,
   provider?: ProviderSettings,
   repo?: string,
 ): ReviewSourceLinks {

@@ -7,7 +7,7 @@ import { createRemoteReviewRepliesSource } from "../review-replies.js";
 import type { RemoteReviewTarget } from "../remote.js";
 import { requireProviderSettings } from "../provider-settings.js";
 
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;
 let settingsPath: string;
 
@@ -110,13 +110,13 @@ function target(providerId = "primary", pullRequest: Partial<NonNullable<RemoteR
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "pr-summary-settings-"));
   settingsPath = join(directory, "settings.json");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
   writeFileSync(settingsPath, JSON.stringify(settings()), "utf8");
 });
 
 afterEach(() => {
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(directory, { recursive: true, force: true });
 });
 

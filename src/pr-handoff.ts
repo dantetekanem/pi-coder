@@ -1,7 +1,7 @@
-import type { PiCodeDiffSettings, ProviderUrlPattern } from "./provider-settings.js";
+import type { PiCoderSettings, ProviderUrlPattern } from "./provider-settings.js";
 import {
   getProviderCapability,
-  loadPiCodeDiffSettings,
+  loadPiCoderSettings,
   renderProviderTemplate,
   requireProviderSettings,
 } from "./provider-settings.js";
@@ -202,7 +202,7 @@ function matchPathPattern(pathname: string, pattern: ProviderUrlPattern): { repo
   return repo != null && isSafeRepositoryName(repo) && number != null && NUMBER_PATTERN.test(number) ? { repo, number } : undefined;
 }
 
-export function parseConfiguredPullRequestUrl(input: string, settings = loadPiCodeDiffSettings()): ConfiguredPullRequestUrl | undefined {
+export function parseConfiguredPullRequestUrl(input: string, settings = loadPiCoderSettings()): ConfiguredPullRequestUrl | undefined {
   let url: URL;
   try {
     url = new URL(input.trim());
@@ -227,25 +227,25 @@ export function parseConfiguredPullRequestUrl(input: string, settings = loadPiCo
   return undefined;
 }
 
-export function canonicalPullRequestUrl(provider: string, repo: string, number: string, settings = loadPiCodeDiffSettings()): string {
+export function canonicalPullRequestUrl(provider: string, repo: string, number: string, settings = loadPiCoderSettings()): string {
   return renderProviderTemplate(requireProviderSettings(provider, settings).urls.canonical, { repo, number });
 }
 
-function pullRequestUrl(value: unknown, provider: string, repo: string, number: string, label: string, settings: PiCodeDiffSettings): string {
+function pullRequestUrl(value: unknown, provider: string, repo: string, number: string, label: string, settings: PiCoderSettings): string {
   const raw = text(value, label);
   const canonical = canonicalPullRequestUrl(provider, repo, number, settings);
   if (raw !== canonical) fail(`${label} must be exactly ${canonical}.`);
   return canonical;
 }
 
-function candidateUrl(value: unknown, label: string, settings: PiCodeDiffSettings): string {
+function candidateUrl(value: unknown, label: string, settings: PiCoderSettings): string {
   const raw = text(value, label);
   const matched = parseConfiguredPullRequestUrl(raw, settings);
   if (matched == null) fail(`${label} must match a configured pull request URL.`);
   return matched.canonical;
 }
 
-function providerId(value: unknown, settings: PiCodeDiffSettings): string {
+function providerId(value: unknown, settings: PiCoderSettings): string {
   const id = text(value, "provider");
   if (settings.providers[id] == null) fail(`provider ${id} is not configured.`);
   return id;
@@ -302,7 +302,7 @@ function filePriority(item: unknown, index: number): PullRequestHandoffFilePrior
   return { path: text(row.path, `${label}.path`), reason: optionalText(row.reason, `${label}.reason`) };
 }
 
-function stackParent(value: unknown, settings: PiCodeDiffSettings): PullRequestHandoffStackParent {
+function stackParent(value: unknown, settings: PiCoderSettings): PullRequestHandoffStackParent {
   const row = record(value, "stackParent");
   rejectUnknownKeys(row, new Set(["number", "title", "headRefName", "state", "url"]), "stackParent");
   return {
@@ -324,13 +324,13 @@ function queue(value: unknown): PullRequestHandoffQueue {
   return { position, total };
 }
 
-function nextCandidate(value: unknown, settings: PiCodeDiffSettings): PullRequestHandoffNextCandidate {
+function nextCandidate(value: unknown, settings: PiCoderSettings): PullRequestHandoffNextCandidate {
   const row = record(value, "nextCandidate");
   rejectUnknownKeys(row, new Set(["url", "title"]), "nextCandidate");
   return { url: candidateUrl(row.url, "nextCandidate.url", settings), title: optionalText(row.title, "nextCandidate.title") };
 }
 
-export function parsePullRequestHandoff(input: unknown, settings = loadPiCodeDiffSettings()): PullRequestHandoff {
+export function parsePullRequestHandoff(input: unknown, settings = loadPiCoderSettings()): PullRequestHandoff {
   const row = record(input, "pullRequest");
   rejectUnknownKeys(row, TOP_LEVEL_KEYS, "pullRequest");
 

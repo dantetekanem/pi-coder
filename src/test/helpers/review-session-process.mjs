@@ -35,7 +35,7 @@ process.on("message", (command) => {
     const rename = fs.renameSync;
     if (command.pause) {
       const pauseTarget = command.pauseAt === "index"
-        ? join(process.env.PI_CODE_DIFF_SESSIONS_DIR, "index.json")
+        ? join(process.env.PI_CODER_SESSIONS_DIR, "index.json")
         : sessions.getReviewSessionPathForDiagnostics(sessions.createReviewSessionId(identity));
       fs.renameSync = (from, to) => {
         if (to === pauseTarget) {

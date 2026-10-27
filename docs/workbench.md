@@ -18,7 +18,7 @@ pnpm workbench:start /optional/workspace/path
 pnpm workbench:start --help
 ```
 
-Omit the path to use `process.cwd()`. The build stages and atomically promotes the runtime under `~/.pi/agent/cache/pi-code-diff/workbench/` and installs `~/.pi/agent/bin/pi-code-workbench`; it never writes `.workbench-dist/`, `dist/`, `build/`, or cache output into this checkout or an opened workspace. `pnpm workbench:start` invokes that global launcher. The standalone also accepts `--cwd`, structured `--path`/`--line` targeting, an optional `--end-line`/`--anchor-sha256`, and repeatable `--story-json`; run `pi-code-workbench --help` for the exact grammar.
+Omit the path to use `process.cwd()`. The build stages and atomically promotes the runtime under `~/.pi/agent/cache/pi-coder/workbench/` and installs `~/.pi/agent/bin/pi-code-workbench`; it never writes `.workbench-dist/`, `dist/`, `build/`, or cache output into this checkout or an opened workspace. `pnpm workbench:start` invokes that global launcher. The standalone also accepts `--cwd`, structured `--path`/`--line` targeting, an optional `--end-line`/`--anchor-sha256`, and repeatable `--story-json`; run `pi-code-workbench --help` for the exact grammar.
 
 ## Explorer and source
 

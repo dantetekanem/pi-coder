@@ -5,17 +5,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_REVIEW_PANE_VISIBILITY, DEFAULT_REVIEW_PREFERENCES, loadReviewPreferences, saveReviewPreference } from "../preferences.js";
 import { DEFAULT_STORY_AGENT } from "../review-agent.js";
 
-const originalEnvPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
+const originalEnvPath = process.env.PI_CODER_PREFERENCES_PATH;
 let tempDir: string;
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), "pi-code-diff-prefs-"));
-  process.env.PI_CODE_DIFF_PREFERENCES_PATH = join(tempDir, "code-diff-preferences.json");
+  tempDir = await mkdtemp(join(tmpdir(), "pi-coder-prefs-"));
+  process.env.PI_CODER_PREFERENCES_PATH = join(tempDir, "code-diff-preferences.json");
 });
 
 afterEach(async () => {
-  if (originalEnvPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalEnvPath;
+  if (originalEnvPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = originalEnvPath;
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -92,7 +92,7 @@ describe("review preferences", () => {
   });
 
   it("falls back to the story agent default for invalid persisted selection values", async () => {
-    await writeFile(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, JSON.stringify({
+    await writeFile(process.env.PI_CODER_PREFERENCES_PATH!, JSON.stringify({
       storyAgent: { provider: "", model: "gpt", thinking: 4 },
     }), "utf8");
 
@@ -100,7 +100,7 @@ describe("review preferences", () => {
   });
 
   it("falls back to defaults for unknown order and verdict values", async () => {
-    await writeFile(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, JSON.stringify({
+    await writeFile(process.env.PI_CODER_PREFERENCES_PATH!, JSON.stringify({
       navigatorFileOrder: "random",
       lastReviewVerdict: "merge",
     }), "utf8");
@@ -109,7 +109,7 @@ describe("review preferences", () => {
   });
 
   it("fills missing pane visibility keys from defaults", async () => {
-    await writeFile(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, JSON.stringify({
+    await writeFile(process.env.PI_CODER_PREFERENCES_PATH!, JSON.stringify({
       paneVisibility: { comments: false },
     }), "utf8");
 
@@ -120,7 +120,7 @@ describe("review preferences", () => {
   });
 
   it("ignores corrupted preference files and keeps defaults", async () => {
-    await writeFile(process.env.PI_CODE_DIFF_PREFERENCES_PATH!, "{ not valid json", "utf8");
+    await writeFile(process.env.PI_CODER_PREFERENCES_PATH!, "{ not valid json", "utf8");
 
     expect(loadReviewPreferences()).toEqual(DEFAULT_REVIEW_PREFERENCES);
   });

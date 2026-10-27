@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hasHandoffContext, parsePullRequestHandoff, pullRequestMetadataFromHandoff } from "../pr-handoff.js";
 
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;
 let settingsPath: string;
 
@@ -97,15 +97,15 @@ function fullPayload(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 beforeEach(() => {
-  directory = mkdtempSync(join(tmpdir(), "pi-code-diff-handoff-"));
+  directory = mkdtempSync(join(tmpdir(), "pi-coder-handoff-"));
   settingsPath = join(directory, "settings.json");
   writeFileSync(settingsPath, JSON.stringify(neutralSettings()), "utf8");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
 });
 
 afterEach(() => {
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(directory, { recursive: true, force: true });
 });
 

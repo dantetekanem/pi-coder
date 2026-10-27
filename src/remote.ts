@@ -11,13 +11,13 @@ import {
   type PullRequestHandoff,
 } from "./pr-handoff.js";
 import type {
-  PiCodeDiffSettings,
+  PiCoderSettings,
   ProviderSettings,
   RepositoryProfileSettings,
 } from "./provider-settings.js";
 import {
   getProviderCapability,
-  loadPiCodeDiffSettings,
+  loadPiCoderSettings,
   readConfiguredField,
   renderProviderOperation,
   renderProviderTemplate,
@@ -120,7 +120,7 @@ function stripOriginPrefix(ref: string): string {
   return ref.replace(/^origin\//, "");
 }
 
-export function extractBranchFromRemote(input: string, settings = loadPiCodeDiffSettings()): RemoteParseResult | null {
+export function extractBranchFromRemote(input: string, settings = loadPiCoderSettings()): RemoteParseResult | null {
   const trimmed = input.trim();
   const pullRequest = parseConfiguredPullRequestUrl(trimmed, settings);
   if (pullRequest != null) {
@@ -169,7 +169,7 @@ function normalizeRepositoryProfile(repo: string, entry: RepositoryProfileSettin
   };
 }
 
-function getConfiguredRepositoryProfile(repo: string, settings: PiCodeDiffSettings): ConfiguredRepositoryProfile | undefined {
+function getConfiguredRepositoryProfile(repo: string, settings: PiCoderSettings): ConfiguredRepositoryProfile | undefined {
   const entry = settings.repositories[normalizeRepoName(repo)];
   return entry == null ? undefined : normalizeRepositoryProfile(repo, entry);
 }
@@ -194,7 +194,7 @@ export function getRemoteCacheRoot(repo: string): string {
   if (!isSafeRepositoryName(repo)) throw new Error(`Invalid repository name: ${repo}.`);
   const safeParts = repo.split("/").map((part) => part.replace(/[^\w.-]/g, "_")).filter(Boolean);
   if (safeParts.some((part) => part === "." || part === "..")) throw new Error(`Invalid repository name: ${repo}.`);
-  const root = resolve(process.env.PI_CODE_DIFF_REMOTE_CACHE_ROOT ?? join(homedir(), ".pi", "agent", "cache", "pi-code-diff", "remotes"));
+  const root = resolve(process.env.PI_CODER_REMOTE_CACHE_ROOT ?? join(homedir(), ".pi", "agent", "cache", "pi-coder", "remotes"));
   const candidate = resolve(root, ...safeParts);
   if (!candidate.startsWith(`${root}${sep}`)) throw new Error(`Invalid repository cache path for ${repo}.`);
   return candidate;
@@ -224,7 +224,7 @@ async function resolveRepoRoot(
   fallbackCwd: string,
   repo: string | undefined,
   explicitCwd: string | undefined,
-  settings: PiCodeDiffSettings,
+  settings: PiCoderSettings,
   provider: ProviderSettings | undefined,
   onProgress?: RemoteProgress,
 ): Promise<ResolvedRepoRoot> {
@@ -414,7 +414,7 @@ export async function getPullRequestMetadata(
   repo?: string,
   onProgress?: RemoteProgress,
   providerId?: PullRequestProvider,
-  settings = loadPiCodeDiffSettings(),
+  settings = loadPiCoderSettings(),
 ): Promise<PullRequestMetadata> {
   if (repo == null) throw new Error(`Could not resolve PR #${prNumber}: repository is unknown.`);
   const configuredIds = Object.keys(settings.providers);
@@ -602,7 +602,7 @@ export async function resolveRemoteReviewTarget(
 ): Promise<RemoteReviewTarget> {
   const handoff = isRemoteReviewTargetResolutionOptions(handoffOrOptions) ? undefined : handoffOrOptions;
   const options = isRemoteReviewTargetResolutionOptions(handoffOrOptions) ? handoffOrOptions : explicitOptions;
-  const settings = loadPiCodeDiffSettings();
+  const settings = loadPiCoderSettings();
   const parsed = extractBranchFromRemote(remote, settings);
   if (parsed == null) throw new Error(`Could not extract branch name from: ${remote}`);
   if (handoff != null) assertHandoffMatchesTarget(handoff, parsed, remote);

@@ -11,10 +11,10 @@ vi.mock("../review-submission-consumption.js", () => ({ consumeConfirmedSubmissi
 let directory: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "submit-consumption-"));
-  vi.stubEnv("PI_CODE_DIFF_SETTINGS_PATH", join(directory, "settings.json"));
-  vi.stubEnv("PI_CODE_DIFF_SUBMISSIONS_DIR", join(directory, "journal"));
-  vi.stubEnv("PI_CODE_DIFF_SESSIONS_DIR", join(directory, "sessions"));
-  vi.stubEnv("PI_CODE_DIFF_RECEIPTS_DIR", join(directory, "receipts"));
+  vi.stubEnv("PI_CODER_SETTINGS_PATH", join(directory, "settings.json"));
+  vi.stubEnv("PI_CODER_SUBMISSIONS_DIR", join(directory, "journal"));
+  vi.stubEnv("PI_CODER_SESSIONS_DIR", join(directory, "sessions"));
+  vi.stubEnv("PI_CODER_RECEIPTS_DIR", join(directory, "receipts"));
   consume.mockReset().mockReturnValue({ status: "saved", remainingItems: 1, message: "One draft item remains." });
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });

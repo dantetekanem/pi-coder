@@ -292,15 +292,15 @@ describe("repository change footer status", () => {
     second.resolve({ files: 2, filesCapped: false, additions: 1, deletions: 1, untrackedFiles: 0 });
     await Promise.all([firstRefresh, secondRefresh]);
 
-    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", "2 files · \x1b[32m+1\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff\x1b[0m for details");
-    expect(setStatus).not.toHaveBeenCalledWith("pi-code-diff-local-changes", "9 files · \x1b[32m+9\x1b[0m \x1b[31m−0\x1b[0m · \x1b[95m/diff\x1b[0m for details");
+    expect(setStatus).toHaveBeenLastCalledWith("pi-coder-local-changes", "2 files · \x1b[32m+1\x1b[0m \x1b[31m−1\x1b[0m · \x1b[95m/diff\x1b[0m for details");
+    expect(setStatus).not.toHaveBeenCalledWith("pi-coder-local-changes", "9 files · \x1b[32m+9\x1b[0m \x1b[31m−0\x1b[0m · \x1b[95m/diff\x1b[0m for details");
 
     load.mockResolvedValueOnce({ files: 0, filesCapped: false, additions: 0, deletions: 0, untrackedFiles: 0 });
     await controller.refresh(ctx);
-    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", undefined);
+    expect(setStatus).toHaveBeenLastCalledWith("pi-coder-local-changes", undefined);
 
     await controller.shutdown(ctx);
-    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", undefined);
+    expect(setStatus).toHaveBeenLastCalledWith("pi-coder-local-changes", undefined);
   });
 
   it("aborts and joins an in-flight refresh before session shutdown completes", async () => {
@@ -323,8 +323,8 @@ describe("repository change footer status", () => {
     pending.resolve({ files: 4, filesCapped: false, additions: 4, deletions: 0, untrackedFiles: 0 });
     await Promise.all([refresh, shutdown]);
 
-    expect(setStatus).toHaveBeenLastCalledWith("pi-code-diff-local-changes", undefined);
-    expect(setStatus).not.toHaveBeenCalledWith("pi-code-diff-local-changes", expect.stringContaining("4 files"));
+    expect(setStatus).toHaveBeenLastCalledWith("pi-coder-local-changes", undefined);
+    expect(setStatus).not.toHaveBeenCalledWith("pi-coder-local-changes", expect.stringContaining("4 files"));
     await controller.refresh(ctx);
     expect(load).toHaveBeenCalledOnce();
   });
@@ -333,6 +333,6 @@ describe("repository change footer status", () => {
     const controller = new RepositoryChangeStatusController(async () => { throw new Error("git failed"); });
     const setStatus = vi.fn();
     await expect(controller.refresh({ cwd: "/repo", hasUI: true, ui: { setStatus } })).resolves.toBeUndefined();
-    expect(setStatus).toHaveBeenCalledWith("pi-code-diff-local-changes", undefined);
+    expect(setStatus).toHaveBeenCalledWith("pi-coder-local-changes", undefined);
   });
 });

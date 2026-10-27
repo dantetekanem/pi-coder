@@ -55,7 +55,7 @@ Useful targets:
 /diff fullscreen on|off       # toggle Herdr pane zoom for future reviews
 ```
 
-In Herdr, `/diff` zooms the current pane while the review is open and restores the previous layout afterward. Fullscreen is on by default; `/diff fullscreen off` disables it persistently until `/diff fullscreen on` enables it again. Launchers can set `PI_CODE_DIFF_HERDR_FULLSCREEN=on|off` to override the initial behavior for one Pi process without changing the saved preference.
+In Herdr, `/diff` zooms the current pane while the review is open and restores the previous layout afterward. Fullscreen is on by default; `/diff fullscreen off` disables it persistently until `/diff fullscreen on` enables it again. Launchers can set `PI_CODER_HERDR_FULLSCREEN=on|off` to override the initial behavior for one Pi process without changing the saved preference.
 
 The review UI supports line, file, and review-wide feedback. Feedback can be marked as:
 
@@ -132,7 +132,7 @@ While a comment editor is active, its target, intent, original selection/anchor,
 
 Recovered buffers use the owned exact-text editor: arrows move the cursor, `Ctrl+A` selects all and `Ctrl+Z` undoes; `Tab` changes intent and `Shift+Enter` inserts a newline. New COMMENT/DISCUSS editors retain Pi's editor controls. Their completed bracketed pastes now remain expanded rather than collapsing into Pi paste markers, so cursor positions refer to the saved text. Chunked pastes are inserted when the closing paste marker arrives; an incomplete paste is not yet part of the editor buffer.
 
-Recovery records live under `~/.pi/agent/cache/pi-code-diff/sessions/compositions` (or `PI_CODE_DIFF_SESSIONS_DIR/compositions`). Each JSON record is limited to 256 KiB, including text and anchor metadata. The shared store allows 64 recovery records and 16 MiB, including replacement byte capacity. Valid copies older than seven days since their last write are removed during recovery-store operations. Unknown or interrupted-write files remain for manual inspection and count against capacity. Limits and write failures report errors; they never truncate text or evict fresh copies to make space. Terminal instances do not offer their old compositions for recovery.
+Recovery records live under `~/.pi/agent/cache/pi-coder/sessions/compositions` (or `PI_CODER_SESSIONS_DIR/compositions`). Each JSON record is limited to 256 KiB, including text and anchor metadata. The shared store allows 64 recovery records and 16 MiB, including replacement byte capacity. Valid copies older than seven days since their last write are removed during recovery-store operations. Unknown or interrupted-write files remain for manual inspection and count against capacity. Limits and write failures report errors; they never truncate text or evict fresh copies to make space. Terminal instances do not offer their old compositions for recovery.
 
 The `.write-lock` mutex never waits or removes an owner based on age or PID status. After a crash, **stop all writers** before manually inspecting and removing `.write-lock/owner.json` and its empty `.write-lock` directory. Do not remove a live lock or run mixed older writers against this store. The contract covers process interruption on a local filesystem; it does **not** include network/shared filesystems, `fsync`, or power-loss durability.
 
@@ -182,7 +182,7 @@ Run the Explorer, or open a repository-relative file directly in INSERT mode:
 /code app/models/user.rb
 ```
 
-The Workbench remains the default. To use one command for every code-opening interface instead, add it to `~/.pi/agent/pi-code-diff-settings.json`. This example runs TTT through tmux:
+The Workbench remains the default. To use one command for every code-opening interface instead, add it to `~/.pi/agent/pi-coder-settings.json`. This example runs TTT through tmux:
 
 ```json
 {

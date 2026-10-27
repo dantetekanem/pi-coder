@@ -12,10 +12,10 @@ const identity = "pr|github|example/widgets|12", sessionId = "consumption-test";
 let directory: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "submission-consumption-"));
-  vi.stubEnv("PI_CODE_DIFF_SESSIONS_DIR", join(directory, "sessions"));
-  vi.stubEnv("PI_CODE_DIFF_SUBMISSIONS_DIR", join(directory, "journal"));
-  vi.stubEnv("PI_CODE_DIFF_SETTINGS_PATH", join(directory, "settings.json"));
-  vi.stubEnv("PI_CODE_DIFF_RECEIPTS_DIR", join(directory, "receipts"));
+  vi.stubEnv("PI_CODER_SESSIONS_DIR", join(directory, "sessions"));
+  vi.stubEnv("PI_CODER_SUBMISSIONS_DIR", join(directory, "journal"));
+  vi.stubEnv("PI_CODER_SETTINGS_PATH", join(directory, "settings.json"));
+  vi.stubEnv("PI_CODER_RECEIPTS_DIR", join(directory, "receipts"));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
 const comment = (id: string): DiffReviewComment => ({ id, fileId: "src/app.ts", scope: "git-diff", side: "added", startLine: 4, endLine: 4, intent: "comment", body: "Same text", anchorStatus: "mapped", captureHash: { algorithm: "sha256", value: "a".repeat(64) } });

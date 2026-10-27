@@ -425,7 +425,7 @@ describe("git helpers", () => {
   });
 
   it("does not read working-tree symlinks outside the repo", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-code-diff-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-coder-"));
     const repo = join(root, "repo");
     await mkdir(repo);
     const secret = join(root, "secret.txt");
@@ -436,7 +436,7 @@ describe("git helpers", () => {
   });
 
   it("reads working-tree symlinks that stay inside the repo", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "pi-code-diff-"));
+    const repo = await mkdtemp(join(tmpdir(), "pi-coder-"));
     await writeFile(join(repo, "target.txt"), "safe", "utf8");
     await symlink(join(repo, "target.txt"), join(repo, "link.txt"));
 

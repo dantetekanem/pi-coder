@@ -48,25 +48,25 @@ vi.mock("../shortcuts.js", () => ({
   getShortcutConfigPath: () => join(preferencesDir, "code-diff.json"),
 }));
 
-const preferencesDir = mkdtempSync(join(tmpdir(), "pi-code-diff-index-"));
+const preferencesDir = mkdtempSync(join(tmpdir(), "pi-coder-index-"));
 const preferencesPath = join(preferencesDir, "code-diff-preferences.json");
 const settingsPath = join(preferencesDir, "provider-settings.json");
-const originalPreferencesPath = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
-const originalHerdrFullscreen = process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
-const storeEnvs = ["PI_CODE_DIFF_SUBMISSIONS_DIR", "PI_CODE_DIFF_RECEIPTS_DIR", "PI_CODE_DIFF_SESSIONS_DIR"];
+const originalPreferencesPath = process.env.PI_CODER_PREFERENCES_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
+const originalHerdrFullscreen = process.env.PI_CODER_HERDR_FULLSCREEN;
+const storeEnvs = ["PI_CODER_SUBMISSIONS_DIR", "PI_CODER_RECEIPTS_DIR", "PI_CODER_SESSIONS_DIR"];
 const originalStores = storeEnvs.map((key) => process.env[key]);
 storeEnvs.forEach((key) => { process.env[key] = join(preferencesDir, key); });
-process.env.PI_CODE_DIFF_PREFERENCES_PATH = preferencesPath;
-process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+process.env.PI_CODER_PREFERENCES_PATH = preferencesPath;
+process.env.PI_CODER_SETTINGS_PATH = settingsPath;
 
 afterAll(() => {
-  if (originalPreferencesPath == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = originalPreferencesPath;
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
-  if (originalHerdrFullscreen == null) delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
-  else process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = originalHerdrFullscreen;
+  if (originalPreferencesPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = originalPreferencesPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
+  if (originalHerdrFullscreen == null) delete process.env.PI_CODER_HERDR_FULLSCREEN;
+  else process.env.PI_CODER_HERDR_FULLSCREEN = originalHerdrFullscreen;
   storeEnvs.forEach((key, index) => {
     if (originalStores[index] == null) delete process.env[key];
     else process.env[key] = originalStores[index];
@@ -294,7 +294,7 @@ function reviewSessionData(
 describe("code diff extension", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.PI_CODE_DIFF_HERDR_FULLSCREEN;
+    delete process.env.PI_CODER_HERDR_FULLSCREEN;
     rmSync(preferencesPath, { force: true });
     writeFileSync(settingsPath, JSON.stringify(testSettings()), "utf8");
     mocks.findForDraft.mockReset().mockReturnValue(null);
@@ -664,8 +664,8 @@ describe("code diff extension", () => {
     expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("already submitted this github code host review"));
   });
 
-  it("keeps the review unsubmitted after a self-approval rejection", async () => {
-    mocks.submitPullRequestReview.mockResolvedValue({ ok: false, blockedSelfApproval: true, message: "Refusing to approve your own pull request." });
+  it("keeps the review unsubmitted after a self-approval rejection and tells the agent to post nothing", async () => {
+    mocks.submitPullRequestReview.mockResolvedValue({ ok: false, status: "rejected", blockedSelfApproval: true, steps: [], message: "Refusing to approve your own pull request." });
     const pi = { sendUserMessage: vi.fn() };
     const ctx = {
       model: { id: "test-model" },
@@ -677,7 +677,37 @@ describe("code diff extension", () => {
     const result = await submitUiConfirmedReview(pi as never, ctx as never, remoteTarget(), "approve", undefined, []);
 
     expect(result.submitted).not.toBe(true);
-    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    expect(pi.sendUserMessage.mock.calls[0]![0]).toContain("does not allow self-approval. Nothing was posted.");
+    expect(pi.sendUserMessage.mock.calls[0]![0]).not.toContain("submit_pr_review");
+  });
+
+  it("hands a failed submission to the agent with the exact review to finish posting", async () => {
+    mocks.submitPullRequestReview.mockResolvedValue({
+      ok: false, status: "unknown", attemptId: "attempt-7", message: "Provider write outcome is uncertain.", reviewedCommitId: "abc123", receiptStatus: "not_applicable", receipt: null,
+      steps: [{ kind: "review", verdict: "approve", bodyIncluded: false, commentIndexes: [0], status: "unknown" }],
+    });
+    const pi = { sendUserMessage: vi.fn() };
+    const ctx = {
+      model: { id: "test-model" },
+      modelRegistry: {},
+      isIdle: vi.fn(() => true),
+      ui: { setStatus: vi.fn(), select: vi.fn(), editor: vi.fn(), notify: vi.fn() },
+    };
+    const comments = [{ path: "src/app.ts", line: 12, side: "RIGHT" as const, body: "Ship it." }];
+
+    const result = await submitUiConfirmedReview(pi as never, ctx as never, remoteTarget(), "approve", undefined, comments);
+
+    expect(result.submitted).not.toBe(true);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-coder-submit", expect.stringContaining("Posting the review"));
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("pi-coder-submit", undefined);
+    expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+    const prompt = pi.sendUserMessage.mock.calls[0]![0] as string;
+    expect(prompt).toContain("could not finish posting this github code host review");
+    expect(prompt).toContain("https://github.com/example/widgets/pull/1");
+    expect(prompt).toContain('attemptId "attempt-7"');
+    expect(prompt).toContain("newIntent: true");
+    expect(JSON.parse(prompt.split("```json\n")[1]!.split("\n```")[0]!)).toMatchObject({ provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "approve", comments, prAuthorLogin: "alice", cwd: "/repo" });
   });
 
   it("falls back to the agent when grammar verification fails", async () => {
@@ -829,7 +859,7 @@ describe("code diff extension", () => {
   it("honors a process-scoped Herdr fullscreen override without changing preferences", async () => {
     const tools = new Map<string, any>();
     writeFileSync(preferencesPath, JSON.stringify({ herdrFullscreen: true }), "utf8");
-    process.env.PI_CODE_DIFF_HERDR_FULLSCREEN = "off";
+    process.env.PI_CODER_HERDR_FULLSCREEN = "off";
     mocks.getReviewWindowData.mockResolvedValue({
       repoRoot: "/repo",
       files: [localReviewFile()],
@@ -1765,6 +1795,19 @@ describe("code diff extension", () => {
     codeDiffExtension(pi as never);
     await tools.get("submit_pr_review").execute("call", { provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "comment", comments: [{ path: "src/app.ts", line: 5, side: "RIGHT", body: "Second original" }], handoffId: "handoff-1", handoffCommentIndexes: [1] }, undefined, undefined, { hasUI: false });
     expect(mocks.submitPullRequestReview.mock.calls[0]![2]).toMatchObject({ handoffId: "handoff-1", handoffCommentIndexes: [1] });
+  });
+
+  it("adds recovery steps to a failed submit_pr_review result", async () => {
+    mocks.submitPullRequestReview.mockResolvedValue({
+      ok: false, status: "unknown", attemptId: "attempt-9", message: "Provider write outcome is uncertain.", reviewedCommitId: "abc123", receiptStatus: "not_applicable", receipt: null,
+      steps: [{ kind: "review", verdict: "comment", bodyIncluded: false, commentIndexes: [], status: "unknown" }],
+    });
+    const tools = new Map<string, any>();
+    const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
+    codeDiffExtension(pi as never);
+    const result = await tools.get("submit_pr_review").execute("call", { provider: "github", repo: "example/widgets", prNumber: "1", commitId: "abc123", verdict: "comment", body: "Looks good", cwd: "/repo" }, undefined, undefined, { hasUI: false });
+    expect(result.content[0].text).toMatch(/^Provider write outcome is uncertain\.\n\npi-coder could not finish posting/);
+    expect(result.content[0].text).toContain('attemptId "attempt-9"');
   });
 
   it("forwards explicit tool retry and intentional-new-review controls", async () => {
@@ -3206,7 +3249,7 @@ describe("code diff extension", () => {
 
   it("treats a bare existing local directory as the diff cwd", async () => {
     const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
-    const localRepo = await mkdtemp(join(tmpdir(), "pi-code-diff-local-"));
+    const localRepo = await mkdtemp(join(tmpdir(), "pi-coder-local-"));
     const files = [{
       id: "src/app.ts::working::::",
       path: "src/app.ts",
@@ -3396,7 +3439,7 @@ describe("code diff extension", () => {
 
       resolveData({ repoRoot: "/repo", files: [], branchBaseRevision: "main", modifiedRevision: "HEAD" });
       await vi.advanceTimersByTimeAsync(0);
-      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-code-diff-local", undefined);
+      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-coder-local", undefined);
       expect(ctx.ui.notify).toHaveBeenCalledWith("No reviewable files found for this diff.", "info");
     } finally {
       vi.useRealTimers();
@@ -3431,7 +3474,7 @@ describe("code diff extension", () => {
       expect(ctx.ui.setWidget).toHaveBeenCalledTimes(1);
 
       await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
-      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-code-diff-local", undefined);
+      expect(ctx.ui.setWidget).toHaveBeenLastCalledWith("pi-coder-local", undefined);
       const callsAfterShutdown = ctx.ui.setWidget.mock.calls.length;
 
       await vi.advanceTimersByTimeAsync(5_000);

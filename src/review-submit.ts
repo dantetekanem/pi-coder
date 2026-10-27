@@ -96,6 +96,15 @@ const EVENT_BY_VERDICT: Record<ReviewVerdict, string> = {
   comment: "COMMENT",
 };
 
+// Some code hosts queue PR writes behind one repository lock for up to 30 seconds,
+// then save them or refuse with HTTP 429, which saves nothing.
+const REVIEW_WRITE_TIMEOUT_MS = 120_000;
+const BUSY_WRITE_ATTEMPTS = 4;
+const DEFAULT_BUSY_RETRY_MS = 5_000;
+const MAX_BUSY_RETRY_MS = 30_000;
+
+type ProviderExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
+
 function getCommentFilePath(files: ReviewFile[], fileId: string): string {
   const file = files.find((candidate) => candidate.id === fileId);
   return file == null ? fileId : joinReviewPath(file.pathPrefix, file.path);
@@ -293,13 +302,31 @@ function reviewUrl(value: unknown, canonical: string): string {
   return canonical;
 }
 
+function responseStatus(result: ProviderExecResult): number | undefined {
+  const header = result.stdout.match(/^HTTP\/[\d.]+ (\d{3})/);
+  if (header != null) return Number(header[1]);
+  if (result.code === 0) return undefined;
+  const reported = /^Error: (\d{3}):/m.exec(result.stderr);
+  return reported == null ? undefined : Number(reported[1]);
+}
+
+function isBusyRefusal(result: ProviderExecResult): boolean {
+  return !result.killed && responseStatus(result) === 429;
+}
+
+function busyRetryDelay(result: ProviderExecResult): number {
+  const retryAfter = /^retry-after:\s*(\d+)\s*$/im.exec(result.stdout);
+  if (retryAfter == null) return DEFAULT_BUSY_RETRY_MS;
+  return Math.min(Math.max(Number(retryAfter[1]) * 1000, 1000), MAX_BUSY_RETRY_MS);
+}
+
 function readSubmissionResponse(
   input: SubmitReviewInput, provider: ProviderSettings, planned: ReviewSubmissionStep,
-  result: { stdout: string; stderr: string; code: number; killed?: boolean }, actor: SubmissionActor,
+  result: ProviderExecResult, actor: SubmissionActor,
 ): ReviewSubmissionStep {
   const header = result.stdout.match(/^HTTP\/[\d.]+ (\d{3})[^\r\n]*\r?\n/);
   const separator = header == null ? undefined : /\r?\n\r?\n/.exec(result.stdout);
-  const statusCode = header == null ? undefined : Number(header[1]);
+  const statusCode = responseStatus(result);
   const body = separator == null ? result.stdout : result.stdout.slice(separator.index + separator[0].length);
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { /* A write with no usable response remains unknown. */ }
@@ -332,13 +359,20 @@ async function postReview(pi: ExtensionAPI, input: SubmitReviewInput, provider: 
   let outcome: ReviewSubmissionStep = { ...planned, status: "rejected" };
   try {
     const payload = buildReviewPayload({ ...input, verdict: planned.verdict, body: planned.bodyIncluded ? input.body : undefined, comments: planned.commentIndexes.map((index) => input.comments![index]!) }, provider);
-    directory = mkdtempSync(join(tmpdir(), "pi-code-diff-review-"));
+    directory = mkdtempSync(join(tmpdir(), "pi-coder-review-"));
     const payloadPath = join(directory, "review.json");
     writeFileSync(payloadPath, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
     const operation = renderProviderOperation(provider, "submitReview", { repo: input.repo, number: input.prNumber, payloadPath });
     started = true;
-    const result = await pi.exec(provider.executable, operation.args, { cwd: input.gitRoot, timeout: 20000 });
-    outcome = readSubmissionResponse(input, provider, planned, result, actor);
+    const write = () => pi.exec(provider.executable, operation.args, { cwd: input.gitRoot, timeout: REVIEW_WRITE_TIMEOUT_MS });
+    let result = await write();
+    for (let attempt = 1; attempt < BUSY_WRITE_ATTEMPTS && isBusyRefusal(result); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, busyRetryDelay(result)));
+      result = await write();
+    }
+    outcome = isBusyRefusal(result)
+      ? { ...planned, status: "rejected", message: `${provider.label} was busy and refused the review ${BUSY_WRITE_ATTEMPTS} times (HTTP 429). Nothing was saved.` }
+      : readSubmissionResponse(input, provider, planned, result, actor);
   } catch (error) {
     outcome = { ...outcome, status: started ? "unknown" : "rejected", message: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -381,6 +415,66 @@ function submissionResult(input: SubmitReviewInput, provider: ProviderSettings |
   ].filter(Boolean).join("\n");
   const common = { message: details.split("\n").map(sanitizeTerminalText).join("\n"), reviewedCommitId: input.commitId, url, steps, receiptStatus, receipt };
   return status === "submitted" ? { ...common, status, ok: true } : { ...common, status, ok: false };
+}
+
+function oneLine(text: string): string {
+  return text.split("\n").map((line) => line.trim()).filter(Boolean).join(" ");
+}
+
+export function composeSubmissionRecovery(input: SubmitReviewInput, result: SubmitReviewResult): string | undefined {
+  if (result.ok) return undefined;
+  const target = `${input.repo}#${input.prNumber}`;
+  if (result.blockedSelfApproval) {
+    return [
+      `pi-coder did not approve ${target}. The signed-in user wrote this pull request, and its code host does not allow self-approval. Nothing was posted.`,
+      "Tell the user in one sentence. Post nothing unless the user picks another verdict.",
+    ].join("\n");
+  }
+  try { return composeProviderRecovery(input, result, providerForInput(input)); }
+  catch { return `pi-coder could not post the review on ${target}: ${oneLine(result.message)} Tell the user.`; }
+}
+
+function composeProviderRecovery(input: SubmitReviewInput, result: SubmitReviewResult, provider: ProviderSettings): string {
+  const url = renderProviderTemplate(provider.urls.canonical, { repo: input.repo, number: input.prNumber });
+  const steps = result.steps?.length ? result.steps : submissionPlan(input, provider);
+  const payloads = steps.filter((step) => step.status !== "submitted").map((step) => buildReviewPayload({
+    ...input, verdict: step.verdict, body: step.bodyIncluded ? input.body : undefined,
+    comments: step.commentIndexes.map((index) => input.comments![index]!),
+  }, provider));
+  const command = provider.operations.submitReview == null ? undefined
+    : [provider.executable, ...renderProviderOperation(provider, "submitReview", { repo: input.repo, number: input.prNumber, payloadPath: "<payload.json>" }).args].join(" ");
+  const args = {
+    provider: input.provider, repo: input.repo, prNumber: input.prNumber, commitId: input.commitId, baseCommitId: input.baseCommitId,
+    verdict: input.verdict, body: input.body, comments: input.comments, prAuthorLogin: input.prAuthorLogin, cwd: input.gitRoot,
+  };
+  const attempt = result.attemptId == null ? "" : ` and attemptId "${result.attemptId}"`;
+  return [
+    `pi-coder could not finish posting this ${provider.label} review. The user already confirmed it in the review UI, so do not ask again. Finish posting it.`,
+    `PR: ${url}`,
+    `Reviewed commit: ${input.commitId}`,
+    `Verdict: ${EVENT_BY_VERDICT[input.verdict]}`,
+    `Result: ${oneLine(result.message)}`,
+    "Steps:",
+    ...steps.map((step) => `- ${EVENT_BY_VERDICT[step.verdict]} with ${step.commentIndexes.length} comment(s)${step.bodyIncluded ? " and the body" : ""}: ${step.status}`),
+    "",
+    "Do this:",
+    `1. Read the PR's reviews and review comments. If a review from the signed-in user on commit ${input.commitId} with this verdict and these comments is there, it already posted: never post it again, and go to step 6.`,
+    `2. If the PR is closed or its head is no longer ${input.commitId}, stop and tell the user. Do not post on another head.`,
+    `3. Post only what is missing: call submit_pr_review with the arguments below${attempt}. It never reposts a submitted step.`,
+    "4. If it answers that the attempt cannot be proven and step 1 showed the review is missing, call submit_pr_review again with newIntent: true and no attemptId. If some steps were already posted, pass only the missing verdict, body, and comments.",
+    command == null
+      ? "5. If submit_pr_review fails again, stop and tell the user what failed."
+      : `5. If submit_pr_review fails again, post each missing payload below yourself: ${command}. Run it from ${input.gitRoot ?? "the PR checkout"} with the payload in a private temp file. HTTP 429 means nothing was saved: wait 5 seconds and send it again.`,
+    "6. Read the PR again to confirm the review is there. Then run any configured post-review completion callback and report the PR link briefly.",
+    "",
+    "submit_pr_review arguments:",
+    "```json",
+    JSON.stringify(args, null, 2),
+    "```",
+    "",
+    `Missing ${provider.label} payload${payloads.length === 1 ? "" : "s"}:`,
+    ...payloads.flatMap((payload) => ["```json", JSON.stringify(payload, null, 2), "```"]),
+  ].join("\n");
 }
 
 function submissionPlan(input: SubmitReviewInput, provider: ProviderSettings): ReviewSubmissionStep[] {

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parsePiCodeDiffSettings, requireProviderSettings } from "../provider-settings.js";
+import { parsePiCoderSettings, requireProviderSettings } from "../provider-settings.js";
 import { createConversationRead } from "../conversation.js";
 import {
   analyzeReviewReply,
@@ -16,7 +16,7 @@ import {
   type ReviewThreadRead,
 } from "../review-replies.js";
 
-const originalSettingsPath = process.env.PI_CODE_DIFF_SETTINGS_PATH;
+const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;
 let settingsPath: string;
 
@@ -75,13 +75,13 @@ function target(providerId: string, repo = "example/widgets", number = "12") {
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "review-replies-settings-"));
   settingsPath = join(directory, "settings.json");
-  process.env.PI_CODE_DIFF_SETTINGS_PATH = settingsPath;
+  process.env.PI_CODER_SETTINGS_PATH = settingsPath;
   writeFileSync(settingsPath, JSON.stringify(settings()), "utf8");
 });
 
 afterEach(() => {
-  if (originalSettingsPath == null) delete process.env.PI_CODE_DIFF_SETTINGS_PATH;
-  else process.env.PI_CODE_DIFF_SETTINGS_PATH = originalSettingsPath;
+  if (originalSettingsPath == null) delete process.env.PI_CODER_SETTINGS_PATH;
+  else process.env.PI_CODER_SETTINGS_PATH = originalSettingsPath;
   rmSync(directory, { recursive: true, force: true });
 });
 
@@ -188,7 +188,7 @@ describe("review replies", () => {
   });
 
   it("deduplicates outer pages, keeps full anonymous bodies, and stops a repeated cursor", async () => {
-    const configured = parsePiCodeDiffSettings(settings()).providers.primary!;
+    const configured = parsePiCoderSettings(settings()).providers.primary!;
     const payload = { data: { repository: { pullRequest: { reviewThreads: {
       pageInfo: { hasNextPage: true, endCursor: "same" }, nodes: Array.from({ length: 100 }, (_, index) => ({ id: `thread-${index}`, comments: {
         pageInfo: { hasNextPage: false }, nodes: [{ id: "body", author: null, body: "é".repeat(2000) }],
@@ -316,7 +316,7 @@ describe("review replies", () => {
     expect(snapshot.replies.map((reply) => reply.body)).toEqual(errors ? ["Unreliable partial data"]
       : partial ? [] : ["Known REST reply"]);
     const raw = await fetchReviewThreads({ exec } as never, target("primary") as never,
-      parsePiCodeDiffSettings(settings()).providers.primary!, "example/widgets", "12");
+      parsePiCoderSettings(settings()).providers.primary!, "example/widgets", "12");
     expect(raw.threads[0]?.id).toBe(partial ? "thread" : "1");
   });
 
@@ -368,7 +368,7 @@ describe("review replies", () => {
   });
 
   it.each([true, false, undefined])("preserves full anonymous replies and reported resolution: %s", (resolved) => {
-    const configured = parsePiCodeDiffSettings(settings()).providers.secondary!;
+    const configured = parsePiCoderSettings(settings()).providers.secondary!;
     const body = `${"x".repeat(1400)}\nlast line`;
     const flat = groupFlatReviewComments([
       { key: 1, actor: { name: "reviewer" }, message: "Question", resolved },
@@ -391,7 +391,7 @@ describe("review replies", () => {
   });
 
   it("parses payloads defensively and fences isolated analysis", async () => {
-    const configured = parsePiCodeDiffSettings(settings()).providers.secondary!;
+    const configured = parsePiCoderSettings(settings()).providers.secondary!;
     expect(parseGraphqlReplyThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: "bad" } } } } })).toEqual([]);
     expect(groupFlatReviewComments([{ key: 1, actor: {}, message: "missing author" }, "bad"], configured)).toEqual([
       expect.objectContaining({ resolved: null, comments: [expect.objectContaining({ id: "1", author: "unknown", body: "missing author" })] }),

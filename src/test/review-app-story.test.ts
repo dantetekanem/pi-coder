@@ -9,15 +9,15 @@ import { ReviewApp } from "../ui/review-app.js";
 import type { ReviewFile } from "../types.js";
 import type { ReviewSessionData } from "../review-session.js";
 
-const previous = process.env.PI_CODE_DIFF_PREFERENCES_PATH;
+const previous = process.env.PI_CODER_PREFERENCES_PATH;
 let directory: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "diff-story-ui-"));
-  process.env.PI_CODE_DIFF_PREFERENCES_PATH = join(directory, "prefs.json");
+  process.env.PI_CODER_PREFERENCES_PATH = join(directory, "prefs.json");
 });
 afterEach(() => {
-  if (previous == null) delete process.env.PI_CODE_DIFF_PREFERENCES_PATH;
-  else process.env.PI_CODE_DIFF_PREFERENCES_PATH = previous;
+  if (previous == null) delete process.env.PI_CODER_PREFERENCES_PATH;
+  else process.env.PI_CODER_PREFERENCES_PATH = previous;
   rmSync(directory, { recursive: true, force: true });
 });
 

@@ -11,10 +11,10 @@ import { hasConsumableConfirmedSubmissionDraft } from "../review-submission-cons
 let directory: string;
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "submission-handoff-"));
-  vi.stubEnv("PI_CODE_DIFF_SETTINGS_PATH", join(directory, "settings.json"));
-  vi.stubEnv("PI_CODE_DIFF_SUBMISSIONS_DIR", join(directory, "journal"));
-  vi.stubEnv("PI_CODE_DIFF_RECEIPTS_DIR", join(directory, "receipts"));
-  vi.stubEnv("PI_CODE_DIFF_SESSIONS_DIR", join(directory, "sessions"));
+  vi.stubEnv("PI_CODER_SETTINGS_PATH", join(directory, "settings.json"));
+  vi.stubEnv("PI_CODER_SUBMISSIONS_DIR", join(directory, "journal"));
+  vi.stubEnv("PI_CODER_RECEIPTS_DIR", join(directory, "receipts"));
+  vi.stubEnv("PI_CODER_SESSIONS_DIR", join(directory, "sessions"));
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
 const input = (): SubmitReviewInput => ({ provider: "github", repo: "example/widgets", prNumber: "12", commitId: "a".repeat(40), verdict: "comment", body: "Raw body", comments: [4, 8].map((line) => ({ path: "src/app.ts", line, side: "RIGHT", body: `Raw comment ${line}` })) });

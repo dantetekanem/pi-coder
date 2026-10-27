@@ -5,7 +5,7 @@
 ## Subprocesses
 
 - It runs `git` with fixed argument vectors to inspect local changes, revisions, and file lists. Remote review fetches run `git fetch` against the selected repository remote or configured provider clone URL.
-- Remote pull-request support runs the provider executable configured in `~/.pi/agent/pi-code-diff-settings.json` (GitHub is available through authenticated `gh`). Provider operations are executable-plus-argument arrays, not shell commands.
+- Remote pull-request support runs the provider executable configured in `~/.pi/agent/pi-coder-settings.json` (GitHub is available through authenticated `gh`). Provider operations are executable-plus-argument arrays, not shell commands.
 - A configured `code.command` is run as direct argv. `$EDITOR` is run as direct argv when the review UI opens an external editor.
 - Opening a URL starts the platform URL opener: `open` on macOS, `rundll32.exe url.dll,FileProtocolHandler` on Windows, or `xdg-open` elsewhere. Only credential-free `http` and `https` URLs are accepted.
 - The standalone Workbench build invokes the package's local TypeScript compiler and its generated standalone entry point.
@@ -15,11 +15,11 @@
 - Local review and Workbench features read files inside the selected repository. The Workbench rejects paths outside that repository, follows no escaping symlinks, and limits text reads and writes.
 - Workbench saves use a same-directory temporary file and lock file before an atomic rename. It can therefore create and remove temporary and lock files beside the edited file.
 - Review preferences are read and written at `~/.pi/agent/extensions/code-diff-preferences.json`; comment shortcuts are read from `~/.pi/agent/extensions/code-diff.json`.
-- Provider and code-command settings are read from `~/.pi/agent/pi-code-diff-settings.json`.
-- Review sessions are read and written under `~/.pi/agent/cache/pi-code-diff/sessions/`, and submitted-review receipts under `~/.pi/agent/cache/pi-code-diff/receipts/`. Sessions include saved feedback and may include story plans, exact source-anchor hashes, and unsent comment text. Historical discussion records are preserved when resuming or consuming submitted feedback. Saved history follows normal session expiry/discard rules.
-- Remote pull-request repositories are cached under `~/.pi/agent/cache/pi-code-diff/remotes/` unless the configured remote cache root overrides it.
-- Standalone Workbench builds are staged and promoted under `~/.pi/agent/cache/pi-code-diff/workbench/`; the launcher is written atomically to `~/.pi/agent/bin/pi-code-workbench`.
-- Review submission writes a mode-`0600` JSON payload under the operating system temporary directory as `pi-code-diff-review-*`, passes it to the provider command, and removes the directory afterward.
+- Provider and code-command settings are read from `~/.pi/agent/pi-coder-settings.json`.
+- Review sessions are read and written under `~/.pi/agent/cache/pi-coder/sessions/`, and submitted-review receipts under `~/.pi/agent/cache/pi-coder/receipts/`. Sessions include saved feedback and may include story plans, exact source-anchor hashes, and unsent comment text. Historical discussion records are preserved when resuming or consuming submitted feedback. Saved history follows normal session expiry/discard rules.
+- Remote pull-request repositories are cached under `~/.pi/agent/cache/pi-coder/remotes/` unless the configured remote cache root overrides it.
+- Standalone Workbench builds are staged and promoted under `~/.pi/agent/cache/pi-coder/workbench/`; the launcher is written atomically to `~/.pi/agent/bin/pi-code-workbench`.
+- Review submission writes a mode-`0600` JSON payload under the operating system temporary directory as `pi-coder-review-*`, passes it to the provider command, and removes the directory afterward.
 
 ## Network access
 

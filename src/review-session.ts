@@ -77,7 +77,7 @@ export interface ReviewSessionIndexEntry {
 }
 
 function getSessionsDir(): string {
-  return process.env.PI_CODE_DIFF_SESSIONS_DIR ?? join(getAgentDir(), "cache", "pi-code-diff", "sessions");
+  return process.env.PI_CODER_SESSIONS_DIR ?? join(getAgentDir(), "cache", "pi-coder", "sessions");
 }
 
 export function createReviewSessionId(identity: string): string {
