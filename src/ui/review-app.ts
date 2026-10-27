@@ -33,7 +33,7 @@ import {
 } from "../state.js";
 import { detectPiLanguage, highlightCodeLineWithPi } from "../pi-render.js";
 import { loadReviewPreferences, saveReviewPreference, type ReviewPaneVisibility } from "../preferences.js";
-import { orderNavigatorFiles, type NavigatorFileOrder, type ReviewOrderSignals } from "../review-order.js";
+import { orderNavigatorFiles, pairTestFiles, type NavigatorFileOrder, type ReviewOrderSignals } from "../review-order.js";
 import { createReviewInstanceId, type ReviewSessionData } from "../review-session.js";
 import { COMPOSITION_FLUSH_MS } from "../review-composition.js";
 import { applyResolvedSeedComments, type ResolvedSeedComment } from "../seed-comments.js";
@@ -42,7 +42,7 @@ import { filterFilesBySearch } from "../search.js";
 import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
 import type { ReplyThread } from "../review-replies.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
-import type { CommentIntent, DiffReviewComment, FileCommentTarget, ReviewComposition, ReviewCompositionTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
+import type { ChangeStatus, CommentIntent, DiffReviewComment, FileCommentTarget, ReviewComposition, ReviewCompositionTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
 import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
@@ -206,6 +206,10 @@ const STACKED_CONTEXT_LAYOUT_MAX_WIDTH = 155;
 const STACKED_WIDE_PANE_STEP_WIDTH = 56;
 const MINIMUM_WIDE_PANE_WIDTH = 24;
 const MAXIMUM_WIDE_PANE_WIDTH = 72;
+const NAVIGATOR_WIDTH_SCALE = 1.2;
+const NAVIGATOR_PADDING = " ";
+const NAVIGATOR_COUNT_GAP = 2;
+const NAVIGATOR_PASTEL_MIX = 0.4;
 const CONTEXT_PANEL_PADDING_X = 2;
 const MAX_LOADED_FILE_ENTRIES = 50;
 const MAX_DIFF_LAYOUT_ENTRIES = 100;
@@ -349,20 +353,31 @@ export function shouldStackPanesForVisibility(frameInnerWidth: number, visibilit
   return shouldStackPanes(frameInnerWidth) || frameInnerWidth <= threshold;
 }
 
-export function getPaneLayout(frameInnerWidth: number, commentsHidden: boolean): { navigatorWidth: number; diffWidth: number; commentsWidth: number } {
+function getSidePaneWidth(frameInnerWidth: number, besideWidePanes: boolean): number {
   const sideWidth = Math.max(24, Math.min(36, Math.floor(frameInnerWidth * 0.26)));
+  return besideWidePanes ? Math.max(20, Math.min(32, sideWidth)) : sideWidth;
+}
+
+/** The Navigator gets 20% more room than Comments so file names and change counts stay readable. */
+function getNavigatorPaneWidth(sidePaneWidth: number): number {
+  return Math.round(sidePaneWidth * NAVIGATOR_WIDTH_SCALE);
+}
+
+export function getPaneLayout(frameInnerWidth: number, commentsHidden: boolean): { navigatorWidth: number; diffWidth: number; commentsWidth: number } {
+  const sideWidth = getSidePaneWidth(frameInnerWidth, false);
+  const navigatorWidth = getNavigatorPaneWidth(sideWidth);
   if (commentsHidden) {
     return {
-      navigatorWidth: sideWidth,
-      diffWidth: Math.max(24, frameInnerWidth - sideWidth - 1),
+      navigatorWidth,
+      diffWidth: Math.max(24, frameInnerWidth - navigatorWidth - 1),
       commentsWidth: 0,
     };
   }
 
   return {
-    navigatorWidth: sideWidth,
+    navigatorWidth,
     commentsWidth: sideWidth,
-    diffWidth: Math.max(24, frameInnerWidth - sideWidth * 2 - 2),
+    diffWidth: Math.max(24, frameInnerWidth - navigatorWidth - sideWidth - 2),
   };
 }
 
@@ -370,8 +385,8 @@ export function getPaneLayoutWithContext(frameInnerWidth: number, commentsHidden
   const base = getPaneLayout(frameInnerWidth, commentsHidden);
   if (!contextVisible || commentsHidden) return { ...base, contextWidth: 0 };
 
-  const navigatorWidth = Math.max(20, Math.min(32, base.navigatorWidth));
-  const commentsWidth = navigatorWidth;
+  const commentsWidth = getSidePaneWidth(frameInnerWidth, true);
+  const navigatorWidth = getNavigatorPaneWidth(commentsWidth);
   const contextWidth = getWidePaneWidth(frameInnerWidth, navigatorWidth, 1);
   return {
     navigatorWidth,
@@ -391,9 +406,8 @@ function getWidePaneWidth(frameInnerWidth: number, navigatorWidth: number, wideC
 
 export function getPaneLayoutForVisibility(frameInnerWidth: number, visibility: ReviewPaneVisibility): ReviewPaneLayout {
   const wideCount = countVisibleWidePanes(visibility);
-  const narrowBase = getPaneLayout(frameInnerWidth, !visibility.comments);
-  const navigatorWidth = wideCount === 0 ? narrowBase.navigatorWidth : Math.max(20, Math.min(32, narrowBase.navigatorWidth));
-  const commentsWidth = wideCount === 0 ? narrowBase.commentsWidth : navigatorWidth;
+  const commentsWidth = getSidePaneWidth(frameInnerWidth, wideCount > 0);
+  const navigatorWidth = getNavigatorPaneWidth(commentsWidth);
   const wideWidth = wideCount === 0 ? 0 : getWidePaneWidth(frameInnerWidth, navigatorWidth, wideCount);
   const usedSideWidth = (visibility.navigator ? navigatorWidth : 0) + (visibility.comments ? commentsWidth : 0) + wideCount * wideWidth;
 
@@ -667,9 +681,12 @@ function getScopeDisplayPath(file: ReviewFile | null, scope: ReviewScope): strin
   return sanitizeTerminalText(getReviewFileDisplayPath(file, scope));
 }
 
+function getFileStatus(file: ReviewFile | null, scope: ReviewScope): ChangeStatus | null {
+  return getScopeComparison(file, scope)?.status ?? file?.worktreeStatus ?? null;
+}
+
 function getStatusLabel(file: ReviewFile | null, scope: ReviewScope): string {
-  const status = getScopeComparison(file, scope)?.status ?? file?.worktreeStatus;
-  switch (status) {
+  switch (getFileStatus(file, scope)) {
     case "added": return "A";
     case "deleted": return "D";
     case "renamed": return "R";
@@ -678,15 +695,59 @@ function getStatusLabel(file: ReviewFile | null, scope: ReviewScope): string {
   }
 }
 
-function getChangeCountLabel(theme: Theme, file: ReviewFile, scope: ReviewScope): string {
+type NavigatorPalette = Record<ChangeStatus, (text: string) => string>;
+
+interface NavigatorCountWidths {
+  additions: number;
+  deletions: number;
+}
+
+function getForegroundRgb(theme: Theme, color: Parameters<Theme["fg"]>[0]): number[] | null {
+  const match = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(theme.getFgAnsi?.(color) ?? "");
+  return match == null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Mixes each status color toward body text for soft pastels; without truecolor the theme colors stay as they are. */
+function buildNavigatorPalette(theme: Theme): NavigatorPalette {
+  const text = getForegroundRgb(theme, "text");
+  const soften = (color: Parameters<Theme["fg"]>[0]) => {
+    const rgb = getForegroundRgb(theme, color);
+    if (text == null || rgb == null) return (value: string) => theme.fg(color, value);
+    const open = `\x1b[38;2;${rgb.map((channel, index) => Math.round(channel + (text[index]! - channel) * NAVIGATOR_PASTEL_MIX)).join(";")}m`;
+    return (value: string) => `${open}${value}\x1b[39m`;
+  };
+  return { added: soften("success"), modified: soften("warning"), deleted: soften("error"), renamed: soften("mdLink") };
+}
+
+function getChangeCounts(file: ReviewFile, scope: ReviewScope): { additions: number; deletions: number } | null {
   const comparison = getScopeComparison(file, scope);
-  const additions = comparison?.additions;
-  const deletions = comparison?.deletions;
-  if (additions == null && deletions == null) return "";
-  const safeAdditions = additions ?? 0;
-  const safeDeletions = deletions ?? 0;
-  if (safeAdditions === 0 && safeDeletions === 0) return "";
-  return ` ${theme.fg("success", `+${safeAdditions}`)} ${theme.fg("error", `-${safeDeletions}`)}`;
+  const additions = comparison?.additions ?? 0;
+  const deletions = comparison?.deletions ?? 0;
+  return additions === 0 && deletions === 0 ? null : { additions, deletions };
+}
+
+function getNavigatorChangeTotals(files: ReviewFile[], scope: ReviewScope): { additions: number; deletions: number } | null {
+  const counted = files.map((file) => getChangeCounts(file, scope)).filter((counts) => counts != null);
+  if (counted.length === 0) return null;
+  return counted.reduce((totals, counts) => ({ additions: totals.additions + counts.additions, deletions: totals.deletions + counts.deletions }), { additions: 0, deletions: 0 });
+}
+
+function getNavigatorCountWidths(files: ReviewFile[], scope: ReviewScope): NavigatorCountWidths {
+  const widths = { additions: 0, deletions: 0 };
+  for (const file of files) {
+    const counts = getChangeCounts(file, scope);
+    if (counts == null) continue;
+    widths.additions = Math.max(widths.additions, `+${counts.additions}`.length);
+    widths.deletions = Math.max(widths.deletions, `-${counts.deletions}`.length);
+  }
+  return widths;
+}
+
+function formatNavigatorChangeCounts(palette: NavigatorPalette, file: ReviewFile, scope: ReviewScope, widths: NavigatorCountWidths): string {
+  if (widths.additions === 0) return "";
+  const counts = getChangeCounts(file, scope);
+  if (counts == null) return " ".repeat(widths.additions + 1 + widths.deletions);
+  return `${palette.added(`+${counts.additions}`.padStart(widths.additions))} ${palette.deleted(`-${counts.deletions}`.padStart(widths.deletions))}`;
 }
 
 function getFileCommentCount(state: ReviewState, fileId: string, scope: ReviewScope): number {
@@ -928,7 +989,7 @@ export function shortenNavigatorPath(path: string, maxWidth: number): string {
   const parts = path.split("/").filter((part) => part.length > 0);
   const baseName = parts[parts.length - 1] ?? path;
   if (parts.length <= 1) {
-    return truncateToWidth(baseName, safeWidth, "…", false);
+    return truncateMiddle(baseName, safeWidth);
   }
 
   let suffix = baseName;
@@ -940,7 +1001,25 @@ export function shortenNavigatorPath(path: string, maxWidth: number): string {
 
   const candidate = `…/${suffix}`;
   if (visibleWidth(candidate) <= safeWidth) return candidate;
-  return truncateToWidth(baseName, safeWidth, "…", false);
+  return truncateMiddle(baseName, safeWidth);
+}
+
+/** Keeps both ends of a long file name, so `messages_mailer_test.rb` and `messages_mailer.rb` stay distinct. */
+function truncateMiddle(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  const characters = [...text];
+  const tailWidth = Math.floor((maxWidth - 1) / 2);
+  let tail = "";
+  for (let index = characters.length - 1; index >= 0 && visibleWidth(`${characters[index]}${tail}`) <= tailWidth; index -= 1) {
+    tail = `${characters[index]}${tail}`;
+  }
+  let head = "";
+  for (const character of characters) {
+    if (visibleWidth(`${head}${character}`) > maxWidth - 1 - visibleWidth(tail)) break;
+    head += character;
+  }
+  return `${head}…${tail}`;
 }
 
 export function formatPaneTitle(title: string, focused: boolean): string {
@@ -4929,28 +5008,35 @@ export class ReviewApp {
       : this.state.searchQuery
         ? ` (${this.state.searchQuery})`
         : "";
-    const reviewedCount = files.filter((file) => this.reviewedFileIds.has(file.id)).length;
     const hiddenLocaleCount = this.getHiddenLocaleFileCount();
     const localeSuffix = hiddenLocaleCount === 0
       ? ""
       : this.showAllLocales
         ? ` • all locales • L hide ${hiddenLocaleCount}`
         : ` • ${hiddenLocaleCount} locale${hiddenLocaleCount === 1 ? "" : "s"} hidden • L show`;
-    const orderSuffix = relatedAnchor != null ? "" : this.navigatorFileOrder === "risk" ? " • risk order • O a-z" : " • a-z order • O risk";
-    lines.push(this.theme.fg("muted", `${files.length} file${files.length === 1 ? "" : "s"} • ${reviewedCount} reviewed${orderSuffix}${localeSuffix}${titleSuffix}${relatedSuffix}`));
+    const palette = buildNavigatorPalette(this.theme);
+    const totals = getNavigatorChangeTotals(files, this.state.activeScope);
+    const totalsText = totals == null
+      ? ""
+      : `${this.theme.fg("muted", " - ")}${palette.added(`+${totals.additions}`)}${this.theme.fg("muted", "/")}${palette.deleted(`-${totals.deletions}`)}`;
+    lines.push(`${NAVIGATOR_PADDING}${this.theme.fg("muted", `${files.length} file${files.length === 1 ? "" : "s"}`)}${totalsText}${this.theme.fg("muted", `${localeSuffix}${titleSuffix}${relatedSuffix}`)}`);
     lines.push("");
 
     if (files.length === 0) {
-      lines.push(this.theme.fg("warning", "No files in this scope."));
-      lines.push(this.theme.fg("dim", "Try another scope or clear search."));
+      lines.push(`${NAVIGATOR_PADDING}${this.theme.fg("warning", "No files in this scope.")}`);
+      lines.push(`${NAVIGATOR_PADDING}${this.theme.fg("dim", "Try another scope or clear search.")}`);
       return renderBox("Navigator", width, height, this.theme, lines, this.state.focus === "navigator");
     }
 
-    const entries: Array<{ kind: "group"; group: string } | { kind: "file"; file: ReviewFile; group: string }> = [];
+    const implementations = relatedAnchor == null ? pairTestFiles(files) : new Map<string, ReviewFile>();
+    const entries: Array<{ kind: "spacer" } | { kind: "group"; group: string } | { kind: "file"; file: ReviewFile; group: string }> = [];
     let previousGroup: string | null = null;
     for (const file of files) {
-      const group = getNavigatorGroup(file);
-      if (this.navigatorTreeMode && group !== previousGroup) entries.push({ kind: "group", group });
+      const group = getNavigatorGroup(implementations.get(file.id) ?? file);
+      if (this.navigatorTreeMode && group !== previousGroup) {
+        if (previousGroup != null) entries.push({ kind: "spacer" });
+        entries.push({ kind: "group", group });
+      }
       entries.push({ kind: "file", file, group });
       previousGroup = group;
     }
@@ -4961,35 +5047,44 @@ export class ReviewApp {
     if (activeIndex < this.navigatorScroll) this.navigatorScroll = activeIndex;
     if (activeIndex >= this.navigatorScroll + maxBody) this.navigatorScroll = activeIndex - maxBody + 1;
     const visible = entries.slice(this.navigatorScroll, this.navigatorScroll + maxBody);
+    const innerWidth = Math.max(1, width - 2);
+    const countWidths = getNavigatorCountWidths(files, this.state.activeScope);
+    const searchMatched = this.state.searchQuery.trim().length > 0;
     for (const entry of visible) {
+      if (entry.kind === "spacer") {
+        lines.push("");
+        continue;
+      }
       if (entry.kind === "group") {
-        lines.push(this.theme.fg("muted", `  ${entry.group}/`));
+        lines.push(this.theme.fg("muted", `${NAVIGATOR_PADDING}  ${entry.group}/`));
         continue;
       }
       const { file, group } = entry;
       this.navigatorFileRows.set(lines.length + 1, file.id);
       const active = file.id === this.state.activeFileId;
+      const status = getFileStatus(file, this.state.activeScope);
       const prefix = active ? this.theme.fg("accent", "›") : " ";
-      const status = this.theme.fg(active ? "accent" : "muted", getStatusLabel(file, this.state.activeScope));
+      const statusLabel = getStatusLabel(file, this.state.activeScope);
+      const prefixText = `${NAVIGATOR_PADDING}${prefix} ${status == null ? this.theme.fg("muted", statusLabel) : palette[status](statusLabel)} `;
       const count = getFileCommentCount(this.state, file.id, this.state.activeScope);
-      const changeMarker = getChangeCountLabel(this.theme, file, this.state.activeScope);
       const commentMarker = count > 0 ? this.theme.fg("success", ` ${count}●`) : this.theme.fg("dim", "  ·");
       const submoduleMarker = getSubmoduleInfo(file, this.state.activeScope) == null ? "" : this.theme.fg(active ? "accent" : "muted", " ↗");
       const reviewedMarker = this.reviewedFileIds.has(file.id) ? this.theme.fg("success", " done") : "";
-      const prefixText = `${prefix} ${status} `;
-      const pathWidth = Math.max(1, width - 2 - visibleWidth(prefixText) - visibleWidth(changeMarker) - visibleWidth(commentMarker) - visibleWidth(submoduleMarker) - visibleWidth(reviewedMarker));
+      const pathMarkers = `${submoduleMarker}${reviewedMarker}`;
+      const trailing = `${formatNavigatorChangeCounts(palette, file, this.state.activeScope, countWidths)}${commentMarker}${NAVIGATOR_PADDING}`;
+      const fixedWidth = visibleWidth(prefixText) + visibleWidth(pathMarkers) + visibleWidth(trailing);
       const displayPath = getReviewFileDisplayPath(file, this.state.activeScope);
       const groupedPath = this.navigatorTreeMode && group !== "root" && displayPath.startsWith(`${group}/`)
         ? displayPath.slice(group.length + 1)
         : displayPath;
-      const shortenedPath = shortenNavigatorPath(sanitizeTerminalText(groupedPath), pathWidth);
-      const searchMatched = this.state.searchQuery.trim().length > 0;
+      const shortenedPath = shortenNavigatorPath(sanitizeTerminalText(groupedPath), Math.max(1, innerWidth - fixedWidth - NAVIGATOR_COUNT_GAP));
       const pathText = active
         ? this.theme.fg("accent", shortenedPath)
         : searchMatched
           ? this.theme.fg("success", shortenedPath)
           : this.theme.fg("text", shortenedPath);
-      const rowText = `${prefixText}${pathText}${submoduleMarker}${reviewedMarker}${changeMarker}${commentMarker}`;
+      const gap = " ".repeat(Math.max(NAVIGATOR_COUNT_GAP, innerWidth - fixedWidth - visibleWidth(shortenedPath)));
+      const rowText = `${prefixText}${pathText}${pathMarkers}${gap}${trailing}`;
       lines.push(searchMatched ? this.theme.bg("toolPendingBg", rowText) : rowText);
     }
 
