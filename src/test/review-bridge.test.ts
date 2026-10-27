@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { hashTargetSlice } from "../workbench/target.js";
-import { resolveReviewResume, revalidateReviewDraftAnchors } from "../adapters/pi/review-bridge.js";
+import { placeReviewSubmitComments, resolveReviewResume, revalidateReviewDraftAnchors } from "../adapters/pi/review-bridge.js";
 import type { DiffReviewComment, ReviewFile, ReviewResumeReference, ReviewScope, ReviewState } from "../types.js";
 
 const file = {
@@ -145,6 +145,81 @@ describe("review draft anchor validation", () => {
     expect(validated.draft.comments.map((comment) => comment.anchorStatus)).toEqual([
       "stale", "stale", "stale", "stale", "stale", "stale",
     ]);
+  });
+});
+
+describe("review submit placement", () => {
+  const current = "first()\nsecond()\nthird()\n";
+  const base = { fileId: file.id, scope: "git-diff" as const, side: "added" as const, intent: "comment" as const };
+
+  function submitted(comments: DiffReviewComment[]) {
+    return { type: "submit" as const, allComment: "Overall", allIntent: "comment" as const, comments };
+  }
+
+  it("keeps mapped and file drafts, and stale drafts whose lines still hold the captured bytes", async () => {
+    const mapped: DiffReviewComment = { ...base, id: "mapped", startLine: 1, endLine: 1, body: "Mapped", anchorStatus: "mapped" };
+    const fileNote: DiffReviewComment = { ...base, id: "file", side: "file", startLine: null, endLine: null, body: "File", fileTarget: "file", anchorStatus: "mapped" };
+    const unchanged: DiffReviewComment = {
+      ...base, id: "unchanged", startLine: 2, endLine: 3, body: "Still here",
+      captureHash: hashTargetSlice(current, { startLine: 2, endLine: 3 }), anchorStatus: "stale",
+    };
+    const load = vi.fn(async () => ({ originalContent: "old\n", modifiedContent: current }));
+
+    const placement = await placeReviewSubmitComments(submitted([mapped, fileNote, unchanged]), [file], load);
+
+    expect(placement).toEqual({ payload: submitted([mapped, fileNote, { ...unchanged, anchorStatus: "mapped" }]), fileNotes: 0, dropped: 0 });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a stale draft with matching bytes as a file comment when its lines are outside the diff", async () => {
+    const lines = Array.from({ length: 12 }, (_, index) => `line${index + 1}()`);
+    const modifiedContent = ["changed()", ...lines.slice(1)].join("\n");
+    const outside: DiffReviewComment = {
+      ...base, id: "outside", startLine: 10, endLine: 10, body: "Unchanged code",
+      captureHash: hashTargetSlice(modifiedContent, { startLine: 10, endLine: 10 }), anchorStatus: "stale",
+    };
+    const load = vi.fn(async () => ({ originalContent: lines.join("\n"), modifiedContent }));
+
+    const placement = await placeReviewSubmitComments(submitted([outside]), [file], load);
+
+    expect(placement.fileNotes).toBe(1);
+    expect(placement.payload.comments).toEqual([expect.objectContaining({ id: "outside", side: "file", body: "Originally on line 10:\n\nUnchanged code" })]);
+  });
+
+  it("sends moved, unhashed, and unloadable stale drafts as file comments that name their lines", async () => {
+    const moved: DiffReviewComment = {
+      ...base, id: "moved", startLine: 2, endLine: 3, body: "  Rename this.  ", originalText: "was()\n```\nhere()",
+      captureHash: hashTargetSlice("was()\n```\nhere()\n", { startLine: 1, endLine: 2 }), anchorStatus: "stale",
+    };
+    const unhashed: DiffReviewComment = { ...base, id: "unhashed", intent: "discuss", startLine: 1, endLine: 1, body: "Why?", anchorStatus: "stale" };
+    const deletedModify: DiffReviewComment = {
+      ...base, id: "modify", side: "deleted", intent: "modify", startLine: 4, endLine: 5, body: "new()", originalText: "old()\r\nolder()", anchorStatus: "stale",
+    };
+    const errorFile: ReviewFile = { ...file, id: "error", path: "error.ts" };
+    const unloadable: DiffReviewComment = { ...base, id: "unloadable", fileId: errorFile.id, startLine: 7, endLine: 7, body: "Check this.", anchorStatus: "stale" };
+    const load = vi.fn(async (candidate: ReviewFile) => {
+      if (candidate.id === errorFile.id) throw new Error("no bytes");
+      return { originalContent: "old\n", modifiedContent: current };
+    });
+
+    const placement = await placeReviewSubmitComments(submitted([moved, unhashed, deletedModify, unloadable]), [file, errorFile], load);
+
+    const note = { side: "file", startLine: null, endLine: null, fileTarget: "file", anchorStatus: "mapped" };
+    expect(placement.fileNotes).toBe(4);
+    expect(placement.payload.comments).toEqual([
+      { ...note, id: "moved", fileId: file.id, scope: "git-diff", intent: "comment", body: "Originally on lines 2-3:\n\n````\nwas()\n```\nhere()\n````\n\nRename this." },
+      { ...note, id: "unhashed", fileId: file.id, scope: "git-diff", intent: "discuss", body: "Originally on line 1:\n\nWhy?" },
+      { ...note, id: "modify", fileId: file.id, scope: "git-diff", intent: "comment", body: "Originally on deleted lines 4-5. Suggested change:\n\n```diff\n- old()\n- older()\n+ new()\n```" },
+      { ...note, id: "unloadable", fileId: errorFile.id, scope: "git-diff", intent: "comment", body: "Originally on line 7:\n\nCheck this." },
+    ]);
+  });
+
+  it("keeps stale drafts whose file left the review out of the submission", async () => {
+    const orphan: DiffReviewComment = { ...base, id: "orphan", fileId: "gone.ts::working::::", startLine: 1, endLine: 1, body: "Gone", anchorStatus: "stale" };
+    const load = vi.fn();
+
+    expect(await placeReviewSubmitComments(submitted([orphan]), [file], load)).toEqual({ payload: submitted([]), fileNotes: 0, dropped: 1 });
+    expect(load).not.toHaveBeenCalled();
   });
 });
 
