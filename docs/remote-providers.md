@@ -60,6 +60,15 @@ Add other providers in `~/.pi/agent/pi-coder-settings.json`. Local settings exte
         "requestChangesBodyRequired": false,
         "validateSubmitResponse": true,
         "validateTargetBeforeSubmit": true
+      },
+      "fetch": {
+        "progress": true,
+        "timeoutSeconds": 240,
+        "retry": {
+          "attempts": 3,
+          "delaySeconds": 10,
+          "whenErrorIncludes": ["try again later"]
+        }
       }
     }
   },
@@ -79,7 +88,13 @@ Two optional link templates open code in the browser. Both must use https, and p
 - `urls.file` lets `gf` open the selected line of a pull request review on the code host. It accepts `{repo}`, `{revision}`, `{path}`, and `{line}`. The revision is the pull request head commit, or the base commit for a deleted line.
 - Top-level `search` lets `gd` and Ctrl+click search for a symbol's definition. `{query}` is the double-clicked or Ctrl+clicked word. Put any search syntax, such as `sym:`, in the template. The browser opener refuses `&`, so join extra search terms with `+` inside the query instead of adding parameters.
 
-`pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`. A pinned review fetches the base and head branches from the checkout's `origin` first. If `origin` does not have them, has a different head, or has a base without `baseRefOid`, the review fetches them again from `urls.clone`.
+`pullRequest` must return JSON addressable through the configured `fields`. `reviews`, `branchLookup`, reply operations, and repository profiles are optional. `submitReview` receives the generated review payload through `{payloadPath}`. Set `baseRevisionRequired` only when the provider returns and pins `baseRefOid`. A pinned review fetches the base and head branches from the checkout's `origin` first. If `origin` does not have them, has a different head, or has a base without `baseRefOid`, the review fetches them again from `urls.clone`. When `urls.clone` is `origin`'s own URL, a failed `origin` fetch is not sent there again.
+
+Optional `fetch` settings control how a pull request review fetches from the provider, including the fetch again from `urls.clone`. Without them, a review fetches once, without progress output, and stops after 60 seconds.
+
+- `progress: true` passes `--progress` to `git fetch`. Use it for a server that queues a fetch only when the client shows progress and refuses a quiet fetch at once.
+- `timeoutSeconds` limits each fetch attempt, from 1 to 3600 seconds.
+- `retry` fetches again when the git error contains one of the `whenErrorIncludes` texts, ignoring case. It waits `delaySeconds` (1 to 300) before the second attempt and doubles the wait after each later refusal, up to five minutes. It stops after `attempts` tries in total (2 to 10). Other errors and timeouts fail at once.
 
 Optional `reviewCommentsPage`, `pullRequestCommentsPage`, and `pullRequestReviewsPage` operations receive `{repo}`, `{number}`, and `{page}`. GitHub uses `gh api --include` with 100 rows per page. Each response must include a successful HTTP status and JSON rows (or the configured collection field). Only an advancing numeric `page` from a valid `Link` next relation is reused; supplied hosts and paths are never followed. No Link header means the last page; malformed or unsupported links stop with partial coverage. Admitted REST pages can resume within the shared limits. ID-less rows remain visible in PR context but keep thread coverage partial. REST fallback after failed GraphQL remains incomplete because flat comments cannot recover thread resolution.
 

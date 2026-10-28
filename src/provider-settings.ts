@@ -21,6 +21,18 @@ export interface ProviderOperationSettings {
   method?: string;
 }
 
+export interface ProviderFetchRetrySettings {
+  attempts: number;
+  delaySeconds: number;
+  whenErrorIncludes: string[];
+}
+
+export interface ProviderFetchSettings {
+  progress?: boolean;
+  timeoutSeconds?: number;
+  retry?: ProviderFetchRetrySettings;
+}
+
 export interface ProviderSettings {
   id: string;
   label: string;
@@ -30,6 +42,7 @@ export interface ProviderSettings {
   refs: Record<string, string>;
   fields: Record<string, string[]>;
   capabilities: Record<string, boolean>;
+  fetch?: ProviderFetchSettings;
 }
 
 export interface RepositoryProfileSettings {
@@ -257,13 +270,46 @@ function readCapabilities(value: unknown, context: string): Record<string, boole
   }));
 }
 
+function readWholeNumber(value: unknown, context: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${context} must be a whole number from ${min} to ${max}.`);
+  }
+  return value;
+}
+
+function readFetchRetry(value: unknown, context: string): ProviderFetchRetrySettings {
+  if (!isRecord(value)) throw new Error(`${context} must be an object.`);
+  rejectUnknownKeys(value, ["attempts", "delaySeconds", "whenErrorIncludes"], context);
+  return {
+    attempts: readWholeNumber(value.attempts, `${context}.attempts`, 2, 10),
+    delaySeconds: readWholeNumber(value.delaySeconds, `${context}.delaySeconds`, 1, 300),
+    whenErrorIncludes: readStringArray(value.whenErrorIncludes, `${context}.whenErrorIncludes`),
+  };
+}
+
+function readFetchSettings(value: unknown, context: string): ProviderFetchSettings | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) throw new Error(`${context} must be an object.`);
+  rejectUnknownKeys(value, ["progress", "timeoutSeconds", "retry"], context);
+  const progress = value.progress;
+  if (progress != null && typeof progress !== "boolean") throw new Error(`${context}.progress must be boolean.`);
+  const timeoutSeconds = value.timeoutSeconds == null ? undefined : readWholeNumber(value.timeoutSeconds, `${context}.timeoutSeconds`, 1, 3600);
+  const retry = value.retry == null ? undefined : readFetchRetry(value.retry, `${context}.retry`);
+  return {
+    ...(progress == null ? {} : { progress }),
+    ...(timeoutSeconds == null ? {} : { timeoutSeconds }),
+    ...(retry == null ? {} : { retry }),
+  };
+}
+
 function readProvider(id: string, value: unknown): ProviderSettings {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error(`Provider id ${id} is invalid.`);
   const context = `providers.${id}`;
   if (!isRecord(value)) throw new Error(`${context} must be an object.`);
-  rejectUnknownKeys(value, ["label", "executable", "urls", "operations", "refs", "fields", "capabilities"], context);
+  rejectUnknownKeys(value, ["label", "executable", "urls", "operations", "refs", "fields", "capabilities", "fetch"], context);
   if (!isRecord(value.operations)) throw new Error(`${context}.operations must be an object.`);
   const operations = Object.fromEntries(Object.entries(value.operations).map(([key, entry]) => [key, readOperation(entry, `${context}.operations.${key}`)]));
+  const fetchSettings = readFetchSettings(value.fetch, `${context}.fetch`);
   return {
     id,
     label: readNonEmptyString(value.label, `${context}.label`),
@@ -273,6 +319,7 @@ function readProvider(id: string, value: unknown): ProviderSettings {
     refs: readStringMap(value.refs, `${context}.refs`),
     fields: readFieldMap(value.fields, `${context}.fields`),
     capabilities: readCapabilities(value.capabilities, `${context}.capabilities`),
+    ...(fetchSettings == null ? {} : { fetch: fetchSettings }),
   };
 }
 

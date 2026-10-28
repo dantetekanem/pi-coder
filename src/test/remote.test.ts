@@ -78,6 +78,30 @@ function writeSettings(repositories: Record<string, unknown> = {}): void {
   writeFileSync(settingsPath, JSON.stringify(neutralSettings(repositories)), "utf8");
 }
 
+const busyFetch = { progress: true, timeoutSeconds: 240, retry: { attempts: 3, delaySeconds: 5, whenErrorIncludes: ["try again later"] } };
+const busyStderr = "remote: Counting objects:  50% (5/10)\rremote: Counting objects: 100% (10/10), done.\nfatal: remote error: server busy; try again later\n";
+
+function writePinnedSettingsWithoutClone(fetch: Record<string, unknown>): void {
+  const settings = neutralSettings();
+  delete (settings.providers.pinned.urls as { clone?: string }).clone;
+  const pinned = { ...settings.providers.pinned, fetch };
+  writeFileSync(settingsPath, JSON.stringify({ ...settings, providers: { ...settings.providers, pinned } }), "utf8");
+}
+
+function pinnedExec(fetchCalls: string[][], fetchResult: (attempt: number) => { code: number; stderr: string }) {
+  return vi.fn(async (command: string, args: string[]) => {
+    if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
+    if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
+    if (command === "git" && args[1] === "fetch") {
+      fetchCalls.push(args);
+      return { stdout: "", killed: false, ...fetchResult(fetchCalls.length) };
+    }
+    if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${suppliedHead}\n`, stderr: "", killed: false };
+    if (command === "git" && args[0] === "merge-base") return { code: 0, stdout: "base-oid\n", stderr: "", killed: false };
+    return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+  });
+}
+
 function metadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 123,
@@ -212,6 +236,8 @@ describe("remote review helpers", () => {
     expect(exec).toHaveBeenCalledWith("cli-one", ["change", "reviews", "example/widgets", "123"], expect.any(Object));
     expect(fetchCalls[0]).toContain("+refs/heads/main:refs/remotes/origin/main");
     expect(fetchCalls[0]).toContain("+refs/heads/feature/review:refs/remotes/origin/feature/review");
+    expect(fetchCalls[0]).not.toContain("--progress");
+    expect(exec).toHaveBeenCalledWith("git", fetchCalls[0], { cwd: "/repo", timeout: 60_000 });
   });
 
   it("renders fallback clone and provider head refs when the source branch is unavailable", async () => {
@@ -341,6 +367,91 @@ describe("remote review helpers", () => {
       "/repo",
     )).rejects.toThrow("couldn't find remote ref refs/heads/feature/review");
     expect(fetchCalls).toHaveLength(1);
+  });
+
+  it("does not fetch the clone URL again after origin fails when it is origin's own URL", async () => {
+    const fetchCalls: string[][] = [];
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
+      if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
+      if (command === "git" && args[0] === "remote") return { code: 0, stdout: "https://MIRROR.example/example/widgets/\n", stderr: "", killed: false };
+      if (command === "git" && args[1] === "fetch") {
+        fetchCalls.push(args);
+        return { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/feature/review", killed: false };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected", killed: false };
+    });
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).rejects.toThrow("couldn't find remote ref refs/heads/feature/review");
+    expect(fetchCalls).toHaveLength(1);
+    expect(exec).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], { cwd: "/repo", timeout: 10000 });
+  });
+
+  it("retries a refused fetch with progress, the configured timeout, and doubling delays", async () => {
+    vi.useFakeTimers();
+    writePinnedSettingsWithoutClone(busyFetch);
+    const fetchCalls: string[][] = [];
+    const exec = pinnedExec(fetchCalls, (attempt) => attempt < 3 ? { code: 128, stderr: busyStderr } : { code: 0, stderr: "" });
+    const progress: string[] = [];
+
+    const target = resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+      (message) => progress.push(message),
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(fetchCalls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchCalls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(target).resolves.toMatchObject({ baseRef: "base-oid", headRef: "origin/review/8/head" });
+    expect(fetchCalls).toHaveLength(3);
+    expect(fetchCalls[0]!.slice(0, 5)).toEqual(["--no-pager", "fetch", "--no-tags", "--progress", "origin"]);
+    expect(exec).toHaveBeenCalledWith("git", fetchCalls[0], { cwd: "/repo", timeout: 240_000 });
+    expect(progress).toEqual(expect.arrayContaining([
+      "Fetch from origin was refused; retrying in 5s (attempt 2 of 3)…",
+      "Fetch from origin was refused; retrying in 10s (attempt 3 of 3)…",
+    ]));
+  });
+
+  it("does not retry a fetch error the provider does not list", async () => {
+    writePinnedSettingsWithoutClone(busyFetch);
+    const fetchCalls: string[][] = [];
+    const exec = pinnedExec(fetchCalls, () => ({ code: 128, stderr: "fatal: couldn't find remote ref refs/heads/feature/review\n" }));
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).rejects.toThrow(new Error("fatal: couldn't find remote ref refs/heads/feature/review"));
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  it("reports the last git error without progress output after the final attempt", async () => {
+    vi.useFakeTimers();
+    writePinnedSettingsWithoutClone(busyFetch);
+    const fetchCalls: string[][] = [];
+    const exec = pinnedExec(fetchCalls, () => ({ code: 128, stderr: busyStderr }));
+
+    const failure = expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).rejects.toThrow(new Error("Fetch from origin failed after 3 attempts: fatal: remote error: server busy; try again later"));
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await failure;
+    expect(fetchCalls).toHaveLength(3);
   });
 
   it("loads repository profiles from provider settings", async () => {
