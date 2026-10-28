@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Configure how a pull request review fetches from a provider with an optional `fetch` block in its settings. `progress` passes `--progress` to `git fetch`, `timeoutSeconds` limits each attempt, and `retry` fetches again after a doubling delay when the git error contains a listed text, such as a busy server's request to retry later. Without the block, a review fetches once within 60 seconds, as before.
+
+### Fixed
+
+- Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL. The second fetch failed the same way and doubled the wait.
+
 ## 0.9.4 - 2026-10-27
 
 ### Changed

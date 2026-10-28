@@ -12,6 +12,8 @@ import {
 } from "./pr-handoff.js";
 import type {
   PiCoderSettings,
+  ProviderFetchRetrySettings,
+  ProviderFetchSettings,
   ProviderSettings,
   RepositoryProfileSettings,
 } from "./provider-settings.js";
@@ -423,17 +425,45 @@ export async function getPullRequestMetadata(
   return getConfiguredPullRequestMetadata(pi, gitRoot, prNumber, repo, requireProviderSettings(resolvedProviderId, settings), onProgress);
 }
 
+const DEFAULT_FETCH_TIMEOUT_SECONDS = 60;
+const MAX_FETCH_RETRY_DELAY_SECONDS = 300;
+
+function gitFailureText(stderr: string): string {
+  const lines = stderr.split(/[\r\n]+/).map((line) => line.trim()).filter((line) => line.length > 0);
+  const errors = lines.filter((line) => /^(?:fatal|error):/i.test(line));
+  return (errors.length > 0 ? errors : lines.slice(-1)).join("\n");
+}
+
+function isRetryableFetchFailure(failure: string, retry: ProviderFetchRetrySettings): boolean {
+  const text = failure.toLowerCase();
+  return retry.whenErrorIncludes.some((fragment) => text.includes(fragment.toLowerCase()));
+}
+
 async function fetchRemoteRefs(
   pi: ExtensionAPI,
   gitRoot: string,
   refspecs: string[],
   remote = "origin",
   onProgress?: RemoteProgress,
+  settings: ProviderFetchSettings = {},
 ): Promise<void> {
-  onProgress?.(`Fetching remote refs from ${remote === "origin" ? "origin" : "configured remote"}…`);
-  const result = await pi.exec("git", ["--no-pager", "fetch", "--no-tags", remote, ...refspecs], { cwd: gitRoot, timeout: 60000 });
-  if (result.killed) throw new Error(`Timed out fetching remote refs after 60s. stderr: ${result.stderr || "(none)"}`);
-  if (result.code !== 0) throw new Error(result.stderr || result.stdout || "Failed to fetch remote refs.");
+  const source = remote === "origin" ? "origin" : "configured remote";
+  onProgress?.(`Fetching remote refs from ${source}…`);
+  const timeoutSeconds = settings.timeoutSeconds ?? DEFAULT_FETCH_TIMEOUT_SECONDS;
+  const args = ["--no-pager", "fetch", "--no-tags", ...(settings.progress === true ? ["--progress"] : []), remote, ...refspecs];
+  const retry = settings.retry;
+  for (let attempt = 1; ; attempt++) {
+    const result = await pi.exec("git", args, { cwd: gitRoot, timeout: timeoutSeconds * 1000 });
+    if (result.killed) throw new Error(`Timed out fetching remote refs after ${timeoutSeconds}s. stderr: ${gitFailureText(result.stderr) || "(none)"}`);
+    if (result.code === 0) return;
+    const failure = gitFailureText(result.stderr) || result.stdout || "Failed to fetch remote refs.";
+    if (retry == null || attempt >= retry.attempts || !isRetryableFetchFailure(failure, retry)) {
+      throw new Error(attempt === 1 ? failure : `Fetch from ${source} failed after ${attempt} attempts: ${failure}`);
+    }
+    const delaySeconds = Math.min(retry.delaySeconds * 2 ** (attempt - 1), MAX_FETCH_RETRY_DELAY_SECONDS);
+    onProgress?.(`Fetch from ${source} was refused; retrying in ${delaySeconds}s (attempt ${attempt + 1} of ${retry.attempts})…`);
+    await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+  }
 }
 
 async function getMergeBase(pi: ExtensionAPI, gitRoot: string, baseRef: string, headRef: string): Promise<string> {
@@ -466,7 +496,7 @@ async function fetchBranchBasedPullRequestRefs(
     await fetchRemoteRefs(pi, gitRoot, [
       `+${sourceBranchRef(baseBranch)}:${originRef(baseBranch)}`,
       `+${sourceBranchRef(metadata.headRefName)}:${originRef(metadata.headRefName)}`,
-    ], remote, onProgress);
+    ], remote, onProgress, provider.fetch);
     const baseRef = originShortRef(baseBranch);
     const headRef = originShortRef(metadata.headRefName);
     return { baseRef: await getMergeBase(pi, gitRoot, baseRef, headRef), headRef };
@@ -484,7 +514,7 @@ async function fetchBranchBasedPullRequestRefs(
     await fetchRemoteRefs(pi, gitRoot, [
       `+${sourceBranchRef(baseBranch)}:${originRef(baseBranch)}`,
       `+${sourceRef}:${originRef(headBranch)}`,
-    ], pullRemote, onProgress);
+    ], pullRemote, onProgress, provider.fetch);
     const baseRef = originShortRef(baseBranch);
     const headRef = originShortRef(headBranch);
     return { baseRef: await getMergeBase(pi, gitRoot, baseRef, headRef), headRef };
@@ -509,6 +539,12 @@ async function hasPinnedRevisions(
   return base.code === 0;
 }
 
+async function remoteHasUrl(pi: ExtensionAPI, gitRoot: string, remote: string, url: string): Promise<boolean> {
+  const result = await pi.exec("git", ["remote", "get-url", remote], { cwd: gitRoot, timeout: 10000 });
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
+  return result.code === 0 && normalize(result.stdout) === normalize(url);
+}
+
 async function fetchRevisionPinnedPullRequestRefs(
   pi: ExtensionAPI,
   gitRoot: string,
@@ -524,7 +560,7 @@ async function fetchRevisionPinnedPullRequestRefs(
   const fetchPinnedRefs = (source: string) => fetchRemoteRefs(pi, gitRoot, [
     `+${sourceBranchRef(metadata.baseRefName)}:${originRef(baseBranch)}`,
     `+${sourceBranchRef(metadata.headRefName)}:${originRef(headBranch)}`,
-  ], source, onProgress);
+  ], source, onProgress, provider.fetch);
   const providerRemote = remote === "origin" && provider.urls.clone != null && metadata.repo != null
     ? renderProviderTemplate(provider.urls.clone, { repo: metadata.repo })
     : undefined;
@@ -534,7 +570,7 @@ async function fetchRevisionPinnedPullRequestRefs(
     await fetchPinnedRefs(remote);
     servedByRemote = providerRemote == null || await hasPinnedRevisions(pi, gitRoot, metadata, baseBranch, headBranch);
   } catch (error) {
-    if (providerRemote == null) throw error;
+    if (providerRemote == null || await remoteHasUrl(pi, gitRoot, remote, providerRemote)) throw error;
   }
   if (!servedByRemote && providerRemote != null) await fetchPinnedRefs(providerRemote);
 

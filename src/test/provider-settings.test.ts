@@ -163,6 +163,23 @@ describe("provider settings", () => {
     expect(getProviderCapability(provider, "unknown")).toBe(false);
   });
 
+  it("reads optional fetch settings and rejects malformed values", () => {
+    const settings = neutralSettings();
+    const withFetch = (fetch: unknown) => ({ ...settings, providers: { primary: { ...settings.providers.primary, fetch } } });
+    const fetch = { progress: true, timeoutSeconds: 240, retry: { attempts: 3, delaySeconds: 10, whenErrorIncludes: ["try again later"] } };
+
+    expect(parsePiCoderSettings(withFetch(fetch)).providers.primary!.fetch).toEqual(fetch);
+    expect(parsePiCoderSettings(withFetch({ progress: true })).providers.primary!.fetch).toEqual({ progress: true });
+    expect(parsePiCoderSettings(settings).providers.primary!.fetch).toBeUndefined();
+
+    expect(() => parsePiCoderSettings(withFetch({ ...fetch, depth: 1 }))).toThrow("providers.primary.fetch has unsupported fields: depth.");
+    expect(() => parsePiCoderSettings(withFetch({ progress: "yes" }))).toThrow("providers.primary.fetch.progress must be boolean.");
+    expect(() => parsePiCoderSettings(withFetch({ timeoutSeconds: 0 }))).toThrow("providers.primary.fetch.timeoutSeconds must be a whole number from 1 to 3600.");
+    expect(() => parsePiCoderSettings(withFetch({ retry: { ...fetch.retry, attempts: 1 } }))).toThrow("providers.primary.fetch.retry.attempts must be a whole number from 2 to 10.");
+    expect(() => parsePiCoderSettings(withFetch({ retry: { ...fetch.retry, delaySeconds: 1.5 } }))).toThrow("providers.primary.fetch.retry.delaySeconds must be a whole number from 1 to 300.");
+    expect(() => parsePiCoderSettings(withFetch({ retry: { ...fetch.retry, whenErrorIncludes: [] } }))).toThrow("providers.primary.fetch.retry.whenErrorIncludes must be a non-empty string array.");
+  });
+
   it("accepts one direct code command", () => {
     const code = { command: ["code-open", "--cwd", "{cwd}"], targetArgs: ["--file", "{file}"] };
     const { version: _version, ...withoutVersion } = neutralSettings();
