@@ -43,10 +43,8 @@ function makeFile(path = "src/app.ts"): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: { status: "modified", oldPath: path, newPath: path, displayPath: path, hasOriginal: true, hasModified: true },
-    lastCommit: null,
     allFiles: null,
   };
 }
@@ -76,7 +74,7 @@ function harness(
     repoRoot: "/repo",
     loadFileContents,
     commentShortcuts: [],
-    visibleScopes: ["git-diff"],
+    scope: "git-diff",
     notify: vi.fn(),
     ...options.overrides,
   });
@@ -331,7 +329,7 @@ describe("ReviewApp mouse selection in diffs", () => {
     }
   });
 
-  it("copies text from other panes and the frame without crossing pane borders", async () => {
+  it("copies text from other panes and the footer without crossing pane borders", async () => {
     const load = vi.fn(async () => "Problem: keep pane state\nSecond context line");
     const { app } = harness(THREE_LINES, { overrides: { contextPanelSource: { title: "PR context", loadingText: "Loading", load } } });
     try {
@@ -339,9 +337,9 @@ describe("ReviewApp mouse selection in diffs", () => {
       const start = locate(app, "\u2191\u2193 scroll");
       const outside = { row: locate(app, "Problem").row + 5, col: 500 };
       selectWithTerminalInput(app, start, outside);
-      await vi.waitFor(() => expect(clipboard.copy).toHaveBeenLastCalledWith("\u2191\u2193 scroll\n  Problem: keep pane state"));
+      await vi.waitFor(() => expect(clipboard.copy).toHaveBeenLastCalledWith("\u2191\u2193 scroll\nConversation coverage unknown\n  Problem: keep pane state"));
 
-      const footer = right(locate(app, "Copied 2 lines."), 1);
+      const footer = right(locate(app, "Copied 3 lines."), 1);
       for (let click = 0; click < 2; click += 1) {
         app.handleInput(press(footer));
         app.handleInput(release(footer));
@@ -454,7 +452,7 @@ describe("ReviewApp code host links", () => {
     const child = makeFile("src/child.ts");
     child.gitDiff = { ...child.gitDiff!, originalRevision: "c".repeat(40), modifiedRevision: "d".repeat(40) };
     const loadSubmoduleReviewData = vi.fn(async () => ({
-      repoRoot: "/repo/vendor/child", files: [child], visibleScopes: ["git-diff" as const],
+      repoRoot: "/repo/vendor/child", files: [child], scope: "git-diff" as const,
     }));
     const parentSource = makeFile();
     parentSource.gitDiff = { ...parentSource.gitDiff!, originalRevision: base, modifiedRevision: head };

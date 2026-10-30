@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.5 - 2026-10-29
+
+### Changed
+
+- Keep each review on its requested comparison. Remove scope tabs, Alt+1/2/3 switching, and automatic last-commit and all-files loading from local reviews. Explicit ranges and pull requests remain supported.
+- Fill the terminal without an outer frame, with two columns of side padding and a blank row at the top and below the footer.
+
+### Fixed
+
+- Preserve saved feedback from unavailable comparisons without remapping it, and keep comments with old file IDs visible.
+- Keep mouse hit areas and text selection aligned with the review layout, including footer text.
+
 ## 0.9.4 - 2026-10-27
 
 ### Changed

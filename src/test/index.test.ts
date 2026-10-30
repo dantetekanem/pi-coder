@@ -226,10 +226,8 @@ function remoteReviewFile() {
     worktreeStatus: "modified" as const,
     hasWorkingTreeFile: true,
     inGitDiff: false,
-    inLastCommit: false,
     inAllFiles: true,
     gitDiff: null,
-    lastCommit: null,
     allFiles: {
       status: "modified" as const,
       oldPath: "src/app.ts",
@@ -248,7 +246,6 @@ function localReviewFile() {
     worktreeStatus: "modified" as const,
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: {
       status: "modified" as const,
@@ -258,7 +255,6 @@ function localReviewFile() {
       hasOriginal: true,
       hasModified: true,
     },
-    lastCommit: null,
     allFiles: null,
   };
 }
@@ -336,7 +332,7 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn(), select: vi.fn(async (_title: string, choices: string[]) => choices[0]) } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files", branchBaseRevision: null });
     codeDiffExtension(pi as never);
     return { ctx, open: (args = "", extra = {}) => tools.get("open_code_diff").execute("draft-test", { args, ...extra }, new AbortController().signal, vi.fn(), ctx) };
   }
@@ -356,7 +352,7 @@ describe("code diff extension", () => {
       }],
     };
     const prepared = { snapshot, plan: { version: 1, snapshot: "captured", summary: "Purpose", steps: [] } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], scope: "all-files", branchBaseRevision: null });
     mocks.prepareDiffStory.mockResolvedValue(prepared);
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
     codeDiffExtension(pi as never);
@@ -381,7 +377,7 @@ describe("code diff extension", () => {
     const target = remoteTarget();
     target.pullRequest.body = "## Intent\nKeep review context beside the code.";
     mocks.resolveRemoteReviewTarget.mockResolvedValue(target);
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files" });
     mocks.prepareDiffStory.mockResolvedValue({ snapshot: { files: [] }, plan: { steps: [] } });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
     codeDiffExtension(pi as never);
@@ -401,7 +397,7 @@ describe("code diff extension", () => {
     const commands = new Map<string, any>();
     const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
     const ctx = { hasUI: true, mode: "tui", cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files" });
     mocks.runReviewApp
       .mockResolvedValueOnce({ type: "open-editor", command: "editor", args: [], filePath: "/repo/src/app.ts", line: 1 })
       .mockResolvedValueOnce({ type: "cancel", disposition: "park" });
@@ -421,7 +417,7 @@ describe("code diff extension", () => {
     const commands = new Map<string, any>();
     const pi = { registerCommand: vi.fn((name, command) => commands.set(name, command)), registerTool: vi.fn(), registerShortcut: vi.fn(), on: vi.fn() };
     const ctx = { hasUI: true, cwd: "/repo", ui: { notify: vi.fn(), setWidget: vi.fn(), setEditorText: vi.fn() } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files", branchBaseRevision: null });
     mocks.prepareDiffStory.mockResolvedValue(undefined);
     mocks.runReviewApp.mockClear();
     codeDiffExtension(pi as never);
@@ -439,7 +435,7 @@ describe("code diff extension", () => {
     mocks.listReviewCompositions.mockReturnValue([recovery]);
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
     const harness = draftReviewHarness();
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [], visibleScopes: ["all-files"], branchBaseRevision: null });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [], scope: "all-files", branchBaseRevision: null });
     await harness.open("--resume selected");
     expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ initialComposition: recovery, files: [] }));
     expect(mocks.saveReviewComposition).not.toHaveBeenCalled();
@@ -540,7 +536,7 @@ describe("code diff extension", () => {
     const id = "784f5b79-cc4d-4e13-9872-66185ea8bd55";
     mocks.hasReviewSessionIdentity.mockReturnValue(true);
     mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "Retained", allIntent: "comment", comments: [] }), id, generation: 2, revision: "abc123" });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files", branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
     await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: id, priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
     expect(mocks.hasReviewSessionIdentity).toHaveBeenCalledWith("pr|github|example/widgets|1", id);
@@ -557,7 +553,7 @@ describe("code diff extension", () => {
   it("starts a fresh instance after a completely consumed DISCUSS continuation", async () => {
     mocks.hasReviewSessionIdentity.mockReturnValue(true);
     mocks.createReviewInstanceId.mockReturnValue("next-pass");
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], visibleScopes: ["all-files"], branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [remoteReviewFile()], scope: "all-files", branchBaseRevision: "origin/main", modifiedRevision: "abc123" });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "discard" });
     await draftReviewHarness().open("remote example/widgets#1", { continuation: { kind: "remote-discuss", priorSessionId: "consumed-instance", priorBaseRevision: "origin/main", priorHeadRevision: "abc123" } });
     expect(mocks.runReviewApp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reviewSessionId: "next-pass" }));
@@ -865,7 +861,7 @@ describe("code diff extension", () => {
       files: [localReviewFile()],
       branchBaseRevision: undefined,
       modifiedRevision: undefined,
-      visibleScopes: ["git-diff"],
+      scope: "git-diff",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
@@ -896,7 +892,7 @@ describe("code diff extension", () => {
       files: [localReviewFile()],
       branchBaseRevision: undefined,
       modifiedRevision: undefined,
-      visibleScopes: ["git-diff"],
+      scope: "git-diff",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
@@ -1231,7 +1227,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
@@ -1266,7 +1262,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
@@ -1386,7 +1382,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.composeDiscussionPrompt.mockReturnValue("DISCUSS ONLY\n\nWhy is this branch needed?");
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
@@ -1495,7 +1491,7 @@ describe("code diff extension", () => {
     };
     const payload = { type: "submit" as const, allComment: "Review-wide public note", allIntent: "comment" as const, comments: [mappedLine, mappedFile] };
     const session = reviewSessionData({ allComment: payload.allComment, allIntent: payload.allIntent, comments: [mappedLine, mappedFile, stale] });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
       return payload;
@@ -1542,7 +1538,7 @@ describe("code diff extension", () => {
       remote: secondaryUrl,
       pullRequest: { ...remoteTarget().pullRequest, number: "42", repo: "example/widgets", baseRefOid: "base-sha", headRefOid: "head-sha" },
     });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/secondary/42/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/secondary/42/head", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
       return payload;
@@ -1588,7 +1584,7 @@ describe("code diff extension", () => {
         pullRequest: { ...remoteTarget().pullRequest, number: "42", repo: "example/widgets", baseRefOid: "base-sha", headRefOid: "head-sha" },
       });
     }
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "old()\n", modifiedContent });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
@@ -1631,7 +1627,7 @@ describe("code diff extension", () => {
     const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [comment] });
     const edited = reviewSessionData({ allComment: "", allIntent: "comment", comments: [{ ...comment, body: "New feedback during POST" }] });
     let save!: (value: typeof session) => void;
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => { save = options.onSessionChange; save(session); return { type: "submit", ...session.state.draft }; });
     mocks.submitPullRequestReview.mockImplementation(async () => {
       save(edited);
@@ -1656,7 +1652,7 @@ describe("code diff extension", () => {
     const saved = { id: "settled", input, draft: { identity: session.identity, sessionId: session.id, comments: allOmitted ? [] : [{ id: accepted.id, fingerprint: submissionFingerprint(accepted) }], bodyComments: [] }, steps: [{ status: mode === "pending" ? "unknown" : "submitted", commentIndexes: allOmitted ? [] : [0], bodyIncluded: false }] };
     mocks.loadReviewSession.mockReturnValue(session);
     mocks.findForDraft.mockReturnValue(saved);
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return { type: "submit", ...raw }; });
     mocks.composeDiscussionPrompt.mockReturnValue("Discuss retained feedback");
     if (mode === "handoff") mocks.reviewGrammar.mockResolvedValue({ status: "error", error: "offline" });
@@ -1696,7 +1692,7 @@ describe("code diff extension", () => {
     const original = reviewSessionData({ allComment: "", allIntent: "comment", comments: [posted, bodyNote] });
     let current = original;
     mocks.loadReviewSession.mockImplementation(() => ({ ...current, id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" }));
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(current); return { type: "submit", ...current.state.draft }; });
     mocks.submitPullRequestReview.mockResolvedValue({ ok: false, status: "partial", message: "Comments accepted; approval rejected.", draftConsumption: { status: "saved", remainingItems: 1 } });
     const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn(), sendUserMessage: vi.fn() };
@@ -1723,7 +1719,7 @@ describe("code diff extension", () => {
     const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [comment] };
     const session = { ...reviewSessionData(payload), id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" };
     mocks.loadReviewSession.mockReturnValue(session);
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return payload; });
     mocks.reviewGrammar.mockImplementation(async (_ctx, original) => ({ status: "safe", corrected: { ...original, comments: ["Final grammar text"] }, changes: [] }));
     mocks.submitPullRequestReview.mockResolvedValue({ ok: false, status: "unknown", message: "Unknown write", attemptId: "attempt-1" });
@@ -1753,7 +1749,7 @@ describe("code diff extension", () => {
     const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [comment] };
     const session = { ...reviewSessionData(payload), id: "same-instance", identity: "pr|github|example/widgets|1", generation: 1, revision: "abc123" };
     mocks.loadReviewSession.mockReturnValue(session);
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "abc123", scope: "all-files" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => { options.onSessionChange(session); return payload; });
     mocks.reviewGrammar.mockResolvedValue({ status: "error", error: "offline" });
     if (mode === "failure") mocks.prepareSubmissionHandoff.mockImplementation(() => { throw new Error("storage full"); });
@@ -1826,7 +1822,7 @@ describe("code diff extension", () => {
     const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [removed, posted] };
     const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [removed, posted] });
     if (delivery === "resumed") mocks.submitPullRequestReview.mockResolvedValueOnce({ ok: false, status: "unknown", message: "Unknown write" });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.reviewGrammar.mockResolvedValue({
       status: "review",
       corrected: { comments: [removed.body, posted.body] },
@@ -1870,7 +1866,7 @@ describe("code diff extension", () => {
     const stale = { id: "stale", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 8, endLine: 8, body: "Stale", captureHash: { algorithm: "sha256" as const, value: "3".repeat(64) }, anchorStatus: "stale" as const };
     const payload = { type: "submit" as const, allComment: "", allIntent: "comment" as const, comments: [mapped] };
     const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [mapped, stale] });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.submitPullRequestReview.mockResolvedValue({ ok: false, message: "provider rejected submission" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
@@ -1899,7 +1895,7 @@ describe("code diff extension", () => {
     const file = remoteReviewFile();
     const mapped = { id: "mapped", fileId: file.id, scope: "all-files" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Mapped", anchorStatus: "mapped" as const };
     const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [mapped] });
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.reviewGrammar.mockResolvedValue({
       status: "review",
       corrected: { comments: [mapped.body] },
@@ -1964,7 +1960,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     const session = reviewSessionData({ allComment: payload.allComment, allIntent: payload.allIntent, comments: payload.comments });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
@@ -2039,7 +2035,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/review/secondary/42/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({
       type: "submit",
@@ -2121,7 +2117,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.composeDiscussionPrompt.mockReturnValue("");
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
@@ -2169,14 +2165,12 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
     const expandedCwd = join(homedir(), "custom-repo");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -2210,7 +2204,7 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const expandedCwd = join(homedir(), "custom-repo");
     const prepared = { snapshot: { fingerprint: "captured", files: [] }, plan: { version: 1, snapshot: "captured", summary: "", steps: [] } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files: [localReviewFile()], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files: [localReviewFile()], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.prepareDiffStory.mockResolvedValue(prepared);
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated story prompt");
@@ -2283,7 +2277,7 @@ describe("code diff extension", () => {
       "git-diff",
     );
     mocks.getReviewWindowData.mockResolvedValue({
-      repoRoot: "/repo", files: [first, second], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"],
+      repoRoot: "/repo", files: [first, second], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff",
     });
     mocks.loadReviewSession.mockReturnValue(persisted);
     mocks.loadReviewFileContents.mockImplementation(async (_pi, _root, candidate) => ({
@@ -2328,7 +2322,7 @@ describe("code diff extension", () => {
     const persisted = reviewSessionData({ allComment: "", allIntent: "comment", comments: [mapped] });
     mocks.loadReviewSession.mockReturnValue(persisted);
     mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({
-      repoRoot: "/repo", files: [file], branchBaseRevision: "base", modifiedRevision: "head", visibleScopes: ["all-files"],
+      repoRoot: "/repo", files: [file], branchBaseRevision: "base", modifiedRevision: "head", scope: "all-files",
     });
     mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "base bytes\n", modifiedContent: "head bytes\n" });
     const mounted: any[] = [];
@@ -2353,11 +2347,11 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const file = {
       id: "src/app.ts::working::::", path: "src/app.ts", worktreeStatus: "modified" as const,
-      hasWorkingTreeFile: true, inGitDiff: true, inLastCommit: false, inAllFiles: false,
+      hasWorkingTreeFile: true, inGitDiff: true, inAllFiles: false,
       gitDiff: { status: "modified" as const, oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null, allFiles: null,
+      allFiles: null,
     };
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
+    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" as const };
     mocks.getReviewWindowData.mockResolvedValue(reviewData);
     const openCode = {
       type: "open-code" as const,
@@ -2405,7 +2399,7 @@ describe("code diff extension", () => {
         focus: { pane: "diff" as const, navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 }, contextHash: target.anchor,
       },
     };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp
       .mockImplementationOnce(async () => {
         writeFileSync(settingsPath, JSON.stringify({ ...testSettings(), code: { command: ["code-open"], targetArgs: ["{file}:{line}"] } }), "utf8");
@@ -2426,16 +2420,7 @@ describe("code diff extension", () => {
 
   it("uses in-memory latestSession across bridge refresh when disk persistence fails", async () => {
     const tools = new Map<string, any>();
-    const baseFile = localReviewFile();
-    const file = {
-      ...baseFile,
-      inAllFiles: true,
-      allFiles: {
-        ...baseFile.gitDiff,
-        originalRevision: "base",
-        modifiedRevision: "head",
-      },
-    };
+    const file = localReviewFile();
     const stale = {
       id: "latest-stale",
       fileId: file.id,
@@ -2463,7 +2448,7 @@ describe("code diff extension", () => {
     };
     const latest = reviewSessionData({ allComment: "", allIntent: "modify", comments: [stale, outOfFrame] }, file.id, "git-diff");
     const emptyDisk = reviewSessionData({ allComment: "", allIntent: "discuss", comments: [] }, file.id, "git-diff");
-    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const, "all-files" as const] };
+    const reviewData = { repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" as const };
     const target = { path: "src/app.ts", range: { startLine: 1, endLine: 1 }, anchor: { algorithm: "sha256" as const, value: "a".repeat(64) } };
     const openCode = {
       type: "open-code" as const,
@@ -2477,9 +2462,7 @@ describe("code diff extension", () => {
     mocks.getReviewWindowData.mockResolvedValue(reviewData);
     mocks.loadReviewSession.mockReturnValue(emptyDisk);
     mocks.saveReviewSessionWithStatus.mockReturnValue({ id: "automatic-session", saved: false });
-    mocks.loadReviewFileContents.mockImplementation(async (_pi, _root, _file, scope) => scope === "all-files"
-      ? { originalContent: "base bytes\n", modifiedContent: "branch bytes\n" }
-      : { originalContent: "old\n", modifiedContent: "worktree changed\n" });
+    mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "old\n", modifiedContent: "worktree changed\n" });
     mocks.runPiWorkbench.mockResolvedValue({ status: "closed", changedPaths: [] });
     let reopenedInitial: any;
     mocks.runReviewApp
@@ -2499,7 +2482,6 @@ describe("code diff extension", () => {
 
     expect(mocks.runReviewApp).toHaveBeenCalledTimes(2);
     expect(reopenedInitial.state.draft.comments).toEqual([stale, outOfFrame]);
-    expect(mocks.loadReviewFileContents.mock.calls.some((call) => call[3] === "all-files")).toBe(true);
   });
 
   it("closes and rematerializes the exact local review closure after external editor return", async () => {
@@ -2512,7 +2494,7 @@ describe("code diff extension", () => {
       path: "src/new.ts",
       gitDiff: { ...file.gitDiff!, oldPath: null, newPath: "src/new.ts", status: "added" as const, hasOriginal: false },
     };
-    const initialData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
+    const initialData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" as const };
     const refreshedData = { ...initialData, files: [file, addedFile] };
     const session = reviewSessionData({ allComment: "keep this", allIntent: "comment", comments: [] }, file.id, "git-diff");
     const anchor = hashTargetSlice("new\n", { startLine: 1, endLine: 1 });
@@ -2564,7 +2546,7 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const repoRoot = process.cwd();
     const file = localReviewFile();
-    const reviewData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
+    const reviewData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" as const };
     let reopenedOptions: any;
     mocks.getReviewWindowData.mockResolvedValueOnce(reviewData).mockResolvedValueOnce(reviewData);
     mocks.runReviewApp
@@ -2589,7 +2571,7 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const repoRoot = process.cwd();
     const file = localReviewFile();
-    const reviewData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff" as const] };
+    const reviewData = { repoRoot, files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" as const };
     let reopenedOptions: any;
     mocks.getReviewWindowData.mockResolvedValueOnce(reviewData).mockResolvedValueOnce(reviewData);
     mocks.runReviewApp
@@ -2621,7 +2603,7 @@ describe("code diff extension", () => {
       path: "src/app.ts", side: "added" as const, range: target.range, focus: { pane: "diff" as const, navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 }, contextHash: target.anchor, selectedHash: target.anchor,
       context: { before: 1, after: 1, hash: target.anchor },
     } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.saveReviewSessionWithStatus.mockReturnValue({ id: "automatic-session", saved: false });
     mocks.runPiWorkbench.mockResolvedValueOnce({ status: "discuss", changedPaths: [], target, note: "why" });
     let reopened: any;
@@ -2642,12 +2624,12 @@ describe("code diff extension", () => {
     const commands = new Map<string, any>();
     const file = {
       id: "src/app.ts::working::::", path: "src/app.ts", worktreeStatus: "modified" as const,
-      hasWorkingTreeFile: true, inGitDiff: true, inLastCommit: false, inAllFiles: false,
+      hasWorkingTreeFile: true, inGitDiff: true, inAllFiles: false,
       gitDiff: { status: "modified" as const, oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null, allFiles: null,
+      allFiles: null,
     };
     const target = { path: "src/app.ts", range: { startLine: 1, endLine: 1 }, anchor: { algorithm: "sha256" as const, value: "a".repeat(64) } };
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValueOnce({
       type: "open-code", target,
       resume: { version: 1, repository: "/repo", sessionId: "automatic-session", identity: "/repo|working|worktree|local", scope: "git-diff", path: "src/app.ts", side: "added", range: target.range, focus: { pane: "diff", navigatorScroll: 0, diffScroll: 0, commentsScroll: 0 }, contextHash: target.anchor },
@@ -2679,7 +2661,7 @@ describe("code diff extension", () => {
       anchorStatus: "stale" as const,
     };
     const session = reviewSessionData({ allComment: "", allIntent: "discuss", comments: [stale] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "old\n", modifiedContent: Array.from({ length: 9 }, (_, index) => `line ${index + 1}`).join("\n") });
     mocks.composeReviewPrompt.mockReturnValue("generated stale prompt");
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
@@ -2722,7 +2704,7 @@ describe("code diff extension", () => {
       intent: "comment" as const, startLine: 2, endLine: 2, body: "Old note", anchorStatus: "stale" as const,
     };
     const session = reviewSessionData({ allComment: "", allIntent: "discuss", comments: [orphan] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
       return { type: "submit", ...session.state.draft };
@@ -2760,7 +2742,7 @@ describe("code diff extension", () => {
       anchorStatus: "stale" as const,
     };
     const session = reviewSessionData({ allComment: "", allIntent: "discuss", comments: [stale] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "old\n", modifiedContent });
     mocks.composeReviewPrompt.mockReturnValue("generated line prompt");
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
@@ -2812,7 +2794,7 @@ describe("code diff extension", () => {
     };
     const submitted = { type: "submit" as const, allComment: "Review-wide note", allIntent: "comment" as const, comments: [mapped] };
     const session = reviewSessionData({ allComment: submitted.allComment, allIntent: submitted.allIntent, comments: [mapped, stale] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.composeReviewPrompt.mockReturnValue("generated mapped-only prompt");
     mocks.runReviewApp.mockImplementation(async (_ctx, options) => {
       options.onSessionChange(session);
@@ -2845,7 +2827,7 @@ describe("code diff extension", () => {
     const mapped = { id: "mapped", fileId: file.id, scope: "git-diff" as const, side: "file" as const, intent: "comment" as const, startLine: null, endLine: null, body: "Mapped", anchorStatus: "mapped" as const };
     const stale = { id: "stale", fileId: file.id, scope: "git-diff" as const, side: "added" as const, intent: "comment" as const, startLine: 4, endLine: 4, body: "Stale", captureHash: { algorithm: "sha256" as const, value: "e".repeat(64) }, anchorStatus: "stale" as const };
     const session = reviewSessionData({ allComment: "", allIntent: "comment", comments: [mapped, stale] }, file.id, "git-diff");
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.composeReviewPrompt.mockReturnValue("mapped prompt");
     mocks.saveReviewSessionWithStatus.mockReturnValue({ id: "automatic-session", saved: false });
     mocks.loadReviewSession.mockReturnValue(reviewSessionData({ allComment: "", allIntent: "comment", comments: [] }, file.id, "git-diff"));
@@ -2876,13 +2858,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "", allIntent: "discuss", comments: [] });
     const pi = {
       registerCommand: vi.fn(),
@@ -2921,14 +2901,12 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: null,
-      lastCommit: null,
       allFiles: null,
     }];
-    const rootData = { repoRoot: "/repo", files: rootFiles, branchBaseRevision: null, visibleScopes: ["git-diff"] };
-    const nestedData = { repoRoot: "/repo/packages/app", files: [], branchBaseRevision: "abc", modifiedRevision: "def", visibleScopes: ["all-files"] };
+    const rootData = { repoRoot: "/repo", files: rootFiles, branchBaseRevision: null, scope: "git-diff" };
+    const nestedData = { repoRoot: "/repo/packages/app", files: [], branchBaseRevision: "abc", modifiedRevision: "def", scope: "all-files" };
     mocks.getReviewWindowData.mockResolvedValue(rootData);
     mocks.getReviewWindowDataForRevisionRange.mockResolvedValue(nestedData);
     const pi = {
@@ -2967,13 +2945,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -3017,10 +2993,8 @@ describe("code diff extension", () => {
       worktreeStatus: "modified" as const,
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified" as const, oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     };
     const existing = {
@@ -3034,7 +3008,7 @@ describe("code diff extension", () => {
       body: "Keep this human comment.",
     };
     mocks.loadReviewSession.mockReturnValue({ ...reviewSessionData({ allComment: "", allIntent: "discuss", comments: [existing] }, file.id, "git-diff"), revision: "worktree", fileSignatures: {} });
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
       registerCommand: vi.fn(),
@@ -3070,7 +3044,7 @@ describe("code diff extension", () => {
     const tools = new Map<string, any>();
     const file = localReviewFile();
     const modifiedContent = "one()\ntwo()\nthree()\nfour()\n";
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files: [file], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.loadReviewFileContents.mockResolvedValue({ originalContent: "before()\n", modifiedContent });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = { registerCommand: vi.fn(), registerTool: vi.fn((tool) => tools.set(tool.name, tool)), registerShortcut: vi.fn(), on: vi.fn() };
@@ -3107,13 +3081,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: false,
-      inLastCommit: false,
       inAllFiles: true,
       gitDiff: null,
-      lastCommit: null,
       allFiles: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
     }];
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: "base", modifiedRevision: "head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: "base", modifiedRevision: "head", scope: "all-files" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -3158,13 +3130,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -3202,13 +3172,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "app/admin/dashboard.rb", newPath: "app/admin/dashboard.rb", displayPath: "app/admin/dashboard.rb", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: expandedCwd, files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -3256,13 +3224,11 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-      lastCommit: null,
       allFiles: null,
     }];
-    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: localRepo, files, branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValue({ repoRoot: localRepo, files, branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Overall note", allIntent: "discuss", comments: [] });
     mocks.composeReviewPrompt.mockReturnValue("generated review prompt");
     const pi = {
@@ -3320,13 +3286,13 @@ describe("code diff extension", () => {
     expect(blockedTool.details).toMatchObject({ started: false, message: "A review session is already open." });
     expect(mocks.repositoryStatusRefresh).not.toHaveBeenCalled();
 
-    discovery.resolve({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    discovery.resolve({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     await shortcutRun;
 
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledTimes(1);
     expect(mocks.repositoryStatusRefresh).toHaveBeenLastCalledWith(ctx);
 
-    mocks.getReviewWindowData.mockResolvedValueOnce({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValueOnce({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     const releasedTool = await tools.get("open_code_diff").execute(
       "released-tool",
       { args: "" },
@@ -3382,7 +3348,7 @@ describe("code diff extension", () => {
     expect(ctx.ui.notify).toHaveBeenCalledWith("Could not start review: discovery failed", "error");
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledTimes(1);
 
-    mocks.getReviewWindowData.mockResolvedValueOnce({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, visibleScopes: ["git-diff"] });
+    mocks.getReviewWindowData.mockResolvedValueOnce({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     const releasedTool = await tools.get("open_code_diff").execute(
       "released-tool",
       { args: "" },
@@ -3512,10 +3478,8 @@ describe("code diff extension", () => {
       worktreeStatus: "modified",
       hasWorkingTreeFile: true,
       inGitDiff: false,
-      inLastCommit: false,
       inAllFiles: true,
       gitDiff: null,
-      lastCommit: null,
       allFiles: { status: "modified", oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
     }];
     const pullRequest = {
@@ -3535,7 +3499,7 @@ describe("code diff extension", () => {
       queue: { position: 2, total: 4 },
     };
     mocks.resolveRemoteReviewTarget.mockResolvedValue(remoteTarget());
-    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", visibleScopes: ["all-files"] });
+    mocks.getReviewWindowDataForRevisionRange.mockResolvedValue({ repoRoot: "/repo", files, branchBaseRevision: "origin/main", modifiedRevision: "origin/pr/1/head", scope: "all-files" });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel" });
     const pi = {
       registerCommand: vi.fn(),
@@ -3588,7 +3552,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     const pi = {
       registerCommand: vi.fn(),
@@ -3615,7 +3579,7 @@ describe("code diff extension", () => {
     await tools.get("open_code_diff").execute("tool-call", { args: "remote example/widgets#1 --resume automatic-session" }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mocks.createReviewSessionId).toHaveBeenCalledWith("pr|github|example/widgets|1");
-    expect(mocks.rebaseReviewSession).toHaveBeenCalledWith(parked, expect.any(Array), ["all-files"], { "src/app.ts": "modified:src/app.ts:1:0" });
+    expect(mocks.rebaseReviewSession).toHaveBeenCalledWith(parked, expect.any(Array), "all-files", { "src/app.ts": "modified:src/app.ts:1:0" });
     expect(mocks.deleteReviewSession).not.toHaveBeenCalled();
     expect(mocks.saveReviewSessionWithStatus).toHaveBeenLastCalledWith(
       "pr|github|example/widgets|1",
@@ -3656,7 +3620,7 @@ describe("code diff extension", () => {
       files: [file],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({
       type: "submit",
@@ -3743,7 +3707,7 @@ describe("code diff extension", () => {
       files: [remoteReviewFile()],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "submit", allComment: "Looks good", allIntent: "comment", comments: [] });
     const pi = {
@@ -3817,7 +3781,7 @@ describe("code diff extension", () => {
       files: [remoteReviewFile()],
       branchBaseRevision: "origin/main",
       modifiedRevision: "origin/pr/1/head",
-      visibleScopes: ["all-files"],
+      scope: "all-files",
     });
     mocks.runReviewApp.mockResolvedValue({ type: "cancel", disposition: "park" });
     const pi = {

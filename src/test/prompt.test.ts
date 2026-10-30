@@ -9,21 +9,12 @@ const files: ReviewFile[] = [
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: true,
     inAllFiles: false,
     gitDiff: {
       status: "modified",
       oldPath: "src/foo.ts",
       newPath: "src/foo.ts",
       displayPath: "src/foo.ts",
-      hasOriginal: true,
-      hasModified: true,
-    },
-    lastCommit: {
-      status: "renamed",
-      oldPath: "src/old-foo.ts",
-      newPath: "src/foo.ts",
-      displayPath: "src/old-foo.ts -> src/foo.ts",
       hasOriginal: true,
       hasModified: true,
     },
@@ -35,7 +26,6 @@ const files: ReviewFile[] = [
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: {
       status: "modified",
@@ -45,7 +35,6 @@ const files: ReviewFile[] = [
       hasOriginal: true,
       hasModified: true,
     },
-    lastCommit: null,
     allFiles: null,
   },
 ];

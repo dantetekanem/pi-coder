@@ -10,7 +10,6 @@ export interface ReviewActionDefinition {
 }
 
 export const REVIEW_ACTIONS: ReviewActionDefinition[] = [
-  { id: "scope", section: "Core", keys: "Alt+1/2/3", label: "switch review scope" },
   { id: "panes", section: "Core", keys: "1/2/3/4/5", label: "toggle Navigator/Diff/Comments/PR context/Replies", footer: true },
   { id: "focus", section: "Core", keys: "Tab / Shift+Tab", label: "cycle focus", footer: true },
   { id: "search", section: "Core", keys: "/", label: "search focused pane • n/N next/prev search", footer: true },

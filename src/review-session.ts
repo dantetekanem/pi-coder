@@ -507,7 +507,8 @@ function comparisonSignature(comparison: ReviewFileComparison | null): string | 
 }
 
 function fileSignature(file: ReviewFile): string | null {
-  const comparisons = [file.gitDiff, file.lastCommit, file.allFiles];
+  // Keep the reserved middle slot compatible with saved comparison signatures.
+  const comparisons = [file.gitDiff, null, file.allFiles];
   if (comparisons.every((comparison) => comparison == null)) return null;
   const signatures = comparisons.map(comparisonSignature);
   return signatures.some((signature) => signature == null) ? null : signatures.join("|");
@@ -563,18 +564,23 @@ export interface ReviewSessionRebase {
 export function rebaseReviewSession(
   session: PersistedReviewSession,
   files: ReviewFile[],
-  visibleScopes: ReviewScope[],
+  scope: ReviewScope,
   signatures: Record<string, string>,
 ): ReviewSessionRebase {
   const previousSignatures = session.fileSignatures;
   const marker = `[needs attention · anchored on ${shortRevision(session.revision)}]`;
   const seeds: SeedReviewComment[] = [];
+  const unavailableComments: DiffReviewComment[] = [];
   const commentBySeed = new Map<SeedReviewComment, DiffReviewComment>();
   const markedSeeds = new Set<SeedReviewComment>();
   const originalTextByKey = new Map<string, string>();
   const anchorByKey = new Map<string, Pick<DiffReviewComment, "captureHash" | "anchorStatus">>();
 
   for (const comment of session.state.draft.comments) {
+    if (comment.scope !== scope) {
+      unavailableComments.push(comment);
+      continue;
+    }
     const path = commentFilePath(comment.fileId);
     const previous = previousSignatures[path];
     const current = signatures[path];
@@ -599,7 +605,7 @@ export function rebaseReviewSession(
     if (marked) markedSeeds.add(seed);
   }
 
-  const resolution = resolveSeedComments(files, visibleScopes, seeds);
+  const resolution = resolveSeedComments(files, scope, seeds);
   const unresolvedSeeds = new Set(resolution.unresolved);
   const unanchoredComments = resolution.unresolved
     .map((seed) => commentBySeed.get(seed))
@@ -618,6 +624,7 @@ export function rebaseReviewSession(
 
   const clearedState: ReviewState = {
     ...session.state,
+    activeScope: scope,
     activeFileId: null,
     selectedCommentIndex: 0,
     selectedLineTargetByScopeFile: {},
@@ -640,13 +647,13 @@ export function rebaseReviewSession(
 
   return {
     data: {
-      state: { ...rebasedState, draft: { ...rebasedState.draft, comments } },
+      state: { ...rebasedState, draft: { ...rebasedState.draft, comments: [...comments, ...unavailableComments] } },
       ...(session.discussions == null ? {} : { discussions: session.discussions }),
       ...(session.story == null ? {} : { story: session.story }),
       diffViewMode: session.diffViewMode,
       navigatorTreeMode: session.navigatorTreeMode,
       contextLineNavigation: session.contextLineNavigation,
-      commentsGlobal: session.commentsGlobal,
+      commentsGlobal: unavailableComments.length > 0 || session.commentsGlobal,
       ...(session.showAllLocales == null ? {} : { showAllLocales: session.showAllLocales }),
       reviewedFileIds,
       navigatorScroll: 0,

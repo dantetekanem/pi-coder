@@ -35,16 +35,13 @@ export interface SeedPartition {
   conflicts: ResolvedSeedComment[];
 }
 
-const FALLBACK_VISIBLE_SCOPES: ReviewScope[] = ["git-diff", "last-commit"];
-
 function normalizePath(path: string): string {
   return path.trim().replace(/^\.\//, "");
 }
 
 function getScopeComparison(file: ReviewFile, scope: ReviewScope) {
   if (scope === "git-diff") return file.gitDiff;
-  if (scope === "last-commit") return file.lastCommit;
-  return file.allFiles;
+  return scope === "all-files" ? file.allFiles : null;
 }
 
 function fileMatchesPath(file: ReviewFile, scope: ReviewScope, target: string): boolean {
@@ -53,24 +50,15 @@ function fileMatchesPath(file: ReviewFile, scope: ReviewScope, target: string): 
   return candidates.some((candidate) => candidate != null && normalizePath(candidate) === target);
 }
 
-function findFileScope(files: ReviewFile[], visibleScopes: ReviewScope[], target: string): { fileId: string; scope: ReviewScope } | null {
-  for (const scope of visibleScopes) {
-    for (const file of getScopedFiles(files, scope)) {
-      if (fileMatchesPath(file, scope, target)) return { fileId: file.id, scope };
-    }
-  }
-  return null;
-}
-
-export function resolveSeedComments(files: ReviewFile[], visibleScopes: ReviewScope[], comments: SeedReviewComment[]): SeedResolution {
-  const scopes = visibleScopes.length > 0 ? visibleScopes : FALLBACK_VISIBLE_SCOPES;
+export function resolveSeedComments(files: ReviewFile[], scope: ReviewScope, comments: SeedReviewComment[]): SeedResolution {
+  const scopedFiles = getScopedFiles(files, scope);
   const resolved: ResolvedSeedComment[] = [];
   const unresolved: SeedReviewComment[] = [];
 
   for (const comment of comments) {
     const body = comment.body?.trim() ?? "";
     const target = normalizePath(comment.path ?? "");
-    const match = target.length === 0 || body.length === 0 ? null : findFileScope(files, scopes, target);
+    const match = target.length === 0 || body.length === 0 ? null : scopedFiles.find((file) => fileMatchesPath(file, scope, target));
     if (match == null || body.length === 0) {
       unresolved.push(comment);
       continue;
@@ -81,11 +69,11 @@ export function resolveSeedComments(files: ReviewFile[], visibleScopes: ReviewSc
     const startLine = comment.startLine ?? comment.line ?? null;
 
     if (side === "file" || startLine == null) {
-      resolved.push({ fileId: match.fileId, scope: match.scope, side: "file", intent, startLine: null, endLine: null, body });
+      resolved.push({ fileId: match.id, scope, side: "file", intent, startLine: null, endLine: null, body });
       continue;
     }
 
-    resolved.push({ fileId: match.fileId, scope: match.scope, side, intent, startLine, endLine: comment.endLine ?? startLine, body });
+    resolved.push({ fileId: match.id, scope, side, intent, startLine, endLine: comment.endLine ?? startLine, body });
   }
 
   return { resolved, unresolved };

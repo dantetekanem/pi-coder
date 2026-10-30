@@ -33,7 +33,7 @@ export function normalizeOrderPath(path: string): string {
 }
 
 function scopeComparison(file: ReviewFile, scope: ReviewScope) {
-  return scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
+  return scope === "git-diff" ? file.gitDiff : scope === "all-files" ? file.allFiles : null;
 }
 
 export function getReviewFilePathKeys(file: ReviewFile, scope: ReviewScope): string[] {

@@ -39,21 +39,18 @@ function contextHashForRange(content: string, range: { startLine: number; endLin
 
 function getScopeComparison(file: ReviewFile, scope: ReviewScope): ReviewFileComparison | null {
   if (scope === "git-diff") return file.gitDiff;
-  if (scope === "last-commit") return file.lastCommit;
-  return file.allFiles;
+  return scope === "all-files" ? file.allFiles : null;
 }
 
 function hasScope(file: ReviewFile, scope: ReviewScope): boolean {
   if (scope === "git-diff") return file.inGitDiff;
-  if (scope === "last-commit") return file.inLastCommit;
-  return file.inAllFiles;
+  return scope === "all-files" && file.inAllFiles;
 }
 
 function hasAnchorSource(file: ReviewFile, comment: DiffReviewComment): boolean {
   if (!hasScope(file, comment.scope)) return false;
   const comparison = getScopeComparison(file, comment.scope);
-  if (comparison != null) return comment.side === "deleted" ? comparison.hasOriginal : comparison.hasModified;
-  return comment.scope === "all-files" && comment.side === "added" && file.hasWorkingTreeFile;
+  return comparison != null && (comment.side === "deleted" ? comparison.hasOriginal : comparison.hasModified);
 }
 
 function hasValidCaptureHash(comment: DiffReviewComment): comment is DiffReviewComment & { captureHash: NonNullable<DiffReviewComment["captureHash"]> } {
@@ -85,15 +82,17 @@ export function validateReviewDraftAnchor(
   return hashTargetSlice(source, range).value === comment.captureHash.value ? "mapped" : "stale";
 }
 
-/** Validates every persisted line/range draft against bytes from its own file and scope. */
+/** Validate the requested comparison; keep feedback from unavailable comparisons intact. */
 export async function revalidateReviewDraftAnchors(
   state: ReviewState,
   files: readonly ReviewFile[],
   loadContents: (file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>,
+  scope: ReviewScope,
 ): Promise<ReviewState> {
   const byId = new Map(files.map((file) => [file.id, file]));
   const loaded = new Map<string, Promise<ReviewFileContents>>();
   const comments = await Promise.all(state.draft.comments.map(async (comment) => {
+    if (comment.scope !== scope) return comment;
     if (comment.side === "file") return { ...comment, anchorStatus: "mapped" as const };
     if (comment.anchorStatus === "stale") return { ...comment, anchorStatus: "stale" as const };
     const file = byId.get(comment.fileId);

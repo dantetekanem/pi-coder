@@ -2,15 +2,9 @@ import { filterFilesBySearch } from "./search.js";
 import type { ChangeStatus, CommentIntent, CommentSide, DiffReviewComment, FileCommentTarget, ReviewFile, ReviewFocus, ReviewLineTarget, ReviewScope, ReviewState } from "./types.js";
 import { scopeFileKey } from "./types.js";
 
-function hasFilesForScope(files: ReviewFile[], scope: ReviewScope): boolean {
-  return getScopedFiles(files, scope).length > 0;
-}
-
 export function getDefaultScope(files: ReviewFile[]): ReviewScope {
-  if (hasFilesForScope(files, "git-diff")) return "git-diff";
-  if (hasFilesForScope(files, "all-files")) return "all-files";
-  if (hasFilesForScope(files, "last-commit")) return "last-commit";
-  return "all-files";
+  if (files.some((file) => file.inGitDiff)) return "git-diff";
+  return files.some((file) => file.inAllFiles) ? "all-files" : "git-diff";
 }
 
 function getAllFilesStatusRank(status: ChangeStatus | null | undefined): number {
@@ -51,7 +45,7 @@ export function getScopedFiles(files: ReviewFile[], scope: ReviewScope): ReviewF
     case "git-diff":
       return files.filter((file) => file.inGitDiff);
     case "last-commit":
-      return files.filter((file) => file.inLastCommit);
+      return [];
     case "all-files": {
       const scoped = files.filter((file) => file.inAllFiles);
       if (!scoped.some((file) => file.allFiles != null)) return scoped;
@@ -75,8 +69,7 @@ export function ensureActiveFile(state: ReviewState, files: ReviewFile[]): Revie
   return { ...state, activeFileId: filtered[0]!.id };
 }
 
-export function createInitialReviewState(files: ReviewFile[]): ReviewState {
-  const initialScope = getDefaultScope(files);
+export function createInitialReviewState(files: ReviewFile[], initialScope = getDefaultScope(files)): ReviewState {
   const scoped = getScopedFiles(files, initialScope);
   return {
     activeScope: initialScope,
@@ -93,10 +86,6 @@ export function createInitialReviewState(files: ReviewFile[]): ReviewState {
       comments: [],
     },
   };
-}
-
-export function setScope(state: ReviewState, files: ReviewFile[], scope: ReviewScope): ReviewState {
-  return ensureActiveFile({ ...state, activeScope: scope, selectedCommentIndex: 0 }, files);
 }
 
 export function setSearchQuery(state: ReviewState, files: ReviewFile[], query: string): ReviewState {

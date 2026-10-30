@@ -26,7 +26,7 @@ import { sanitizeTerminalText } from "./sanitize.js";
 import { loadCommentShortcuts } from "./shortcuts.js";
 import { runReviewApp } from "./ui/review-app.js";
 import { prepareDiffStory, selectStoryAgent, type PreparedDiffStory } from "./ui/diff-story.js";
-import { getDefaultScope, getScopedFiles } from "./state.js";
+import { getScopedFiles } from "./state.js";
 import { withHerdrPaneZoom } from "./ui/full-screen-overlay.js";
 import { pickSyntaxTheme } from "./ui/syntax-theme-picker.js";
 import { runPiWorkbench } from "./adapters/pi/index.js";
@@ -927,7 +927,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       let files = data.files;
       let branchBaseRevision = data.branchBaseRevision;
       let modifiedRevision = data.modifiedRevision;
-      let visibleScopes = data.visibleScopes;
+      let reviewScope = data.scope;
       let loadFileContentsForReview = (activeRepoRoot: string, file: ReviewFile, scope: ReviewScope) => activeRepoRoot === repoRoot
         ? loadReviewFileContents(pi, activeRepoRoot, file, scope, branchBaseRevision, modifiedRevision)
         : loadReviewFileContents(pi, activeRepoRoot, file, scope);
@@ -963,7 +963,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       let expectedGeneration: number | null = resumeId != null && savedSession != null ? savedSession.generation : null;
       let initialSession: ReviewSessionData | null = savedSession;
       if (savedSession != null && savedSession.revision !== sessionRevision) {
-        const rebase = rebaseReviewSession(savedSession, files, visibleScopes, fileSignatures);
+        const rebase = rebaseReviewSession(savedSession, files, reviewScope, fileSignatures);
         initialSession = rebase.data;
         const details = [
           `${rebase.reanchored} kept`,
@@ -1069,7 +1069,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
       const sourceLinks = loadReviewSourceLinks(remoteTarget);
       let story: PreparedDiffStory | undefined;
       if (sessionOptions?.story || initialSession?.story != null) {
-        const scope = initialSession?.state.activeScope ?? getDefaultScope(files);
+        const scope = reviewScope;
         const prepared = await prepareDiffStory(
           ctx,
           getScopedFiles(files, scope),
@@ -1087,10 +1087,9 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             const captured = root === repoRoot ? story!.snapshot.files.find((entry) => entry.fileId === file.id && entry.scope === selectedScope) : undefined;
             return captured == null ? originalLoader(root, file, selectedScope) : Promise.resolve(captured.contents);
           };
-          visibleScopes = [scope];
         } else if (initialSession != null) initialSession = { ...initialSession, story: undefined };
       }
-      const seed = resolveSeedComments(files, visibleScopes, seedComments ?? []);
+      const seed = resolveSeedComments(files, reviewScope, seedComments ?? []);
       const partitionedSeed = initialSession == null
         ? { applicable: seed.resolved, conflicts: [] }
         : partitionResolvedSeedComments(initialSession.state, seed.resolved);
@@ -1119,6 +1118,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             initialSession.state,
             files,
             (file, scope) => loadFileContentsForReview(repoRoot, file, scope),
+            reviewScope,
           );
           initialSession = { ...initialSession, state: validatedState };
           latestSession = initialSession;
@@ -1135,7 +1135,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
             : getReviewWindowData(pi, submodule.repoRoot, { wholeRepo: true }),
           commentShortcuts: shortcutConfig.shortcuts,
           allowEmptySubmit: remoteTarget == null || remoteTarget.pullRequest != null,
-          visibleScopes,
+          scope: reviewScope,
           seedComments: firstReview ? applicableSeeds : [],
           ...(firstReview ? pullRequestSources : createRemotePullRequestSources(pi, ctx, remoteTarget)),
           orderSignals: buildReviewOrderSignals(handoff),
@@ -1198,7 +1198,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
           files = refreshed.files;
           branchBaseRevision = refreshed.branchBaseRevision;
           modifiedRevision = refreshed.modifiedRevision;
-          visibleScopes = refreshed.visibleScopes;
+          reviewScope = refreshed.scope;
           sessionContext = {
             ...sessionContext,
             revision: modifiedRevision ?? sessionContext.revision,
@@ -1268,7 +1268,7 @@ export default function codeDiffExtension(pi: ExtensionAPI, options: { runExtern
         files = refreshed.files;
         branchBaseRevision = refreshed.branchBaseRevision;
         modifiedRevision = refreshed.modifiedRevision;
-        visibleScopes = refreshed.visibleScopes;
+        reviewScope = refreshed.scope;
         sessionContext = {
           ...sessionContext,
           revision: modifiedRevision ?? sessionContext.revision,

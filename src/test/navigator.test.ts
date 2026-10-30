@@ -33,10 +33,8 @@ describe("navigator rendering", () => {
       worktreeStatus: status,
       hasWorkingTreeFile: status !== "deleted",
       inGitDiff: true,
-      inLastCommit: false,
       inAllFiles: false,
       gitDiff: { status, oldPath: path, newPath: path, displayPath: path, hasOriginal: status !== "added", hasModified: status !== "deleted", additions, deletions },
-      lastCommit: null,
       allFiles: null,
     };
   }
@@ -56,7 +54,7 @@ describe("navigator rendering", () => {
       getFgAnsi,
     };
     const tui = { mode: "regular", terminal: { write: vi.fn(), rows: 30, columns: 120 }, requestRender: vi.fn(), getShowHardwareCursor: vi.fn(() => false), setShowHardwareCursor: vi.fn() };
-    const app = new ReviewApp(tui as never, theme as never, vi.fn(), { files, repoRoot: "/repo", loadFileContents, commentShortcuts: [], visibleScopes: ["git-diff"], notify: vi.fn() });
+    const app = new ReviewApp(tui as never, theme as never, vi.fn(), { files, repoRoot: "/repo", loadFileContents, commentShortcuts: [], scope: "git-diff", notify: vi.fn() });
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
     const lines = (app as any).renderNavigator(40, 14) as string[];
     app.dispose();

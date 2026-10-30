@@ -23,10 +23,8 @@ function makeFile(path: string, flags?: Partial<ReviewFile>): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: makeComparison(path),
-    lastCommit: null,
     allFiles: null,
     ...flags,
   };
@@ -34,7 +32,7 @@ function makeFile(path: string, flags?: Partial<ReviewFile>): ReviewFile {
 
 describe("resolveSeedComments", () => {
   it("maps path, line, side, and intent onto a resolved git-diff comment", () => {
-    const { resolved, unresolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved, unresolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "src/app.ts", body: "Use a guard clause", side: "added", line: 12, intent: "modify" },
     ]);
 
@@ -45,7 +43,7 @@ describe("resolveSeedComments", () => {
   });
 
   it("applies defaults of added side, comment intent, and a single line", () => {
-    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "src/app.ts", body: "Tidy this", line: 5 },
     ]);
 
@@ -53,7 +51,7 @@ describe("resolveSeedComments", () => {
   });
 
   it("prefers startLine over line and honors endLine for ranges", () => {
-    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "src/app.ts", body: "Range note", line: 5, startLine: 8, endLine: 10 },
     ]);
 
@@ -61,7 +59,7 @@ describe("resolveSeedComments", () => {
   });
 
   it("normalizes a leading ./ in the seed path", () => {
-    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "./src/app.ts", body: "Note", line: 1 },
     ]);
 
@@ -69,7 +67,7 @@ describe("resolveSeedComments", () => {
   });
 
   it("falls back to a file comment when side is file or no line is provided", () => {
-    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "src/app.ts", body: "Whole file note", side: "file" },
       { path: "src/app.ts", body: "No line note", side: "added" },
     ]);
@@ -81,7 +79,7 @@ describe("resolveSeedComments", () => {
   });
 
   it("marks comments with unknown paths or empty bodies as unresolved", () => {
-    const { resolved, unresolved } = resolveSeedComments([makeFile("src/app.ts")], ["git-diff"], [
+    const { resolved, unresolved } = resolveSeedComments([makeFile("src/app.ts")], "git-diff", [
       { path: "src/missing.ts", body: "Nope", line: 1 },
       { path: "src/app.ts", body: "   ", line: 2 },
     ]);
@@ -89,19 +87,6 @@ describe("resolveSeedComments", () => {
     expect(resolved).toHaveLength(0);
     expect(unresolved).toHaveLength(2);
     expect(unresolved.map((comment) => comment.path)).toEqual(["src/missing.ts", "src/app.ts"]);
-  });
-
-  it("matches files across the visible scopes and records the scope where they appear", () => {
-    const files = [
-      makeFile("src/app.ts"),
-      makeFile("src/legacy.ts", { inGitDiff: false, inLastCommit: true, gitDiff: null, lastCommit: makeComparison("src/legacy.ts") }),
-    ];
-
-    const { resolved } = resolveSeedComments(files, ["git-diff", "last-commit"], [
-      { path: "src/legacy.ts", body: "Touch up", line: 3 },
-    ]);
-
-    expect(resolved[0]).toMatchObject({ fileId: "src/legacy.ts", scope: "last-commit", startLine: 3 });
   });
 
   it("matches a renamed file by its new path", () => {
@@ -116,7 +101,7 @@ describe("resolveSeedComments", () => {
       },
     });
 
-    const { resolved } = resolveSeedComments([renamed], ["git-diff"], [
+    const { resolved } = resolveSeedComments([renamed], "git-diff", [
       { path: "src/new-name.ts", body: "ok", line: 2 },
     ]);
 
@@ -130,7 +115,7 @@ describe("partitionResolvedSeedComments", () => {
     let state = createInitialReviewState(files);
     state = upsertLineComment(state, "src/app.ts", "git-diff", "added", 4, "Existing human comment", "comment", 6);
     state = upsertLineComment(state, "src/app.ts", "git-diff", "added", 10, "replacement()", "modify", 10, "original()");
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Overlaps the human comment", line: 5 },
       { path: "src/app.ts", body: "Overlaps the modification", line: 10 },
       { path: "src/app.ts", body: "New finding", line: 20 },
@@ -153,7 +138,7 @@ describe("anchorResolvedSeedComments", () => {
     const files = [makeFile("src/app.ts")];
     const contents: ReviewFileContents = { originalContent: "old()\r\nkept()\n", modifiedContent: "one()\ntwo()\nthree()\n" };
     const load = vi.fn(async () => contents);
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Range", startLine: 3, endLine: 2 },
       { path: "src/app.ts", body: "new()", side: "deleted", line: 1, intent: "modify" },
       { path: "src/app.ts", body: "Whole file", side: "file" },
@@ -174,7 +159,7 @@ describe("anchorResolvedSeedComments", () => {
       if (file.id === "src/broken.ts") throw new Error("no bytes");
       return { originalContent: "", modifiedContent: "only()\n", originalAvailable: false };
     });
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Past the end", line: 4 },
       { path: "src/app.ts", body: "No base side", side: "deleted", line: 1 },
       { path: "src/broken.ts", body: "Load error", line: 1 },
@@ -188,7 +173,7 @@ describe("anchorResolvedSeedComments", () => {
     const original = Array.from({ length: 12 }, (_, index) => `line${index + 1}()`).join("\n") + "\n";
     const modifiedContent = original.replace("line12()", "changed()");
     const load = vi.fn(async () => ({ originalContent: original, modifiedContent }));
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Context line", line: 10 },
       { path: "src/app.ts", body: "Outside the hunk", line: 3 },
       { path: "src/app.ts", body: "Range leaving the hunk", startLine: 8, endLine: 11 },
@@ -206,7 +191,7 @@ describe("anchorResolvedSeedComments", () => {
 describe("applyResolvedSeedComments", () => {
   it("seeds line and file comments into the draft so they are retrievable like user comments", () => {
     const files = [makeFile("src/app.ts")];
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Line note", line: 4, intent: "comment" },
       { path: "src/app.ts", body: "File note", side: "file", intent: "discuss" },
     ]);
@@ -236,7 +221,7 @@ describe("applyResolvedSeedComments", () => {
 
   it("flows seeded comments through composeReviewPrompt like hand-written ones", () => {
     const files = [makeFile("src/app.ts")];
-    const { resolved } = resolveSeedComments(files, ["git-diff"], [
+    const { resolved } = resolveSeedComments(files, "git-diff", [
       { path: "src/app.ts", body: "Handle the nil case.", line: 10, intent: "comment" },
     ]);
 

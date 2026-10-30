@@ -24,10 +24,8 @@ function makeFile(
     worktreeStatus: comparison.status,
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: comparison,
-    lastCommit: null,
     allFiles: null,
     allFilesIncomingReferences: options.incoming,
   };

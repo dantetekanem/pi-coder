@@ -23,9 +23,9 @@ afterEach(() => {
 
 const files: ReviewFile[] = ["app.ts", "app.test.ts"].map((path) => ({
   id: path, path, worktreeStatus: "modified", hasWorkingTreeFile: true,
-  inGitDiff: true, inAllFiles: false, inLastCommit: false,
+  inGitDiff: true, inAllFiles: false,
   gitDiff: { status: "modified", oldPath: path, newPath: path, displayPath: path, hasOriginal: true, hasModified: true },
-  allFiles: null, lastCommit: null,
+  allFiles: null,
 }));
 const snapshot = createStorySnapshot(files.map((file) => ({
   fileId: file.id,
@@ -66,7 +66,7 @@ function harness(initialSession?: ReviewSessionData, rows = 40, pair = { plan, s
   const app = new ReviewApp(tui, theme as never, done, {
     repoRoot: "/repo",
     files,
-    visibleScopes: ["git-diff"],
+    scope: "git-diff",
     commentShortcuts: [],
     notify: vi.fn(),
     allowEmptySubmit: true,

@@ -133,7 +133,7 @@ export function prepareDiffStory(
         for (const file of storyFiles) {
           if (settled) return;
           update(`Reading ${captured.length + 1} of ${storyFiles.length} files · ${sanitizeTerminalText(file.path)}`);
-          const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
+          const comparison = scope === "git-diff" ? file.gitDiff : scope === "all-files" ? file.allFiles : null;
           captured.push({
             fileId: file.id,
             path: getReviewFileDisplayPath(file, scope),

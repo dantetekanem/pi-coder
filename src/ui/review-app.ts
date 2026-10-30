@@ -21,7 +21,6 @@ import {
   setActiveFileId,
   setFocus,
   setAllComment,
-  setScope,
   setSearchQuery,
   setSelectedLineTarget,
   setWrapLines,
@@ -47,7 +46,7 @@ import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
 import { ExactTextEditor } from "./exact-text-editor.js";
 import { restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
 import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
-import { edgeToEdgeOverlayOptions, fullScreenOverlayOptions } from "./full-screen-overlay.js";
+import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
 import { layoutCodeLines, parseSgrMouseInput, stripTerminalSequences, type CodeRowText } from "./mouse-selection.js";
 import type { ReviewSourceLinks } from "../source-links.js";
 import {
@@ -130,10 +129,10 @@ interface ReviewAppOptions {
   files: ReviewFile[];
   repoRoot: string;
   loadFileContents: (repoRoot: string, file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>;
-  loadSubmoduleReviewData?: (submodule: ReviewSubmoduleInfo) => Promise<{ repoRoot: string; files: ReviewFile[]; visibleScopes: ReviewScope[] }>;
+  loadSubmoduleReviewData?: (submodule: ReviewSubmoduleInfo) => Promise<{ repoRoot: string; files: ReviewFile[]; scope: ReviewScope }>;
   commentShortcuts: CommentShortcut[];
   allowEmptySubmit?: boolean;
-  visibleScopes?: ReviewScope[];
+  scope?: ReviewScope;
   seedComments?: ResolvedSeedComment[];
   contextPanelSource?: ReviewContextPanelSource;
   repliesSource?: ReviewRepliesPanelSource;
@@ -157,7 +156,6 @@ interface ReviewAppOptions {
 interface ReviewFrame {
   files: ReviewFile[];
   repoRoot: string;
-  visibleScopes: ReviewScope[];
   state: ReviewState;
   navigatorScroll: number;
   diffScroll: number;
@@ -195,8 +193,6 @@ interface ReviewDiffSurface extends DiffSurface {
 }
 
 const COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
-const SEARCHABLE_SCOPES: ReviewScope[] = ["git-diff", "last-commit", "all-files"];
-const DEFAULT_VISIBLE_SCOPES: ReviewScope[] = ["git-diff", "last-commit"];
 const DEFAULT_CONTEXT_LINES = 3;
 const CONTEXT_EXPANSION_LINES = 10;
 const STACKED_LAYOUT_MAX_WIDTH = 99;
@@ -221,7 +217,6 @@ type ReviewPaneName = typeof REVIEW_PANE_ORDER[number];
 const WIDE_PANE_ORDER: ReviewPaneName[] = ["context", "replies"];
 
 const FOCUSABLE_PANE_ORDER: ReviewFocus[] = ["navigator", "diff", "comments", "context", "replies"];
-const SCOPE_KEYS = [Key.alt("1"), Key.alt("2"), Key.alt("3")] as const;
 const REVIEW_PANE_LABELS: Record<ReviewPaneName, string> = {
   navigator: "Navigator",
   diff: "Diff",
@@ -671,8 +666,7 @@ function wrapAnsiText(text: string, width: number, wrapLines: boolean): string[]
 function getScopeComparison(file: ReviewFile | null, scope: ReviewScope) {
   if (file == null) return null;
   if (scope === "git-diff") return file.gitDiff;
-  if (scope === "last-commit") return file.lastCommit;
-  return file.allFiles;
+  return scope === "all-files" ? file.allFiles : null;
 }
 
 function getScopeDisplayPath(file: ReviewFile | null, scope: ReviewScope): string {
@@ -1051,44 +1045,6 @@ function renderBox(title: string, width: number, height: number, theme: Theme, l
   for (let i = 0; i < innerHeight; i += 1) {
     const line = padLine(lines[i] ?? "", innerWidth);
     body.push(`${theme.fg(borderColor, "│")}${line}${theme.fg(borderColor, "│")}`);
-  }
-
-  return [top, ...body, bottom];
-}
-
-const MODAL_INNER_PADDING_X = 2;
-const MODAL_INNER_PADDING_Y = 1;
-
-function renderOuterFrame(
-  width: number,
-  height: number,
-  theme: Theme,
-  title: string,
-  lines: string[],
-  color: "accent" | "border" | "borderMuted" = "accent",
-  paddingX = MODAL_INNER_PADDING_X,
-  paddingY = MODAL_INNER_PADDING_Y,
-): string[] {
-  const innerWidth = Math.max(1, width - 2);
-  const innerHeight = Math.max(1, height - 2);
-  const contentWidth = Math.max(1, innerWidth - paddingX * 2);
-  const contentHeight = Math.max(1, innerHeight - paddingY * 2);
-  const titleText = truncateToWidth(` ${title} `, Math.max(1, innerWidth - 2), "", false);
-  const leftPad = 1;
-  const rightPad = Math.max(0, innerWidth - visibleWidth(titleText) - leftPad);
-  const top = theme.fg(color, `┌${repeat("─", leftPad)}${titleText}${repeat("─", rightPad)}┐`);
-  const bottom = theme.fg(color, `└${repeat("─", innerWidth)}┘`);
-  const body: string[] = [];
-  const sidePadding = " ".repeat(paddingX);
-
-  for (let i = 0; i < innerHeight; i += 1) {
-    let line = "";
-    if (i >= paddingY && i < paddingY + contentHeight) {
-      line = `${sidePadding}${padLine(lines[i - paddingY] ?? "", contentWidth)}${sidePadding}`;
-    } else {
-      line = " ".repeat(innerWidth);
-    }
-    body.push(`${theme.fg(color, "│")}${line}${theme.fg(color, "│")}`);
   }
 
   return [top, ...body, bottom];
@@ -1610,7 +1566,6 @@ export class ReviewApp {
   private state: ReviewState;
   private files: ReviewFile[];
   private repoRoot: string;
-  private currentVisibleScopes: ReviewScope[];
   private readonly frameStack: ReviewFrame[] = [];
   private openingSubmodule = false;
   private readonly cache = new Map<string, LoadedEntry>();
@@ -1739,18 +1694,18 @@ export class ReviewApp {
     this.paneVisibility = { ...preferences.paneVisibility };
     this.showAllLocales = options.initialSession?.showAllLocales ?? false;
     this.message = options.initialBanner ?? null;
-    this.currentVisibleScopes = options.visibleScopes?.filter((scope) => SEARCHABLE_SCOPES.includes(scope)) ?? [];
-    if (this.currentVisibleScopes.length === 0) this.currentVisibleScopes = DEFAULT_VISIBLE_SCOPES;
-    this.state = ensureActiveFile(createInitialReviewState(options.files), options.files);
+    this.state = createInitialReviewState(options.files, options.scope);
     if (options.initialSession != null) {
-      this.state = ensureActiveFile(options.initialSession.state, options.files);
+      this.state = ensureActiveFile({ ...options.initialSession.state, activeScope: this.state.activeScope }, options.files);
       this.navigatorScroll = Math.max(0, options.initialSession.navigatorScroll);
       this.diffScroll = Math.max(0, options.initialSession.diffScroll);
       this.commentsScroll = Math.max(0, options.initialSession.commentsScroll);
       for (const fileId of options.initialSession.reviewedFileIds) this.reviewedFileIds.add(fileId);
     }
-    if (!this.visibleScopes().includes(this.state.activeScope)) {
-      this.state = setScope(this.state, options.files, this.visibleScopes()[0]!);
+    if (this.state.draft.comments.some((comment) => (
+      comment.scope !== this.state.activeScope || !this.files.some((file) => file.id === comment.fileId)
+    ))) {
+      this.commentsGlobal = true;
     }
     if (options.seedComments != null && options.seedComments.length > 0) {
       this.state = applyResolvedSeedComments(this.state, options.seedComments);
@@ -2094,8 +2049,8 @@ export class ReviewApp {
     const thread = this.openedThread;
     const data = this.threadData;
     const metadata = data?.conversation;
-    const scope = this.visibleScopes().includes("all-files") ? "all-files" : this.state.activeScope;
-    const comparisonFor = (file: ReviewFile) => scope === "all-files" ? file.allFiles : scope === "last-commit" ? file.lastCommit : file.gitDiff;
+    const scope = this.state.activeScope;
+    const comparisonFor = (file: ReviewFile) => getScopeComparison(file, scope);
     const side = thread?.side;
     const line = thread?.line;
     const pathFor = (file: ReviewFile) => {
@@ -2325,10 +2280,6 @@ export class ReviewApp {
     this.copyText(text, label);
   }
 
-  private visibleScopes(): ReviewScope[] {
-    return this.currentVisibleScopes;
-  }
-
   private activeFile(): ReviewFile | null {
     return this.files.find((file) => file.id === this.state.activeFileId) ?? null;
   }
@@ -2375,7 +2326,6 @@ export class ReviewApp {
       this.frameStack.push({
         files: this.files,
         repoRoot: this.repoRoot,
-        visibleScopes: this.currentVisibleScopes,
         state: this.state,
         navigatorScroll: this.navigatorScroll,
         diffScroll: this.diffScroll,
@@ -2384,12 +2334,7 @@ export class ReviewApp {
       const draft = this.state.draft;
       this.files = nestedFiles;
       this.repoRoot = data.repoRoot;
-      this.currentVisibleScopes = data.visibleScopes.length > 0 ? data.visibleScopes : ["all-files"];
-      this.state = ensureActiveFile(createInitialReviewState(nestedFiles), nestedFiles);
-      if (!this.currentVisibleScopes.includes(this.state.activeScope)) {
-        this.state = setScope(this.state, nestedFiles, this.currentVisibleScopes[0]!);
-      }
-      this.state = { ...this.state, draft };
+      this.state = { ...createInitialReviewState(nestedFiles, data.scope), draft };
       this.ensureActiveNavigatorFile(true);
       this.navigatorScroll = 0;
       this.diffScroll = 0;
@@ -2415,7 +2360,6 @@ export class ReviewApp {
     const draft = this.state.draft;
     this.files = frame.files;
     this.repoRoot = frame.repoRoot;
-    this.currentVisibleScopes = frame.visibleScopes;
     this.state = { ...frame.state, draft };
     this.navigatorScroll = frame.navigatorScroll;
     this.diffScroll = frame.diffScroll;
@@ -2657,18 +2601,6 @@ export class ReviewApp {
     return load;
   }
 
-  private setScope(scope: ReviewScope): void {
-    this.relatedFilterAnchorFileId = null;
-    this.relatedFilterReturnFileId = null;
-    this.state = setScope(this.state, this.files, scope);
-    this.ensureActiveNavigatorFile();
-    this.diffScroll = 0;
-    this.navigatorScroll = 0;
-    this.commentsScroll = 0;
-    void this.ensureActiveEntry();
-    this.requestRender();
-  }
-
   private getSearchQueryForPane(pane: ReviewFocus): string {
     if (pane === "navigator") return this.state.searchQuery;
     if (pane === "diff") return this.diffSearchQuery;
@@ -2763,11 +2695,10 @@ export class ReviewApp {
     const target = structuredClone(composition.target);
     const file = target.kind === "all" ? undefined : this.files.find((candidate) => candidate.id === target.fileId);
     this.recoveryOnly = composition.repoRoot !== this.repoRoot || (target.kind !== "all" && (file == null
-      || !this.visibleScopes().includes(target.scope) || !getScopedFiles([file], target.scope).length
+      || target.scope !== this.state.activeScope || !getScopedFiles([file], target.scope).length
       || (composition.path != null && composition.path !== joinReviewPath(file.pathPrefix, file.path))));
     if (target.kind === "all") await this.ensureActiveEntry();
     if (!this.recoveryOnly && file != null && target.kind !== "all") {
-      this.state = setScope(this.state, this.files, target.scope);
       this.state = setActiveFileId(this.state, this.files, file.id);
       await this.ensureActiveEntry();
       if (target.kind === "line") {
@@ -3192,12 +3123,11 @@ export class ReviewApp {
       return;
     }
     const commentFile = this.files.find((candidate) => candidate.id === item.comment.fileId);
-    if (commentFile == null || !this.visibleScopes().includes(item.comment.scope)) {
-      this.setMessage("Open the comment's repository frame before editing it.");
+    if (commentFile == null || item.comment.scope !== this.state.activeScope) {
+      this.setMessage("This comment belongs to a different comparison or repository frame.");
       this.requestRender();
       return;
     }
-    if (this.state.activeScope !== item.comment.scope) this.state = setScope(this.state, this.files, item.comment.scope);
     this.state = setActiveFileId(this.state, this.files, commentFile.id);
     void this.ensureActiveEntry();
     if (item.comment.side === "file") {
@@ -3424,8 +3354,7 @@ export class ReviewApp {
 
   private hasModifiedScopeSource(file: ReviewFile, scope: ReviewScope): boolean {
     const comparison = getScopeComparison(file, scope);
-    return comparison?.hasModified === true
-      || (scope === "all-files" && comparison == null && file.inAllFiles && file.hasWorkingTreeFile);
+    return comparison?.hasModified === true;
   }
 
   private snapshotReanchorComment(comment: DiffReviewComment): Readonly<DiffReviewComment> {
@@ -3484,7 +3413,7 @@ export class ReviewApp {
     }
     const file = this.files.find((candidate) => candidate.id === item.comment.fileId);
     if (file == null
-      || !this.visibleScopes().includes(item.comment.scope)
+      || item.comment.scope !== this.state.activeScope
       || !this.hasModifiedScopeSource(file, item.comment.scope)
       || getSubmoduleInfo(file, item.comment.scope) != null) {
       this.setMessage("This stale draft has no available modified/current-side comparison to reanchor.");
@@ -3499,7 +3428,6 @@ export class ReviewApp {
       originalComment: this.snapshotReanchorComment(item.comment),
     };
     this.reanchorTarget = transaction;
-    this.state = setScope(this.state, this.files, item.comment.scope);
     this.state = setActiveFileId(this.state, this.files, file.id);
     this.state = setFocus(this.state, "diff");
     const entry = this.getEntry(file.id, item.comment.scope);
@@ -3766,7 +3694,7 @@ export class ReviewApp {
 
   private openShortcutMode(): void {
     if (this.state.activeScope === "all-files") {
-      this.setMessage("Template shortcuts are only available in git diff and last commit scopes.");
+      this.setMessage("Template shortcuts are only available in the local working-tree review.");
       this.requestRender();
       return;
     }
@@ -4675,12 +4603,6 @@ export class ReviewApp {
 
     if (/^[1-5]$/.test(data)) {
       this.toggleReviewPane(REVIEW_PANE_ORDER[Number.parseInt(data, 10) - 1]!);
-      return;
-    }
-    const scopeIndex = SCOPE_KEYS.findIndex((key) => matchesKey(data, key));
-    const scopes = this.visibleScopes();
-    if (scopeIndex >= 0 && scopes.length > 1 && scopeIndex < scopes.length) {
-      this.setScope(scopes[scopeIndex]!);
       return;
     }
     if (matchesKey(data, Key.shift("tab"))) { this.cycleVisibleFocus(true); return; }
@@ -5649,12 +5571,13 @@ export class ReviewApp {
     const height = Math.max(1, this.tui.terminal?.rows ?? 32);
     const inner = Math.max(1, width - 2);
     const frameBox = { top: 0, bottom: height - 1, left: 0, right: width - 1 };
+    const frame = { box: frameBox, inner: innerRect(frameBox) };
     if (width < 40 || height < 27) {
       let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
       if (this.storyContextReturnFocus != null) compact = this.renderContextPanel(width, height);
       if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
       if (this.confirmCancel) compact = renderCenteredOverlay(compact, this.renderCancelConfirmation(), width, height);
-      return this.mouseSelection.finishFrame(compact, frameBox, [], true);
+      return this.mouseSelection.finishFrame(compact, frame, [], true);
     }
     const story = this.captureStorySession();
     const snapshot = this.options.story!.snapshot;
@@ -5724,7 +5647,7 @@ export class ReviewApp {
     if (this.confirmCancel) rendered = renderCenteredOverlay(rendered, this.renderCancelConfirmation(), width, height);
     const covered = this.storyInventory || this.storyContextReturnFocus != null || this.helpMode || this.state.focus === "comments"
       || this.needsStoryEditorOverlay() || this.confirmCancel;
-    return this.mouseSelection.finishFrame(rendered, frameBox, panes, covered);
+    return this.mouseSelection.finishFrame(rendered, frame, panes, covered);
   }
 
   private renderHelpPanel(width: number, height: number): string[] {
@@ -6059,41 +5982,28 @@ export class ReviewApp {
     this.mouseSelection.beginFrame();
     this.lastWidth = Math.max(40, width);
     const terminalRows = this.tui?.terminal?.rows ?? 28;
-    const totalHeight = this.story != null ? Math.max(1, terminalRows) : Math.max(20, terminalRows - 4);
-    const frameColor = "accent" as const;
-    const frameInnerWidth = Math.max(20, this.lastWidth - 2 - MODAL_INNER_PADDING_X * 2);
-    const frameInnerHeight = Math.max(10, totalHeight - 2 - MODAL_INNER_PADDING_Y * 2);
+    const totalHeight = Math.max(1, terminalRows);
+    const contentLeft = 2;
+    const contentTop = 1;
+    const contentWidth = this.lastWidth - contentLeft * 2;
+    const contentHeight = Math.max(0, totalHeight - contentTop * 2);
     const visibility = this.effectivePaneVisibility();
     const visiblePanes = REVIEW_PANE_ORDER.filter((pane) => visibility[pane]);
-    const stackPanes = visiblePanes.length > 1 && shouldStackPanesForVisibility(frameInnerWidth, visibility);
-    const terminalCols = this.tui?.terminal?.columns ?? this.lastWidth;
-    const overlayOriginCol = Math.max(0, Math.floor((terminalCols - this.lastWidth) / 2));
-    const overlayOriginRow = Math.max(0, Math.floor((terminalRows - totalHeight) / 2));
-    const contentLeft = overlayOriginCol + 1 + MODAL_INNER_PADDING_X;
+    const stackPanes = visiblePanes.length > 1 && shouldStackPanesForVisibility(contentWidth, visibility);
 
-    const visibleScopes = this.visibleScopes();
-    const scopeHint = visibleScopes.length > 1 ? `Alt+${visibleScopes.map((_, index) => index + 1).join("/")} scopes • ` : "";
     const headerLines: string[] = [];
     if (this.options.reviewHeader != null) {
       const scopedFiles = getScopedFiles(this.files, this.state.activeScope);
       const info = this.options.contextPanelSource || this.options.repliesSource ? { ...this.options.reviewHeader, openThreads: undefined } : this.options.reviewHeader;
-      headerLines.push(...buildReviewOrientationLines(this.theme, frameInnerWidth, info, {
+      headerLines.push(...buildReviewOrientationLines(this.theme, contentWidth, info, {
         files: scopedFiles.length,
         reviewed: scopedFiles.filter((file) => this.reviewedFileIds.has(file.id)).length,
         comments: getDraftCommentCount(this.state),
       }, this.options.contextPanelSource?.brief));
     }
-    if (this.conversation != null) headerLines.push(truncateToWidth(this.conversationStatus(this.conversation), frameInnerWidth, "", false));
-    if (visibleScopes.length > 1) {
-      headerLines.push(truncateToWidth(visibleScopes.map((scope, index) => {
-        const active = this.state.activeScope === scope;
-        const count = getScopedFiles(this.files, scope).length;
-        const text = `Alt+${index + 1}:${formatScopeLabel(scope)}(${count})`;
-        return active ? this.theme.bg("selectedBg", this.theme.fg("text", ` ${text} `)) : this.theme.fg("muted", ` ${text} `);
-      }).join(" "), frameInnerWidth, "", false));
-    }
+    if (this.conversation != null) headerLines.push(truncateToWidth(this.conversationStatus(this.conversation), contentWidth, "", false));
 
-    const bodyTop = overlayOriginRow + 1 + MODAL_INNER_PADDING_Y + headerLines.length;
+    const bodyTop = contentTop + headerLines.length;
     const layoutStatus = stackPanes ? "stacked layout • " : "";
     const allPanesHiddenStatus = visiblePanes.length === 0 ? "All panes hidden • 1 Navigator • 2 Diff • 3 Comments • 4 PR context • 5 Replies" : null;
     const promptStatus = sanitizeStatusText(this.shortcutMode
@@ -6106,15 +6016,15 @@ export class ReviewApp {
             ? "Editing response • Enter/Esc keep in this window • Shift+Enter newline"
           : this.editTarget != null
             ? `Editing ${formatIntentLabel(this.editTarget.intent).toLowerCase()} comment`
-            : `${formatFocusStatus(this.state.focus)} • ${layoutStatus}Tab/←/→ focus • / search • t templates • v diff view • ? help • ${scopeHint}1/2/3/4/5 panes • o open in /code • e open in $EDITOR • s submit${this.frameStack.length > 0 ? " • b parent" : ""} • Esc exit • Ctrl+C exit`));
+            : `${formatFocusStatus(this.state.focus)} • ${layoutStatus}Tab/←/→ focus • / search • t templates • v diff view • ? help • 1/2/3/4/5 panes • o open in /code • e open in $EDITOR • s submit${this.frameStack.length > 0 ? " • b parent" : ""} • Esc exit • Ctrl+C exit`));
     const verticalLayout = getReviewVerticalLayout(
       this.theme,
-      frameInnerHeight,
+      contentHeight,
       headerLines.length,
       visiblePanes.length,
       stackPanes,
-      buildFooterLines(this.theme, promptStatus, frameInnerWidth),
-      frameInnerWidth,
+      buildFooterLines(this.theme, promptStatus, contentWidth),
+      contentWidth,
     );
     const footer = verticalLayout.footerLines;
     const bodyHeight = verticalLayout.bodyHeight;
@@ -6123,8 +6033,8 @@ export class ReviewApp {
     const mouseBounds: Partial<Record<PaneName, MousePaneBounds>> = {};
 
     if (visiblePanes.length === 0) {
-      body.push(padLine(centerText("All panes are hidden. Press 1, 2, 3, 4, or 5 to show one.", frameInnerWidth), frameInnerWidth));
-      while (body.length < bodyHeight) body.push(" ".repeat(frameInnerWidth));
+      body.push(padLine(centerText("All panes are hidden. Press 1, 2, 3, 4, or 5 to show one.", contentWidth), contentWidth));
+      while (body.length < bodyHeight) body.push(" ".repeat(contentWidth));
     } else if (stackPanes) {
       const layout = getStackedPaneLayoutForVisibility(bodyHeight, visibility, verticalLayout.stackedPaneMinimumHeight);
       let paneTop = bodyTop;
@@ -6134,13 +6044,13 @@ export class ReviewApp {
           top: paneTop,
           bottom: paneTop + paneHeight - 1,
           left: contentLeft,
-          right: contentLeft + frameInnerWidth - 1,
+          right: contentLeft + contentWidth - 1,
         };
-        body.push(...this.renderReviewPane(pane, frameInnerWidth, paneHeight, { row: paneTop, col: contentLeft, member: null }));
+        body.push(...this.renderReviewPane(pane, contentWidth, paneHeight, { row: paneTop, col: contentLeft, member: null }));
         paneTop += paneHeight;
       }
     } else {
-      const layout = getPaneLayoutForVisibility(frameInnerWidth, visibility);
+      const layout = getPaneLayoutForVisibility(contentWidth, visibility);
       const renderedPanes: Array<{ pane: ReviewPaneName; lines: string[] }> = [];
       let paneLeft = contentLeft;
       for (const pane of visiblePanes) {
@@ -6167,13 +6077,18 @@ export class ReviewApp {
       replies: mouseBounds.replies ?? null,
     };
 
-    const framed = renderOuterFrame(this.lastWidth, totalHeight, this.theme, "code-diff", [...headerLines, ...body, ...footer], frameColor);
-    const rendered = this.confirmCancel ? renderCenteredOverlay(framed, this.renderCancelConfirmation(), this.lastWidth, totalHeight) : framed;
+    const content = [...headerLines, ...body, ...footer];
+    const lines = Array.from({ length: totalHeight }, (_, index) => {
+      const contentRow = index - contentTop;
+      const line = contentRow >= 0 && contentRow < contentHeight ? content[contentRow] ?? "" : "";
+      return padLine(" ".repeat(contentLeft) + padLine(line, contentWidth), this.lastWidth);
+    });
+    const rendered = this.confirmCancel ? renderCenteredOverlay(lines, this.renderCancelConfirmation(), this.lastWidth, totalHeight) : lines;
     const panes = Object.values(mouseBounds)
       .filter((box): box is MousePaneBounds => box != null)
       .map((box) => ({ box, inner: innerRect(box) }));
-    const frameBox = { top: overlayOriginRow, bottom: overlayOriginRow + totalHeight - 1, left: overlayOriginCol, right: overlayOriginCol + this.lastWidth - 1 };
-    return this.mouseSelection.finishFrame(rendered, frameBox, panes, this.confirmCancel);
+    const frameBox = { top: 0, bottom: totalHeight - 1, left: 0, right: this.lastWidth - 1 };
+    return this.mouseSelection.finishFrame(rendered, { box: frameBox, inner: frameBox }, panes, this.confirmCancel);
   }
 }
 
@@ -6183,6 +6098,6 @@ export async function runReviewApp(
 ): Promise<ReviewResult> {
   return ctx.ui.custom<ReviewResult>(
     (tui, theme, _kb, done) => new ReviewApp(tui, theme, done, { ...options, notify: ctx.ui.notify.bind(ctx.ui) }),
-    options.story != null ? edgeToEdgeOverlayOptions : fullScreenOverlayOptions,
+    edgeToEdgeOverlayOptions,
   );
 }

@@ -95,7 +95,29 @@ describe("git helpers", () => {
     expect(data.files.map((file) => file.path)).toEqual(["packages/widget/src/app.ts"]);
   });
 
-  it("keeps every git status file in the git diff scope when branch comparison is huge", async () => {
+  it.each([true, false])("collects the requested worktree comparison (changed: %s)", async (changed) => {
+    const outputs = new Map([
+      ["rev-parse --show-toplevel", "/repo\n"],
+      ["rev-parse --verify HEAD", "abc123\n"],
+      ["diff --find-renames -M --name-status HEAD --", changed ? "M\tsrc/app.ts\n" : ""],
+      ["diff --find-renames -M --numstat HEAD --", changed ? "2\t1\tsrc/app.ts\n" : ""],
+      ["diff --find-renames -M --raw -z HEAD --", ""],
+      ["ls-files --others --exclude-standard", ""],
+      ["status --porcelain=v1 -z --untracked-files=all", changed ? " M src/app.ts\0" : ""],
+    ]);
+    const exec = vi.fn(async (_command: string, args: string[]) => {
+      const key = args.join(" ");
+      if (!outputs.has(key)) throw new Error(`Unexpected worktree command: ${key}`);
+      return { code: 0, stdout: outputs.get(key)!, stderr: "" };
+    });
+
+    const data = await getReviewWindowData({ exec } as never, "/repo");
+
+    expect(data.files.map((file) => file.path)).toEqual(changed ? ["src/app.ts"] : []);
+    expect(data.branchBaseRevision).toBeNull();
+  });
+
+  it("merges status-only paths with tracked and untracked changes", async () => {
     const modifiedFiles = [
       "app/admin/dashboard.rb",
       "app/assets/stylesheets/base.scss",
@@ -118,7 +140,6 @@ describe("git helpers", () => {
       ...untrackedFiles.map((path) => `?? ${path}`),
       "",
     ].join("\0");
-    const trackedFiles = modifiedFiles.join("\n");
     const untrackedOutput = untrackedFiles.join("\n");
     const partialDiffOutput = [
       "M\tapp/admin/dashboard.rb",
@@ -131,9 +152,6 @@ describe("git helpers", () => {
       "7\t3\tapp/assets/stylesheets/base.scss",
       "2\t0\tapp/assets/stylesheets/mobile.scss",
     ].join("\n");
-    const branchOnlyFiles = Array.from({ length: MAX_REVIEW_FILE_COUNT }, (_, index) => `app/games/generated_${String(index).padStart(3, "0")}.rb`);
-    const branchDiffOutput = branchOnlyFiles.map((path) => `A\t${path}`).join("\n");
-    const branchNumStatOutput = branchOnlyFiles.map((path) => `1\t0\t${path}`).join("\n");
     const exec = vi.fn(async (_command: string, args: string[]) => {
       const key = args.join(" ");
       if (key === "rev-parse --show-toplevel") return { code: 0, stdout: "/repo\n", stderr: "" };
@@ -142,18 +160,6 @@ describe("git helpers", () => {
       if (key === "diff --find-renames -M --numstat HEAD --") return { code: 0, stdout: numStatOutput, stderr: "" };
       if (key === "ls-files --others --exclude-standard") return { code: 0, stdout: untrackedOutput, stderr: "" };
       if (key === "status --porcelain=v1 -z --untracked-files=all") return { code: 0, stdout: statusOutput, stderr: "" };
-      if (key === "ls-files --cached") return { code: 0, stdout: trackedFiles, stderr: "" };
-      if (key === "ls-files --deleted") return { code: 0, stdout: "", stderr: "" };
-      if (key.startsWith("diff-tree ")) return { code: 0, stdout: "", stderr: "" };
-      if (key === "branch --show-current") return { code: 0, stdout: "feature\n", stderr: "" };
-      if (key === "for-each-ref --format=%(refname:short)%09%(objectname) refs/heads") return { code: 0, stdout: "main\tabc123\nfeature\tdef456\n", stderr: "" };
-      if (key === "merge-base --is-ancestor main HEAD") return { code: 0, stdout: "", stderr: "" };
-      if (key === "rev-list --count main..HEAD") return { code: 0, stdout: "1\n", stderr: "" };
-      if (key === "merge-base main HEAD") return { code: 0, stdout: "base123\n", stderr: "" };
-      if (key === "diff --find-renames -M --name-status base123 HEAD --") return { code: 0, stdout: branchDiffOutput, stderr: "" };
-      if (key === "diff --find-renames -M --numstat base123 HEAD --") return { code: 0, stdout: branchNumStatOutput, stderr: "" };
-      if (key.startsWith("symbolic-ref ")) return { code: 1, stdout: "", stderr: "" };
-      if (key.startsWith("rev-parse --verify --quiet ")) return { code: 1, stdout: "", stderr: "" };
       return { code: 1, stdout: "", stderr: `unexpected command: ${key}` };
     });
 
@@ -174,35 +180,6 @@ describe("git helpers", () => {
       "test/controllers/admin/irc_admin_test.rb",
       "test/javascript/controllers/game_play_heartbeat_controller_test.js",
     ]);
-  });
-
-  it("keeps git diff files ahead of last commit files when limiting the local review list", async () => {
-    const currentPath = "zz/current_status_file.rb";
-    const lastCommitFiles = Array.from({ length: MAX_REVIEW_FILE_COUNT }, (_, index) => `aa/last_commit_${String(index).padStart(3, "0")}.rb`);
-    const lastCommitOutput = lastCommitFiles.map((path) => `A\t${path}`).join("\n");
-    const lastCommitNumStatOutput = lastCommitFiles.map((path) => `1\t0\t${path}`).join("\n");
-    const exec = vi.fn(async (_command: string, args: string[]) => {
-      const key = args.join(" ");
-      if (key === "rev-parse --show-toplevel") return { code: 0, stdout: "/repo\n", stderr: "" };
-      if (key === "rev-parse --verify HEAD") return { code: 0, stdout: "abc123\n", stderr: "" };
-      if (key === "diff --find-renames -M --name-status HEAD --") return { code: 0, stdout: `M\t${currentPath}\n`, stderr: "" };
-      if (key === "diff --find-renames -M --numstat HEAD --") return { code: 0, stdout: `3\t1\t${currentPath}\n`, stderr: "" };
-      if (key === "status --porcelain=v1 -z --untracked-files=all") return { code: 0, stdout: ` M ${currentPath}\0`, stderr: "" };
-      if (key === "ls-files --others --exclude-standard") return { code: 0, stdout: "", stderr: "" };
-      if (key === "ls-files --cached") return { code: 0, stdout: `${currentPath}\n`, stderr: "" };
-      if (key === "ls-files --deleted") return { code: 0, stdout: "", stderr: "" };
-      if (key === "diff-tree --root --find-renames -M --name-status --no-commit-id -r HEAD") return { code: 0, stdout: lastCommitOutput, stderr: "" };
-      if (key === "diff-tree --root --find-renames -M --numstat --no-commit-id -r HEAD") return { code: 0, stdout: lastCommitNumStatOutput, stderr: "" };
-      if (key === "branch --show-current") return { code: 1, stdout: "", stderr: "" };
-      if (key.startsWith("symbolic-ref ")) return { code: 1, stdout: "", stderr: "" };
-      if (key.startsWith("rev-parse --verify --quiet ")) return { code: 1, stdout: "", stderr: "" };
-      return { code: 1, stdout: "", stderr: `unexpected command: ${key}` };
-    });
-
-    const data = await getReviewWindowData({ exec } as never, "/repo");
-
-    expect(data.files).toHaveLength(MAX_REVIEW_FILE_COUNT);
-    expect(data.files.filter((file) => file.inGitDiff).map((file) => file.path)).toEqual([currentPath]);
   });
 
   it("parses numstat additions and deletions", () => {
@@ -271,10 +248,8 @@ describe("git helpers", () => {
       worktreeStatus: null,
       hasWorkingTreeFile: true,
       inGitDiff: false,
-      inLastCommit: false,
       inAllFiles: true,
       gitDiff: null,
-      lastCommit: null,
       allFiles: {
         status: "modified",
         oldPath: "src/app.ts",
@@ -303,7 +278,7 @@ describe("git helpers", () => {
     });
     const file = {
       id: "range", path: "src/app.ts", worktreeStatus: null, hasWorkingTreeFile: false,
-      inGitDiff: false, inLastCommit: false, inAllFiles: true, gitDiff: null, lastCommit: null,
+      inGitDiff: false, inAllFiles: true, gitDiff: null,
       allFiles: {
         status: "modified" as const, oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts",
         hasOriginal: true, hasModified: true, originalRevision: "base", modifiedRevision: "missing",

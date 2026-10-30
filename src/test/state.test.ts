@@ -11,7 +11,6 @@ import {
   moveActiveFile,
   moveSelectedCommentIndex,
   moveSelectedLineTarget,
-  setScope,
   setSearchQuery,
   upsertFileComment,
   upsertLineComment,
@@ -25,28 +24,17 @@ function makeFile(path: string, flags?: Partial<ReviewFile>): ReviewFile {
     worktreeStatus: null,
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: null,
-    lastCommit: null,
     allFiles: null,
     ...flags,
   };
 }
 
 describe("review state", () => {
-  it("picks git diff as the default scope when available", () => {
-    expect(getDefaultScope([
-      makeFile("src/a.ts", { inGitDiff: true }),
-      makeFile("src/b.ts", { inGitDiff: false, inLastCommit: true }),
-    ])).toBe("git-diff");
-  });
-
-  it("prefers all changed files over the last commit when there is no worktree diff", () => {
-    expect(getDefaultScope([
-      makeFile("src/a.ts", { inGitDiff: false, inAllFiles: true }),
-      makeFile("src/b.ts", { inGitDiff: false, inLastCommit: true }),
-    ])).toBe("all-files");
+  it("chooses the comparison carried by the review files", () => {
+    expect(getDefaultScope([makeFile("src/a.ts")])).toBe("git-diff");
+    expect(getDefaultScope([makeFile("src/a.ts", { inGitDiff: false, inAllFiles: true })])).toBe("all-files");
   });
 
   it("starts with diff line wrapping enabled", () => {
@@ -83,16 +71,6 @@ describe("review state", () => {
       "src/new.ts",
       "docs/readme.md",
     ]);
-  });
-
-  it("switches scopes and keeps selection valid", () => {
-    const files = [
-      makeFile("src/a.ts", { inGitDiff: true, inLastCommit: false }),
-      makeFile("src/b.ts", { inGitDiff: false, inLastCommit: true }),
-    ];
-    let state = createInitialReviewState(files);
-    state = setScope(state, files, "last-commit");
-    expect(state.activeFileId).toBe("src/b.ts");
   });
 
   it("enforces one line comment per file+scope+side+line", () => {

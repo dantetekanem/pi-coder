@@ -37,9 +37,9 @@ describe("independent editor compositions", () => {
     const id = createReviewInstanceId();
     let generation: number | null = null;
     const loadFileContents = vi.fn(async () => ({ originalContent: "old\n", modifiedContent: "new\n" }));
-    const file = { id: "app.ts", path: "app.ts", worktreeStatus: "modified" as const, hasWorkingTreeFile: true, inGitDiff: true, inLastCommit: false, inAllFiles: false, gitDiff: null, lastCommit: null, allFiles: null };
+    const file = { id: "app.ts", path: "app.ts", worktreeStatus: "modified" as const, hasWorkingTreeFile: true, inGitDiff: true, inAllFiles: false, gitDiff: null, allFiles: null };
     const app = new ReviewApp({ requestRender() {} } as never, { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text } as never, vi.fn(), {
-      files: [file], repoRoot: "/repo", visibleScopes: ["git-diff"], loadFileContents, commentShortcuts: [], notify: vi.fn(),
+      files: [file], repoRoot: "/repo", scope: "git-diff", loadFileContents, commentShortcuts: [], notify: vi.fn(),
       onSessionChange: (data) => {
         const result = saveReviewSessionWithStatus(identity, data, { id, revision: "worktree", expectedGeneration: generation });
         if (result.saved) generation = result.generation;

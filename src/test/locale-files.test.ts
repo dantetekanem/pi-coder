@@ -9,10 +9,8 @@ function file(path: string): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: null,
-    lastCommit: null,
     allFiles: null,
   };
 }

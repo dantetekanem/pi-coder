@@ -1,5 +1,6 @@
 import type { ConversationReadLimits } from "./conversation.js";
 
+/** Comparison identity; "last-commit" is retained only for saved feedback. */
 export type ReviewScope = "git-diff" | "last-commit" | "all-files";
 
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
@@ -37,10 +38,8 @@ export interface ReviewFile {
   worktreeStatus: ChangeStatus | null;
   hasWorkingTreeFile: boolean;
   inGitDiff: boolean;
-  inLastCommit: boolean;
   inAllFiles: boolean;
   gitDiff: ReviewFileComparison | null;
-  lastCommit: ReviewFileComparison | null;
   allFiles: ReviewFileComparison | null;
   allFilesReferenceCount?: number;
   allFilesOutgoingReferences?: string[];
@@ -287,7 +286,7 @@ export function joinReviewPath(prefix: string | undefined, path: string): string
 
 export function getReviewFileDisplayPath(file: ReviewFile | null | undefined, scope: ReviewScope): string {
   if (file == null) return "(no file)";
-  const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : file.allFiles;
+  const comparison = scope === "git-diff" ? file.gitDiff : scope === "all-files" ? file.allFiles : null;
   if (comparison == null) return joinReviewPath(file.pathPrefix, file.path);
   if (comparison.status === "renamed" && comparison.oldPath != null && comparison.newPath != null) {
     return `${joinReviewPath(file.pathPrefix, comparison.oldPath)} -> ${joinReviewPath(file.pathPrefix, comparison.newPath)}`;

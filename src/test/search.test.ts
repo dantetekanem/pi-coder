@@ -9,10 +9,8 @@ function makeFile(path: string): ReviewFile {
     worktreeStatus: null,
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: true,
     inAllFiles: false,
     gitDiff: null,
-    lastCommit: null,
     allFiles: null,
   };
 }

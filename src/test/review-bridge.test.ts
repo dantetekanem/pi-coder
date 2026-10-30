@@ -5,9 +5,9 @@ import type { DiffReviewComment, ReviewFile, ReviewResumeReference, ReviewScope,
 
 const file = {
   id: "src/app.ts::working::::", path: "src/app.ts", worktreeStatus: "modified" as const,
-  hasWorkingTreeFile: true, inGitDiff: true, inLastCommit: false, inAllFiles: false,
+  hasWorkingTreeFile: true, inGitDiff: true, inAllFiles: false,
   gitDiff: { status: "modified" as const, oldPath: "src/app.ts", newPath: "src/app.ts", displayPath: "src/app.ts", hasOriginal: true, hasModified: true },
-  lastCommit: null, allFiles: null,
+  allFiles: null,
 };
 
 function state(): ReviewState {
@@ -77,6 +77,7 @@ describe("review draft anchor validation", () => {
       withDraft([unchanged, changed, alreadyStale, fileDraft]),
       [file, second],
       load,
+      "git-diff",
     );
 
     expect(validated.draft.comments).toEqual([
@@ -90,33 +91,28 @@ describe("review draft anchor validation", () => {
     expect(load).toHaveBeenCalledWith(second, "git-diff");
   });
 
-  it("validates deleted, last-commit, and all-files anchors against their own comparison bytes", async () => {
+  it.each(["git-diff", "all-files"] as const)("validates %s anchors against their own comparison bytes", async (scope) => {
     const scopedFile: ReviewFile = {
       ...file,
-      inLastCommit: true,
       inAllFiles: true,
-      lastCommit: { ...file.gitDiff!, originalRevision: "HEAD^", modifiedRevision: "HEAD" },
       allFiles: { ...file.gitDiff!, originalRevision: "base", modifiedRevision: "head" },
     };
     const gitDeleted = lineComment("git-deleted", file.id, "git-diff", "deleted", "git original\n");
-    const lastCommit = lineComment("last-commit", file.id, "last-commit", "added", "commit current\n");
     const allFiles = lineComment("all-files", file.id, "all-files", "added", "range current\n");
-    const contents: Record<ReviewScope, { originalContent: string; modifiedContent: string }> = {
+    const contents: Partial<Record<ReviewScope, { originalContent: string; modifiedContent: string }>> = {
       "git-diff": { originalContent: "git original\n", modifiedContent: "git current\n" },
-      "last-commit": { originalContent: "commit original\n", modifiedContent: "commit current\n" },
       "all-files": { originalContent: "range original\n", modifiedContent: "range current\n" },
     };
-    const load = vi.fn(async (_candidate: ReviewFile, scope: ReviewScope) => contents[scope]);
+    const load = vi.fn(async (_candidate: ReviewFile, scope: ReviewScope) => contents[scope]!);
 
-    const validated = await revalidateReviewDraftAnchors(withDraft([gitDeleted, lastCommit, allFiles]), [scopedFile], load);
+    const validated = await revalidateReviewDraftAnchors(withDraft([gitDeleted, allFiles]), [scopedFile], load, scope);
 
-    expect(validated.draft.comments).toEqual([gitDeleted, lastCommit, allFiles]);
-    expect(load.mock.calls.map((call) => call[1]).sort()).toEqual(["all-files", "git-diff", "last-commit"]);
+    expect(validated.draft.comments).toEqual([gitDeleted, allFiles]);
+    expect(load).toHaveBeenCalledExactlyOnceWith(scopedFile, scope);
   });
 
   it("fails closed for missing files, missing or unavailable sides, malformed anchors, and load errors", async () => {
     const missingFile = lineComment("missing-file", "missing", "git-diff", "added", "x\n");
-    const missingScope = lineComment("missing-scope", file.id, "last-commit", "added", "x\n");
     const missingSideFile: ReviewFile = {
       ...file,
       id: "deleted",
@@ -137,13 +133,14 @@ describe("review draft anchor validation", () => {
     });
 
     const validated = await revalidateReviewDraftAnchors(
-      withDraft([missingFile, missingScope, missingSide, malformed, loadError, unavailableBytes]),
+      withDraft([missingFile, missingSide, malformed, loadError, unavailableBytes]),
       [file, missingSideFile, errorFile, emptyFile],
       load,
+      "git-diff",
     );
 
     expect(validated.draft.comments.map((comment) => comment.anchorStatus)).toEqual([
-      "stale", "stale", "stale", "stale", "stale", "stale",
+      "stale", "stale", "stale", "stale", "stale",
     ]);
   });
 });

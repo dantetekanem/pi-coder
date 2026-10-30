@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import type { DiffReviewComment, ReviewComposition, ReviewContextPanelSource, ReviewConversationMetadata, ReviewFile, ReviewFileContents, ReviewReplyItem, ReviewRepliesSnapshot, ReviewRepliesPanelSource } from "../types.js";
 import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
+import { edgeToEdgeOverlayOptions } from "../ui/full-screen-overlay.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import * as piRender from "../pi-render.js";
 import { getSelectedLineTarget } from "../state.js";
@@ -52,7 +53,6 @@ function makeFile(path = "src/app.ts"): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: {
       status: "modified",
@@ -62,7 +62,6 @@ function makeFile(path = "src/app.ts"): ReviewFile {
       hasOriginal: true,
       hasModified: true,
     },
-    lastCommit: null,
     allFiles: null,
   };
 }
@@ -103,7 +102,7 @@ function createHarness(
     repoRoot: "/repo",
     loadFileContents,
     commentShortcuts: [],
-    visibleScopes: ["git-diff"],
+    scope: "git-diff",
     notify: vi.fn(),
     ...overrides,
   });
@@ -111,6 +110,45 @@ function createHarness(
 }
 
 describe("ReviewApp interaction", () => {
+  it.each([
+    ["git-diff", "last-commit"],
+    ["all-files", "last-commit"],
+    ["git-diff", "git-diff"],
+    ["all-files", "all-files"],
+  ] as const)("opens %s while retaining saved %s feedback with an old file ID", async (scope, savedScope) => {
+    const file = makeFile();
+    file.inGitDiff = scope === "git-diff";
+    file.inAllFiles = scope === "all-files";
+    file.allFiles = scope === "all-files" ? file.gitDiff : null;
+    if (scope === "all-files") file.gitDiff = null;
+    const base = createHarness(undefined, [file], { scope });
+    const initialSession = (base.app as any).getSessionData();
+    base.app.dispose();
+    const comment: DiffReviewComment = {
+      id: "historical",
+      fileId: `${file.path}::working::${file.path}::${file.path}::`,
+      scope: savedScope,
+      side: "added",
+      intent: "modify",
+      startLine: 1,
+      endLine: 1,
+      body: "Saved historical feedback",
+      originalText: "original\r\n",
+      anchorStatus: "stale",
+    };
+    initialSession.state.activeScope = savedScope;
+    initialSession.state.draft.comments = [comment];
+    initialSession.commentsGlobal = false;
+
+    const { app, loadFileContents } = createHarness(undefined, [file], { scope, initialSession });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledWith("/repo", file, scope));
+
+    expect((app as any).getSessionData().state.activeScope).toBe(scope);
+    expect((app as any).getSessionData().state.draft.comments).toEqual([comment]);
+    expect(app.render(200).join("\n")).toContain("Saved historical feedback");
+    app.dispose();
+  });
+
   it.each(["unified", "side-by-side"])("uses Option movement for hidden context in %s without changing the normal changed-line mode", async (mode) => {
     const before = Array.from({ length: 30 }, (_, i) => `line${i + 1}()`);
     const after = before.map((line, i) => i === 4 || i === 24 ? `changed${i + 1}()` : line);
@@ -352,12 +390,13 @@ describe("ReviewApp interaction", () => {
     expect((deleted.app as any).message).toMatch(/current.*side|deleted/i);
 
     const unsupportedFile = makeFile();
-    unsupportedFile.inLastCommit = true;
-    unsupportedFile.lastCommit = { ...unsupportedFile.gitDiff!, originalRevision: "a", modifiedRevision: "b" };
-    const unsupported = createHarness(undefined, [unsupportedFile], { visibleScopes: ["git-diff", "last-commit"] });
+    unsupportedFile.inGitDiff = false;
+    unsupportedFile.inAllFiles = true;
+    unsupportedFile.allFiles = { ...unsupportedFile.gitDiff!, originalRevision: "a", modifiedRevision: "b" };
+    unsupportedFile.gitDiff = null;
+    const unsupported = createHarness(undefined, [unsupportedFile], { scope: "all-files" });
     await vi.waitFor(() => expect(unsupported.loadFileContents).toHaveBeenCalled());
     unsupported.app.handleInput("\r");
-    unsupported.app.handleInput("\x1b2");
     unsupported.app.handleInput("o");
     expect(unsupported.done).not.toHaveBeenCalled();
     expect(String((unsupported.app as any).message)).toMatch(/working-tree review/i);
@@ -375,13 +414,13 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
-  it("does not open $EDITOR for history-scope selections", async () => {
+  it("does not open $EDITOR for explicit revision-range selections", async () => {
     const file = makeFile();
     file.inGitDiff = false;
-    file.inLastCommit = true;
+    file.inAllFiles = true;
     file.gitDiff = null;
-    file.lastCommit = { status: "modified", oldPath: file.path, newPath: file.path, displayPath: file.path, hasOriginal: true, hasModified: true, originalRevision: "a", modifiedRevision: "b" };
-    const { app, done, loadFileContents } = createHarness(undefined, [file], { visibleScopes: ["last-commit"] });
+    file.allFiles = { status: "modified", oldPath: file.path, newPath: file.path, displayPath: file.path, hasOriginal: true, hasModified: true, originalRevision: "a", modifiedRevision: "b" };
+    const { app, done, loadFileContents } = createHarness(undefined, [file], { scope: "all-files" });
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
     app.handleInput("\r");
     app.handleInput("e");
@@ -425,7 +464,7 @@ describe("ReviewApp interaction", () => {
     const { app, done, loadFileContents } = createHarness(
       { originalContent: "before\n", modifiedContent: "current\n" },
       [file],
-      { visibleScopes: ["all-files"] },
+      { scope: "all-files" },
     );
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalledWith("/repo", file, "all-files"));
     const legacy = {
@@ -647,7 +686,7 @@ describe("ReviewApp interaction", () => {
     app.handleInput("\x1b[1;2B");
     expect((app as any).state.selectedLineTargetByScopeFile[`git-diff::${fileId}`]).toEqual({ side: "added", line: 3, endLine: 2 });
 
-    (app as any).state = { ...(app as any).state, activeScope: "last-commit" };
+    (app as any).state = { ...(app as any).state, activeScope: "all-files" };
     app.handleInput("\r");
     expect((app as any).reanchorTarget).toMatchObject({ phase: "selecting" });
     expect((app as any).state.draft.comments).toEqual([stale]);
@@ -724,7 +763,7 @@ describe("ReviewApp interaction", () => {
     (app as any).state = {
       ...(app as any).state,
       activeFileId: "tampered-file",
-      activeScope: "last-commit",
+      activeScope: "all-files",
       selectedLineTargetByScopeFile: {
         ...(app as any).state.selectedLineTargetByScopeFile,
         [`git-diff::${fileId}`]: { side: "added", line: 999 },
@@ -786,7 +825,7 @@ describe("ReviewApp interaction", () => {
     const { app, loadFileContents } = createHarness(
       { originalContent: "gone\n", modifiedContent: "" },
       [deleted],
-      { visibleScopes: ["all-files"] },
+      { scope: "all-files" },
     );
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
     const stale = {
@@ -822,7 +861,7 @@ describe("ReviewApp interaction", () => {
       modifiedAvailable: false,
     }));
     const unavailableHarness = createHarness(undefined, [unavailable], {
-      visibleScopes: ["all-files"],
+      scope: "all-files",
       loadFileContents: unavailableLoad,
     });
     await vi.waitFor(() => expect((unavailableHarness.app as any).getEntry(unavailable.id, "all-files")?.status).toBe("ready"));
@@ -900,7 +939,7 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
-  it("routes terminal wheel and file clicks through the real regular-mode Pi renderer", async () => {
+  it("fills the terminal through resize and routes mouse input through the real regular-mode Pi renderer", async () => {
     const runtime = await import(process.env.PI_CODER_TEST_TUI_MODULE ?? "@earendil-works/pi-tui");
     const Renderer = runtime.TuiMainScreen ?? runtime.TUI;
     let input = (_data: string) => {};
@@ -915,17 +954,31 @@ describe("ReviewApp interaction", () => {
     const { app, loadFileContents } = createHarness({ originalContent: "", modifiedContent: content }, files, {}, {}, tui);
     try {
       tui.start();
-      tui.showOverlay(app, { anchor: "center", width: "100%", maxHeight: "100%", margin: { top: 1, bottom: 1 } });
+      tui.showOverlay(app, edgeToEdgeOverlayOptions.overlayOptions);
       await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
       const rendered = app.render(120);
-      const { diff, navigator } = (app as any).mousePaneLayout;
+      expect(rendered).toHaveLength(terminal.rows);
+      expect(rendered.map(visibleWidth)).toEqual(Array(terminal.rows).fill(terminal.columns));
+      const { diff } = (app as any).mousePaneLayout;
       expect(terminal.write).toHaveBeenCalledWith("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
       input(`\x1b[<65;${diff.left + 2};${diff.top + 2}M`);
       app.render(120);
       expect((app as any).diffScroll).toBe(1);
-      const row = rendered.findIndex((line) => line.includes("second.ts")) + 3;
-      input(`\x1b[<0;${navigator.left + 2};${row}M`);
+      const row = rendered.findIndex((line) => line.includes("second.ts")) + 1;
+      input(`\x1b[<0;2;${row}M`);
+      expect((app as any).state.activeFileId).toBe(files[0]!.id);
+      input(`\x1b[<0;2;${row}m`);
+      input(`\x1b[<0;4;${row}M`);
       expect((app as any).state.activeFileId).toBe(files[1]!.id);
+      for (const [columns, rows] of [[160, 40], [80, 24], [60, 18]] as const) {
+        Object.assign(terminal, { columns, rows });
+        const resized = app.render(columns);
+        expect(resized).toHaveLength(rows);
+        expect(resized.map(visibleWidth)).toEqual(Array(rows).fill(columns));
+        expect(resized[0]).toBe(" ".repeat(columns));
+        expect(resized.at(-1)).toBe(" ".repeat(columns));
+        tui.requestRender();
+      }
     } finally {
       tui.hideOverlay();
       app.dispose();
@@ -966,8 +1019,8 @@ describe("ReviewApp interaction", () => {
     app.handleInput("G");
     app.render(160);
     const rendered = app.render(140);
-    const originX = 10;
-    const originY = 2;
+    const originX = 0;
+    const originY = 0;
     const bounds = (app as any).mousePaneLayout.navigator;
     const screenX = bounds.left + 2;
     const screenY = rendered.findIndex((line) => line.includes("file23.ts")) + originY;
@@ -1110,7 +1163,6 @@ describe("ReviewApp interaction", () => {
       load: vi.fn(async () => "Problem:\nKeep pane state"),
     };
     const first = createHarness(undefined, undefined, {
-      visibleScopes: ["git-diff", "last-commit"],
       contextPanelSource,
     });
     await vi.waitFor(() => expect(first.loadFileContents).toHaveBeenCalled());
@@ -1150,21 +1202,6 @@ describe("ReviewApp interaction", () => {
     second.app.dispose();
   });
 
-  it("uses Alt+number for scope switching after number keys become pane toggles", async () => {
-    const { app, loadFileContents } = createHarness(undefined, undefined, {
-      visibleScopes: ["git-diff", "last-commit"],
-    });
-    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
-
-    app.handleInput("1");
-    expect((app as any).state.activeScope).toBe("git-diff");
-    expect((app as any).paneVisibility.navigator).toBe(false);
-
-    app.handleInput("\x1b2");
-    expect((app as any).state.activeScope).toBe("last-commit");
-    app.dispose();
-  });
-
   it("expands ten hidden lines above or below the selected diff line", async () => {
     const originalLines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`);
     const modifiedLines = [...originalLines];
@@ -1202,14 +1239,13 @@ describe("ReviewApp interaction", () => {
     const scenarios = [
       { width: 80, terminal: { rows: 20, columns: 80 }, overrides: { contextPanelSource } },
       { width: 54, terminal: { rows: 20, columns: 54 }, overrides: {} },
-      { width: 80, terminal: { rows: 20, columns: 80 }, overrides: { contextPanelSource, visibleScopes: ["git-diff", "last-commit"] as Array<"git-diff" | "last-commit"> } },
     ];
 
     for (const scenario of scenarios) {
       const { app, loadFileContents } = createHarness(undefined, undefined, scenario.overrides, scenario.terminal);
       await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
       const rendered = app.render(scenario.width).join("\n");
-      expect(rendered).toContain("Esc / Ctrl+C exit");
+      expect(rendered.replace(/\s+/g, " ")).toContain("Esc / Ctrl+C exit");
       app.dispose();
     }
   });
@@ -1435,11 +1471,11 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
-  it.each(["changed", "renamed", "missing", "unavailable"])("retains %s source recovery without applying to a guessed range", async (condition) => {
+  it.each(["changed", "renamed", "missing", "unavailable", "last-commit", "all-files"] as const)("retains %s source recovery without applying to a guessed range", async (condition) => {
     const file = makeFile();
     const record: ReviewComposition = {
       id: "11111111-1111-4111-8111-111111111111", repoRoot: "/repo", path: file.path,
-      target: { kind: "line", fileId: file.id, scope: "git-diff", side: "added", startLine: 1, endLine: 1,
+      target: { kind: "line", fileId: file.id, scope: condition === "last-commit" || condition === "all-files" ? condition : "git-diff", side: "added", startLine: 1, endLine: 1,
         intent: "modify", initialBody: "current", originalText: "current", captureHash: hashTargetSlice("current\n", { startLine: 1, endLine: 1 }), anchorStatus: "mapped" },
       baseBody: "", text: "replacement", cursor: { line: 0, col: 4 },
     };
@@ -1448,7 +1484,7 @@ describe("ReviewApp interaction", () => {
     await vi.waitFor(() => expect((app as any).editTarget).not.toBeNull());
     app.handleInput("X"); app.handleInput("\r");
     expect(done).not.toHaveBeenCalled();
-    if (condition === "renamed" || condition === "missing") {
+    if (condition === "renamed" || condition === "missing" || condition === "last-commit" || condition === "all-files") {
       expect((app as any).editTarget).not.toBeNull();
       expect((app as any).state.draft.comments).toEqual([]);
       expect(app.render(120).join("\n")).toContain("replXacement");
@@ -2077,7 +2113,7 @@ describe("Replies pane", () => {
     if (scope === "all-files") {
       file.inAllFiles = true;
       file.allFiles = file.gitDiff;
-      (app as any).currentVisibleScopes = ["git-diff", "all-files"];
+      (app as any).state.activeScope = scope;
     }
     if (mode.startsWith("deleted") || mode.includes("base")) {
       thread.side = "deleted";

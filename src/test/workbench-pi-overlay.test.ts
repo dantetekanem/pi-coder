@@ -41,7 +41,7 @@ describe("Pi full-screen workbench presentation", () => {
     });
   });
 
-  it("mounts /code with the same full-screen overlay options as /diff", async () => {
+  it("mounts /code with its full-screen overlay options", async () => {
     const workbenchCustom = vi.fn(async () => ({ status: "closed" as const, changedPaths: [] }));
     await expect(runPiWorkbench({
       hasUI: true,
@@ -49,17 +49,16 @@ describe("Pi full-screen workbench presentation", () => {
       ui: { custom: workbenchCustom, notify: vi.fn() },
     } as never, { cwd: "/repo", launch: {} })).resolves.toEqual({ status: "closed", changedPaths: [] });
 
-    const reviewCustom = vi.fn(async () => ({ type: "cancel" as const }));
-    await runReviewApp({ ui: { custom: reviewCustom } } as never, {} as never);
-
     expect(workbenchCustom).toHaveBeenCalledWith(expect.any(Function), fullScreenOptions);
     expect(mocks.forWorkspace).toHaveBeenCalledExactlyOnceWith("/canonical/repo");
-    expect(reviewCustom).toHaveBeenCalledWith(expect.any(Function), fullScreenOptions);
   });
 
-  it("mounts the story at the terminal origin without margins", async () => {
+  it.each([
+    { view: "diff", options: {} },
+    { view: "story", options: { story: {} } },
+  ])("mounts the $view at the terminal origin without margins", async ({ options }) => {
     const custom = vi.fn(async () => ({ type: "cancel" as const }));
-    await runReviewApp({ ui: { custom } } as never, { story: {} } as never);
+    await runReviewApp({ ui: { custom } } as never, options as never);
 
     expect(custom).toHaveBeenCalledWith(expect.any(Function), {
       ...fullScreenOptions,

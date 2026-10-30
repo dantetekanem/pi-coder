@@ -81,10 +81,8 @@ function file(path = "src/app.ts"): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: { status: "modified", oldPath: path, newPath: path, displayPath: path, hasOriginal: true, hasModified: true },
-    lastCommit: null,
     allFiles: null,
   };
 }

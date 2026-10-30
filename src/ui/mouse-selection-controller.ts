@@ -136,10 +136,11 @@ export class MouseSelectionController<S extends DiffSurface> {
   }
 
   /** Records the composed frame for pane selections and returns it with their highlight applied. */
-  finishFrame(lines: string[], box: ScreenRect, panes: SelectionPane[], covered: boolean): string[] {
+  finishFrame(lines: string[], frame: SelectionPane, panes: SelectionPane[], covered: boolean): string[] {
+    const { box } = frame;
     if (covered) this.surfaces = [];
     this.panes = covered ? [] : panes;
-    this.frame = { pane: { box, inner: innerRect(box) }, top: box.top, left: box.left, lines };
+    this.frame = { pane: frame, top: box.top, left: box.left, lines };
     const selection = this.selection;
     if (selection?.kind !== "screen" || selection.range == null) return lines;
     const range = selection.range;

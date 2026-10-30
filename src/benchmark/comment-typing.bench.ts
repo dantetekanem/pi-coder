@@ -11,7 +11,6 @@ function makeFile(): ReviewFile {
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: {
       status: "modified",
@@ -21,7 +20,6 @@ function makeFile(): ReviewFile {
       hasOriginal: true,
       hasModified: true,
     },
-    lastCommit: null,
     allFiles: null,
   };
 }
@@ -47,7 +45,7 @@ async function createApp(lineCount: number, diffViewMode: DiffViewMode, mixed = 
     repoRoot: "/repo",
     loadFileContents: async () => ({ originalContent, modifiedContent }),
     commentShortcuts: [],
-    visibleScopes: ["git-diff"],
+    scope: "git-diff",
     notify() {},
   });
 

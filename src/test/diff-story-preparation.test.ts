@@ -13,7 +13,7 @@ import type { ReviewFile } from "../types.js";
 
 const file: ReviewFile = {
   id: "app", path: "app.ts", worktreeStatus: "modified", hasWorkingTreeFile: true,
-  inGitDiff: true, inLastCommit: false, inAllFiles: false, lastCommit: null, allFiles: null,
+  inGitDiff: true, inAllFiles: false, allFiles: null,
   gitDiff: { status: "modified", displayPath: "app.ts", oldPath: "app.ts", newPath: "app.ts", hasOriginal: true, hasModified: true },
 };
 const contents = { originalContent: "before()\n", modifiedContent: "after()\n" };

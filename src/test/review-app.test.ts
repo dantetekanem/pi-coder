@@ -11,10 +11,8 @@ function makeFile(path: string, flags?: Partial<ReviewFile>): ReviewFile {
     worktreeStatus: null,
     hasWorkingTreeFile: true,
     inGitDiff: false,
-    inLastCommit: false,
     inAllFiles: true,
     gitDiff: null,
-    lastCommit: null,
     allFiles: null,
     ...flags,
   };

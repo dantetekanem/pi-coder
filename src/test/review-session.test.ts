@@ -74,7 +74,6 @@ function reviewFile(path: string, additions: number, modifiedBlobSha = `${path}:
     worktreeStatus: "modified",
     hasWorkingTreeFile: true,
     inGitDiff: true,
-    inLastCommit: false,
     inAllFiles: false,
     gitDiff: {
       status: "modified",
@@ -88,7 +87,6 @@ function reviewFile(path: string, additions: number, modifiedBlobSha = `${path}:
       originalBlobSha: `base:${path}`,
       modifiedBlobSha,
     },
-    lastCommit: null,
     allFiles: null,
   };
 }
@@ -111,7 +109,7 @@ describe("review sessions", () => {
     const id = saveReviewSession("discussion-target", data, { revision: "head" });
     const saved = loadReviewSession("discussion-target", id)!;
     expect(saved.discussions).toEqual(data.discussions);
-    expect(rebaseReviewSession(saved, [reviewFile("src/app.ts", 5)], ["git-diff"], {}).data.discussions).toEqual(data.discussions);
+    expect(rebaseReviewSession(saved, [reviewFile("src/app.ts", 5)], "git-diff", {}).data.discussions).toEqual(data.discussions);
     expect(saved.state.draft.comments.map(({ body, intent }) => ({ body, intent }))).toEqual([
       { body: "Keep this covered.", intent: "comment" },
     ]);
@@ -538,10 +536,47 @@ describe("rebasing a parked review onto a new head", () => {
     return loadReviewSession(identity)!;
   }
 
+  it.each(["git-diff", "all-files"] as const)("preserves feedback outside the current %s comparison without remapping it", (scope) => {
+    const file = reviewFile("src/app.ts", 2);
+    file.inAllFiles = true;
+    file.allFiles = file.gitDiff;
+    const comments: DiffReviewComment[] = (["git-diff", "last-commit", "all-files"] as const).map((value) => ({
+      id: `saved-${value}`,
+      fileId: file.id,
+      scope: value,
+      side: "added",
+      intent: "modify",
+      startLine: 4,
+      endLine: 5,
+      body: "\tnew()\r\n  next()  \r\n",
+      originalText: "\told()\r\n",
+      captureHash: { algorithm: "sha256", value: "a".repeat(64) },
+      anchorStatus: "stale",
+    }));
+    const unavailable = comments.filter((comment) => comment.scope !== scope);
+    const fileComment: DiffReviewComment = {
+      ...unavailable[0]!,
+      id: "saved-file",
+      side: "file",
+      startLine: null,
+      endLine: null,
+      fileTarget: "all-lines",
+    };
+    const saved = parkedSession();
+    saved.state = state([...comments, fileComment]);
+    const result = rebaseReviewSession(saved, [file], scope, buildReviewFileSignatures([file]));
+
+    expect(result.data.state.draft.comments.filter((comment) => comment.scope !== scope)).toEqual([...unavailable, fileComment]);
+    expect(result.data.state.draft.comments.filter((comment) => comment.scope === scope)).toHaveLength(1);
+    expect(result.data.state.activeScope).toBe(scope);
+    expect(result.data.commentsGlobal).toBe(true);
+    expect(result.unanchored).toBe(0);
+  });
+
   it("keeps stable anchors, marks changed files, and folds missing files into the review note", () => {
     const session = parkedSession();
     const nextFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 6)];
-    const result = rebaseReviewSession(session, nextFiles, ["git-diff"], buildReviewFileSignatures(nextFiles));
+    const result = rebaseReviewSession(session, nextFiles, "git-diff", buildReviewFileSignatures(nextFiles));
 
     expect(result.previousRevision).toBe("1111111111111111111111111111111111111111");
     expect(result.reanchored).toBe(3);
@@ -582,7 +617,7 @@ describe("rebasing a parked review onto a new head", () => {
     } as PersistedReviewSession;
     const nextFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 6)];
 
-    const rebased = rebaseReviewSession(session, nextFiles, ["git-diff"], buildReviewFileSignatures(nextFiles)).data.state.draft.comments;
+    const rebased = rebaseReviewSession(session, nextFiles, "git-diff", buildReviewFileSignatures(nextFiles)).data.state.draft.comments;
 
     expect(rebased.find((comment) => comment.startLine === 4)).toMatchObject({ captureHash, anchorStatus: "mapped" });
     expect(rebased.find((comment) => comment.startLine === 9)).toMatchObject({ captureHash, anchorStatus: "stale" });
@@ -597,7 +632,7 @@ describe("rebasing a parked review onto a new head", () => {
       reviewFile("src/app.ts", 2, "different-app-blob"),
       reviewFile("src/api.ts", 1),
     ];
-    const result = rebaseReviewSession(session, nextFiles, ["git-diff"], buildReviewFileSignatures(nextFiles));
+    const result = rebaseReviewSession(session, nextFiles, "git-diff", buildReviewFileSignatures(nextFiles));
 
     const appComments = result.data.state.draft.comments.filter((comment) => comment.fileId.startsWith("src/app.ts"));
     expect(result.needsAttention).toBe(2);
@@ -609,7 +644,7 @@ describe("rebasing a parked review onto a new head", () => {
   it("keeps reviewed files only while their content is unchanged", () => {
     const session = parkedSession();
     const nextFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 6)];
-    const result = rebaseReviewSession(session, nextFiles, ["git-diff"], buildReviewFileSignatures(nextFiles));
+    const result = rebaseReviewSession(session, nextFiles, "git-diff", buildReviewFileSignatures(nextFiles));
 
     expect(result.data.reviewedFileIds).toEqual([reviewFile("src/app.ts", 2).id]);
   });
@@ -617,11 +652,11 @@ describe("rebasing a parked review onto a new head", () => {
   it("does not stack needs-attention markers across repeated rebases", () => {
     const session = parkedSession();
     const secondFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 6)];
-    const first = rebaseReviewSession(session, secondFiles, ["git-diff"], buildReviewFileSignatures(secondFiles));
+    const first = rebaseReviewSession(session, secondFiles, "git-diff", buildReviewFileSignatures(secondFiles));
 
     const thirdFiles = [reviewFile("src/app.ts", 2), reviewFile("src/api.ts", 9)];
     const parked: PersistedReviewSession = { ...session, ...first.data, revision: "2222222222222222222222222222222222222222", fileSignatures: buildReviewFileSignatures(secondFiles) };
-    const second = rebaseReviewSession(parked, thirdFiles, ["git-diff"], buildReviewFileSignatures(thirdFiles));
+    const second = rebaseReviewSession(parked, thirdFiles, "git-diff", buildReviewFileSignatures(thirdFiles));
 
     const marked = second.data.state.draft.comments.find((comment) => comment.startLine === 7)!;
     expect(marked.body).toBe("[needs attention · anchored on 2222222]\nCheck the new branch.");

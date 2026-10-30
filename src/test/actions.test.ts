@@ -6,7 +6,6 @@ describe("review action registry", () => {
     const help = getReviewHelpSections();
     const footer = getReviewFooterHint();
 
-    expect(help.find((section) => section.title === "Core")?.lines).toContain("Alt+1/2/3 switch review scope");
     expect(help.find((section) => section.title === "Core")?.lines).toContain("1/2/3/4/5 toggle Navigator/Diff/Comments/PR context/Replies");
     expect(help.find((section) => section.title === "Navigation")?.lines).toContain("T tree/flat files");
     expect(help.find((section) => section.title === "Navigation")?.lines).toContain("L show/hide other locales");
