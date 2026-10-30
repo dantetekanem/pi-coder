@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Remove the pull request lines above the review panes, so the panes start right below the top padding. The removed lines showed the repository and number, commit, state, review progress, title, description brief, and conversation status. The PR context pane still shows the brief and the conversation status.
+
 ## 0.9.5 - 2026-10-29
 
 ### Changed

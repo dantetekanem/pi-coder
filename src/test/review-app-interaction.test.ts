@@ -1132,7 +1132,7 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
-  it("keeps the pull request header visible while reviewing", async () => {
+  it("starts a pull request review's panes right below the top padding", async () => {
     const { app, loadFileContents } = createHarness(undefined, [makeFile()], {
       reviewHeader: {
         identity: "example/widgets#1",
@@ -1145,14 +1145,23 @@ describe("ReviewApp interaction", () => {
       },
     });
     await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    const conversation: ReviewConversationMetadata = {
+      identity: "example/widgets#1",
+      generation: 1,
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+      coverage: { details: "complete", comments: "partial", reviews: "complete", threads: "complete", checks: "unavailable", identity: "complete" },
+    };
+    (app as any).conversation = conversation;
 
-    const rendered = app.render(160).join("\n");
+    const lines = app.render(160);
+    const rendered = lines.join("\n");
 
-    expect(rendered).toContain("example/widgets#1");
-    expect(rendered).toContain("queue 2/4");
-    expect(rendered).toContain("@ccccccc");
-    expect(rendered).toContain("0/1 reviewed");
-    expect(rendered).toContain("1 open thread, 1 awaiting reply");
+    expect(lines[0]!.trim()).toBe("");
+    expect(lines[1]).toContain("Navigator");
+    expect(rendered).not.toContain("example/widgets#1");
+    expect(rendered).not.toContain("Add review mode");
+    expect(rendered).not.toContain("0/1 reviewed");
+    expect(rendered).not.toContain("Generation 1.1");
     app.dispose();
   });
 
@@ -1959,7 +1968,7 @@ describe("Replies pane", () => {
     expect((app as any).repliesPanelState.snapshot.conversation).toEqual(current.conversation);
     expect(app.render(360).join("\n")).toContain("Showing 100 of 102 fetched replies");
     expect(app.render(360).join("\n")).toContain(current.conversation.fetchedAt);
-    expect(app.render(360).join("\n")).toContain("50 known open, 1 resolution unknown");
+    expect(app.render(360).join("\n")).toContain("known open, 1 resolution unknown");
     expect(app.render(360).join("\n")).not.toContain("9999 open threads");
     update?.("Outdated facts", next.conversation);
     expect((app as any).contextPanelState.text).toBe(text);

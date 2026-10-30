@@ -1176,18 +1176,16 @@ export interface ReviewVerticalLayout {
 export function getReviewVerticalLayout(
   theme: Theme,
   frameInnerHeight: number,
-  headerLineCount: number,
   visiblePaneCount: number,
   stacked: boolean,
   footerLines: string[],
   width: number,
 ): ReviewVerticalLayout {
   const safeHeight = Math.max(1, Math.floor(frameInnerHeight));
-  const safeHeaderCount = Math.max(0, Math.floor(headerLineCount));
   const minimumBodyHeight = visiblePaneCount === 0 ? 1 : stacked ? visiblePaneCount : 1;
-  const footerBudget = Math.max(0, safeHeight - safeHeaderCount - minimumBodyHeight);
+  const footerBudget = Math.max(0, safeHeight - minimumBodyHeight);
   const fittedFooterLines = fitFooterLines(theme, footerLines, footerBudget, width);
-  const bodyHeight = Math.max(minimumBodyHeight, safeHeight - safeHeaderCount - fittedFooterLines.length);
+  const bodyHeight = Math.max(minimumBodyHeight, safeHeight - fittedFooterLines.length);
   const stackedPaneMinimumHeight = stacked && visiblePaneCount > 0
     ? Math.max(1, Math.min(3, Math.floor(bodyHeight / visiblePaneCount)))
     : 3;
@@ -5991,19 +5989,6 @@ export class ReviewApp {
     const visiblePanes = REVIEW_PANE_ORDER.filter((pane) => visibility[pane]);
     const stackPanes = visiblePanes.length > 1 && shouldStackPanesForVisibility(contentWidth, visibility);
 
-    const headerLines: string[] = [];
-    if (this.options.reviewHeader != null) {
-      const scopedFiles = getScopedFiles(this.files, this.state.activeScope);
-      const info = this.options.contextPanelSource || this.options.repliesSource ? { ...this.options.reviewHeader, openThreads: undefined } : this.options.reviewHeader;
-      headerLines.push(...buildReviewOrientationLines(this.theme, contentWidth, info, {
-        files: scopedFiles.length,
-        reviewed: scopedFiles.filter((file) => this.reviewedFileIds.has(file.id)).length,
-        comments: getDraftCommentCount(this.state),
-      }, this.options.contextPanelSource?.brief));
-    }
-    if (this.conversation != null) headerLines.push(truncateToWidth(this.conversationStatus(this.conversation), contentWidth, "", false));
-
-    const bodyTop = contentTop + headerLines.length;
     const layoutStatus = stackPanes ? "stacked layout • " : "";
     const allPanesHiddenStatus = visiblePanes.length === 0 ? "All panes hidden • 1 Navigator • 2 Diff • 3 Comments • 4 PR context • 5 Replies" : null;
     const promptStatus = sanitizeStatusText(this.shortcutMode
@@ -6020,7 +6005,6 @@ export class ReviewApp {
     const verticalLayout = getReviewVerticalLayout(
       this.theme,
       contentHeight,
-      headerLines.length,
       visiblePanes.length,
       stackPanes,
       buildFooterLines(this.theme, promptStatus, contentWidth),
@@ -6037,7 +6021,7 @@ export class ReviewApp {
       while (body.length < bodyHeight) body.push(" ".repeat(contentWidth));
     } else if (stackPanes) {
       const layout = getStackedPaneLayoutForVisibility(bodyHeight, visibility, verticalLayout.stackedPaneMinimumHeight);
-      let paneTop = bodyTop;
+      let paneTop = contentTop;
       for (const pane of visiblePanes) {
         const paneHeight = layout[`${pane}Height`];
         mouseBounds[pane] = {
@@ -6056,12 +6040,12 @@ export class ReviewApp {
       for (const pane of visiblePanes) {
         const paneWidth = layout[`${pane}Width`];
         mouseBounds[pane] = {
-          top: bodyTop,
-          bottom: bodyTop + bodyHeight - 1,
+          top: contentTop,
+          bottom: contentTop + bodyHeight - 1,
           left: paneLeft,
           right: paneLeft + paneWidth - 1,
         };
-        renderedPanes.push({ pane, lines: this.renderReviewPane(pane, paneWidth, bodyHeight, { row: bodyTop, col: paneLeft, member: null }) });
+        renderedPanes.push({ pane, lines: this.renderReviewPane(pane, paneWidth, bodyHeight, { row: contentTop, col: paneLeft, member: null }) });
         paneLeft += paneWidth + 1;
       }
       for (let index = 0; index < bodyHeight; index += 1) {
@@ -6077,7 +6061,7 @@ export class ReviewApp {
       replies: mouseBounds.replies ?? null,
     };
 
-    const content = [...headerLines, ...body, ...footer];
+    const content = [...body, ...footer];
     const lines = Array.from({ length: totalHeight }, (_, index) => {
       const contentRow = index - contentTop;
       const line = contentRow >= 0 && contentRow < contentHeight ? content[contentRow] ?? "" : "";
