@@ -540,7 +540,7 @@ async function hasPinnedRevisions(
   return base.code === 0;
 }
 
-async function remoteHasUrl(pi: ExtensionAPI, gitRoot: string, remote: string, url: string): Promise<boolean> {
+async function canSkipCloneFetch(pi: ExtensionAPI, gitRoot: string, remote: string, url: string): Promise<boolean> {
   const result = await pi.exec("git", ["remote", "get-url", remote], { cwd: gitRoot, timeout: 10000 });
   const normalize = (value: string) => {
     try {
@@ -551,7 +551,17 @@ async function remoteHasUrl(pi: ExtensionAPI, gitRoot: string, remote: string, u
       return value.trim();
     }
   };
-  return result.code === 0 && normalize(result.stdout) === normalize(url);
+  if (result.killed || result.code !== 0 || normalize(result.stdout) !== normalize(url)) return false;
+
+  const config = await pi.exec("git", ["config", "--name-only", "--get-regexp", "^remote\\."], { cwd: gitRoot, timeout: 10000 });
+  if (config.killed) return false;
+  if (config.code === 1) return true;
+  if (config.code !== 0) return false;
+
+  // Extra named-remote settings may change transport even when the URLs match.
+  const prefix = `remote.${remote}.`;
+  const keys = config.stdout.split(/\r?\n/).filter((key) => key.startsWith(prefix));
+  return keys.every((key) => key === `${prefix}url` || key === `${prefix}fetch`);
 }
 
 async function fetchRevisionPinnedPullRequestRefs(
@@ -579,7 +589,7 @@ async function fetchRevisionPinnedPullRequestRefs(
     await fetchPinnedRefs(remote);
     servedByRemote = providerRemote == null || await hasPinnedRevisions(pi, gitRoot, metadata, baseBranch, headBranch);
   } catch (error) {
-    if (providerRemote == null || await remoteHasUrl(pi, gitRoot, remote, providerRemote)) throw error;
+    if (providerRemote == null || await canSkipCloneFetch(pi, gitRoot, remote, providerRemote)) throw error;
   }
   if (!servedByRemote && providerRemote != null) await fetchPinnedRefs(providerRemote);
 

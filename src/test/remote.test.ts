@@ -375,6 +375,7 @@ describe("remote review helpers", () => {
       if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
       if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
       if (command === "git" && args[0] === "remote") return { code: 0, stdout: "https://MIRROR.example/example/widgets.git\n", stderr: "", killed: false };
+      if (command === "git" && args[0] === "config") return { code: 0, stdout: "remote.origin.url\nremote.origin.fetch\nremote.other.proxy\n", stderr: "", killed: false };
       if (command === "git" && args[1] === "fetch") {
         fetchCalls.push(args);
         return { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/feature/review", killed: false };
@@ -390,6 +391,33 @@ describe("remote review helpers", () => {
     )).rejects.toThrow("couldn't find remote ref refs/heads/feature/review");
     expect(fetchCalls).toHaveLength(1);
     expect(exec).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], { cwd: "/repo", timeout: 10000 });
+  });
+
+  it.each([
+    { code: 0, stdout: "remote.origin.url\nremote.origin.proxy\n" },
+    { code: 0, stdout: "remote.origin.url\nremote.origin.proxyauthmethod\n" },
+    { code: 0, stdout: "remote.origin.url\nremote.origin.serveroption\n" },
+    { code: 2, stdout: "" },
+  ])("keeps the direct clone fallback when origin's transport is not equivalent: %j", async (config) => {
+    const fetchCalls: string[][] = [];
+    const fetchExec = pinnedExec(fetchCalls, (attempt) => attempt === 1
+      ? { code: 128, stderr: "fatal: proxy refused fetch" }
+      : { code: 0, stderr: "" });
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "git" && args[0] === "remote") {
+        return { code: 0, stdout: "https://mirror.example/example/widgets.git\n", stderr: "", killed: false };
+      }
+      if (command === "git" && args[0] === "config") return { ...config, stderr: "", killed: false };
+      return fetchExec(command, args);
+    });
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).resolves.toMatchObject({ baseRef: "base-oid", headRef: "origin/review/8/head" });
+    expect(fetchCalls.map((args) => args[3])).toEqual(["origin", "https://mirror.example/example/widgets.git"]);
   });
 
   it.each([

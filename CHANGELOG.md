@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL. The second fetch failed the same way and doubled the wait.
+- Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL and `origin` has no extra remote-specific settings. Keep direct clone fallback for distinct paths and transport overrides such as `remote.origin.proxy`.
 
 ## 0.9.7 - 2026-11-03
 
