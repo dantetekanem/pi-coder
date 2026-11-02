@@ -456,8 +456,9 @@ async function fetchRemoteRefs(
     const result = await pi.exec("git", args, { cwd: gitRoot, timeout: timeoutSeconds * 1000 });
     if (result.killed) throw new Error(`Timed out fetching remote refs after ${timeoutSeconds}s. stderr: ${gitFailureText(result.stderr) || "(none)"}`);
     if (result.code === 0) return;
+    const diagnostics = `${result.stderr}\n${result.stdout}`;
     const failure = gitFailureText(result.stderr) || result.stdout || "Failed to fetch remote refs.";
-    if (retry == null || attempt >= retry.attempts || !isRetryableFetchFailure(failure, retry)) {
+    if (retry == null || attempt >= retry.attempts || !isRetryableFetchFailure(diagnostics, retry)) {
       throw new Error(attempt === 1 ? failure : `Fetch from ${source} failed after ${attempt} attempts: ${failure}`);
     }
     const delaySeconds = Math.min(retry.delaySeconds * 2 ** (attempt - 1), MAX_FETCH_RETRY_DELAY_SECONDS);
@@ -541,7 +542,15 @@ async function hasPinnedRevisions(
 
 async function remoteHasUrl(pi: ExtensionAPI, gitRoot: string, remote: string, url: string): Promise<boolean> {
   const result = await pi.exec("git", ["remote", "get-url", remote], { cwd: gitRoot, timeout: 10000 });
-  const normalize = (value: string) => value.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
+  const normalize = (value: string) => {
+    try {
+      const parsed = new URL(value.trim());
+      parsed.hostname = parsed.hostname.toLowerCase();
+      return parsed.href;
+    } catch {
+      return value.trim();
+    }
+  };
   return result.code === 0 && normalize(result.stdout) === normalize(url);
 }
 

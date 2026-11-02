@@ -374,7 +374,7 @@ describe("remote review helpers", () => {
     const exec = vi.fn(async (command: string, args: string[]) => {
       if (command === "cli-two" && args[1] === "show") return { code: 0, stdout: JSON.stringify(metadata({ id: 8 })), stderr: "", killed: false };
       if (command === "cli-two" && args[1] === "reviews") return { code: 0, stdout: "[]", stderr: "", killed: false };
-      if (command === "git" && args[0] === "remote") return { code: 0, stdout: "https://MIRROR.example/example/widgets/\n", stderr: "", killed: false };
+      if (command === "git" && args[0] === "remote") return { code: 0, stdout: "https://MIRROR.example/example/widgets.git\n", stderr: "", killed: false };
       if (command === "git" && args[1] === "fetch") {
         fetchCalls.push(args);
         return { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/feature/review", killed: false };
@@ -390,6 +390,55 @@ describe("remote review helpers", () => {
     )).rejects.toThrow("couldn't find remote ref refs/heads/feature/review");
     expect(fetchCalls).toHaveLength(1);
     expect(exec).toHaveBeenCalledWith("git", ["remote", "get-url", "origin"], { cwd: "/repo", timeout: 10000 });
+  });
+
+  it.each([
+    "https://mirror.example/example/Widgets.git",
+    "https://mirror.example/example/widgets",
+    "https://mirror.example/example/widgets/",
+  ])("tries the clone URL when origin has a distinct repository path: %s", async (originUrl) => {
+    const fetchCalls: string[][] = [];
+    const fetchExec = pinnedExec(fetchCalls, (attempt) => attempt === 1
+      ? { code: 128, stderr: "fatal: repository not found" }
+      : { code: 0, stderr: "" });
+    const exec = vi.fn(async (command: string, args: string[]) => {
+      if (command === "git" && args[0] === "remote") {
+        return { code: 0, stdout: `${originUrl}\n`, stderr: "", killed: false };
+      }
+      return fetchExec(command, args);
+    });
+
+    await expect(resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    )).resolves.toMatchObject({ baseRef: "base-oid", headRef: "origin/review/8/head" });
+    expect(fetchCalls.map((args) => args[3])).toEqual(["origin", "https://mirror.example/example/widgets.git"]);
+  });
+
+  it.each([
+    { stderr: "remote: server busy; TRY AGAIN LATER\nfatal: unable to access repository: HTTP 503", stdout: "" },
+    { stderr: "fatal: unable to access repository: HTTP 503", stdout: "server busy; try again later" },
+  ])("matches retry hints in the original diagnostics: %j", async (diagnostics) => {
+    vi.useFakeTimers();
+    writePinnedSettingsWithoutClone(busyFetch);
+    const fetchCalls: string[][] = [];
+    const exec = pinnedExec(fetchCalls, (attempt) => attempt === 1
+      ? { code: 128, ...diagnostics }
+      : { code: 0, stderr: "" });
+
+    const target = resolveRemoteReviewTarget(
+      { exec } as never,
+      "/repo",
+      "https://pinned.example/projects/example/widgets/reviews/8",
+      "/repo",
+    );
+    await Promise.all([
+      expect(target).resolves.toMatchObject({ baseRef: "base-oid", headRef: "origin/review/8/head" }),
+      vi.runAllTimersAsync(),
+    ]);
+    expect(fetchCalls).toHaveLength(2);
   });
 
   it("retries a refused fetch with progress, the configured timeout, and doubling delays", async () => {
