@@ -538,28 +538,25 @@ describe("action and shortcut help rendering", () => {
     expect(fitted).toEqual(["one", "two", "+3 more • ? help"]);
   });
 
-  it("keeps header, panes, and footer within the vertical frame budget", () => {
+  it("keeps panes and footer within the vertical frame budget", () => {
     const prompt = "Focus: Navigator • stacked layout • Tab/Left/Right focus • / search • t templates • v diff view • ? help • 1/2/3/4 panes • o editor • s submit • Esc exit";
     for (const height of [10, 16, 22]) {
       for (const width of [20, 48, 74, 120]) {
-        for (const headerLineCount of [0, 1]) {
-          for (const visiblePaneCount of [0, 1, 3, 4]) {
-            const stacked = visiblePaneCount > 1;
-            const footer = buildFooterLines(plainTheme as any, prompt, width);
-            const layout = getReviewVerticalLayout(
-              plainTheme as any,
-              height,
-              headerLineCount,
-              visiblePaneCount,
-              stacked,
-              footer,
-              width,
-            );
+        for (const visiblePaneCount of [0, 1, 3, 4]) {
+          const stacked = visiblePaneCount > 1;
+          const footer = buildFooterLines(plainTheme as any, prompt, width);
+          const layout = getReviewVerticalLayout(
+            plainTheme as any,
+            height,
+            visiblePaneCount,
+            stacked,
+            footer,
+            width,
+          );
 
-            expect(headerLineCount + layout.bodyHeight + layout.footerLines.length).toBeLessThanOrEqual(height);
-            expect(layout.footerLines.every((line) => visibleWidth(line) <= width)).toBe(true);
-            expect(layout.bodyHeight).toBeGreaterThanOrEqual(visiblePaneCount === 0 ? 1 : stacked ? visiblePaneCount : 1);
-          }
+          expect(layout.bodyHeight + layout.footerLines.length).toBeLessThanOrEqual(height);
+          expect(layout.footerLines.every((line) => visibleWidth(line) <= width)).toBe(true);
+          expect(layout.bodyHeight).toBeGreaterThanOrEqual(visiblePaneCount === 0 ? 1 : stacked ? visiblePaneCount : 1);
         }
       }
     }
