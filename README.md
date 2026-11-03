@@ -32,6 +32,19 @@ pi install https://github.com/dantetekanem/pi-coder
 
 Restart Pi or run `/reload`.
 
+### Pi compatibility and security baseline
+
+Use Node.js 22.19.0 or newer and `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, and `@earendil-works/pi-tui` at 0.79.10 or newer. Keep the Pi packages on matching releases. The lockfile tests the 0.79.10 minimum; the peer ranges allow newer hosts without requiring Pi 1.x. Newer releases are not all covered by this compatibility check.
+
+This baseline includes the Pi fixes described in these advisories:
+
+- https://github.com/advisories/GHSA-jfgx-wxx8-mp94
+- https://github.com/advisories/GHSA-r95r-rj6r-c39x
+- https://github.com/advisories/GHSA-7v5m-pr3q-6453
+- https://github.com/advisories/GHSA-mqxh-6gq7-558m
+
+The baseline is not an audit-clean guarantee. The 2026-11-01 audit still reports upstream advisories for Pi's pinned `undici` 8.5.0, `minimatch` 10.2.5, and `glob` 13.0.6. The lockfile refreshes compatible `protobufjs`, `zod`, and `brace-expansion` resolutions without overriding Pi's dependency pins. Run `pnpm audit --json` for current findings. Updating this repository's lockfile does not update your installed Pi host or its dependencies; keep that installation current separately. Pi extensions run with the host's permissions, so use trusted repositories or external isolation for untrusted code.
+
 ## Review changes
 
 Run `/diff` or `/review` inside a repository:
