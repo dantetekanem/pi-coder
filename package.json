@@ -104,14 +104,15 @@
     "shiki": "3.23.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": ">=0.79.10",
+    "@earendil-works/pi-coding-agent": ">=0.79.10",
+    "@earendil-works/pi-tui": ">=0.79.10",
     "typebox": "*"
   },
   "devDependencies": {
     "@types/node": "24.12.4",
     "typescript": "5.9.3",
-    "vitest": "3.2.6"
+    "vite": "7.3.7",
+    "vitest": "4.1.12"
   }
 }
