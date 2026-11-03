@@ -1480,6 +1480,60 @@ describe("ReviewApp interaction", () => {
     app.dispose();
   });
 
+  it("shows a comment saved with Shift+Enter on separate rows in the comments pane", async () => {
+    const { app, loadFileContents } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+
+    app.handleInput("\r");
+    app.handleInput("c");
+    app.handleInput("first");
+    app.handleInput("\u001b[13;2u");
+    app.handleInput("second");
+    app.handleInput("\r");
+
+    const rows = app.render(120);
+    const firstRow = rows.findIndex((row) => row.includes("first"));
+    expect(firstRow).toBeGreaterThanOrEqual(0);
+    expect(rows[firstRow + 1]).toContain("second");
+    expect(rows.join("\n")).not.toContain("\\x0a");
+    app.dispose();
+  });
+
+  it("adds a line break for a plain line feed in the comment editor and saves only on Enter", async () => {
+    const { app, loadFileContents } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+
+    app.handleInput("\r");
+    app.handleInput("c");
+    app.handleInput("first");
+    app.handleInput("\n");
+    app.handleInput("second");
+
+    expect((app as any).editTarget).not.toBeNull();
+    expect((app as any).getEditText()).toBe("first\nsecond");
+    expect((app as any).state.draft.comments).toEqual([]);
+    app.handleInput("\r");
+    expect((app as any).editTarget).toBeNull();
+    expect((app as any).state.draft.comments[0].body).toBe("first\nsecond");
+    app.dispose();
+  });
+
+  it.each(["comment", "modify"] as const)("adds a line break for Ctrl+J in the %s editor", async (intent) => {
+    const { app, loadFileContents } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+
+    app.handleInput("\r");
+    app.handleInput(intent === "modify" ? "m" : "c");
+    app.handleInput("first");
+    app.handleInput("\u001b[106;5u");
+    app.handleInput("second");
+
+    expect((app as any).editTarget).not.toBeNull();
+    expect((app as any).getEditText()).toBe("first\nsecond");
+    expect((app as any).state.draft.comments).toEqual([]);
+    app.dispose();
+  });
+
   it.each(["changed", "renamed", "missing", "unavailable", "last-commit", "all-files"] as const)("retains %s source recovery without applying to a guessed range", async (condition) => {
     const file = makeFile();
     const record: ReviewComposition = {
@@ -2095,6 +2149,21 @@ describe("Replies pane", () => {
     reopened.app.handleInput("e");
     expect((reopened.app as any).editor.getExpandedText()).toBe("");
     reopened.app.dispose();
+  });
+
+  it("adds a line break for a plain line feed and Ctrl+J in the thread response editor", async () => {
+    const { app } = await createAnchoredThread();
+    const view = app as any;
+    app.handleInput("e");
+    app.handleInput("first");
+    app.handleInput("\n");
+    app.handleInput("second");
+    app.handleInput("\u001b[106;5u");
+    app.handleInput("third");
+
+    expect(view.editingResponse).not.toBeNull();
+    expect(view.editor.getExpandedText()).toBe("first\nsecond\nthird");
+    app.dispose();
   });
 
   it("keeps the native response cursor visible in short panes", async () => {
