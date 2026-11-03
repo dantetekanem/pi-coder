@@ -31,6 +31,7 @@ describe("review preferences", () => {
       navigatorTreeMode: false,
       contextLineNavigation: true,
       commentsGlobal: true,
+      showPullRequestThreads: true,
       paneVisibility: {
         navigator: false,
         diff: true,
@@ -48,6 +49,7 @@ describe("review preferences", () => {
       navigatorFileOrder: "risk",
       contextLineNavigation: true,
       commentsGlobal: true,
+      showPullRequestThreads: true,
       lastReviewVerdict: null,
       storyAgent: DEFAULT_STORY_AGENT,
       paneVisibility: {

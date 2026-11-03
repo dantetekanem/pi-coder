@@ -38,6 +38,7 @@ import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from
 import { filterFilesBySearch } from "../search.js";
 import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
 import type { ReplyThread } from "../review-replies.js";
+import { isOpenReviewThread, placeReviewThread, type PlacedReviewThread, type ReviewThreadSide } from "../review-threads.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
 import type { ChangeStatus, CommentIntent, DiffReviewComment, FileCommentTarget, ReviewComposition, ReviewCompositionTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
@@ -190,9 +191,27 @@ interface ReviewDiffSurface extends DiffSurface {
   paneWidth: number;
   language: string | undefined;
   lineComments: Map<string, DiffReviewComment>;
+  threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>;
+}
+
+/** Open PR threads placed on one file's reviewed lines. Keys are `side:line`. */
+interface FileThreadPlacement {
+  data: NonNullable<ReviewRepliesPanelSource["threadData"]>;
+  contents: ReviewFileContents;
+  version: number;
+  total: number;
+  placed: number;
+  marks: Map<string, PlacedReviewThread[]>;
+  anchors: Map<string, PlacedReviewThread[]>;
+  /** Unified context rows carry one side's number, so unchanged lines are also keyed by their other side. */
+  unifiedMarks: Map<string, PlacedReviewThread[]>;
+  unifiedAnchors: Map<string, PlacedReviewThread[]>;
 }
 
 const COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+const THREAD_MARKER = "\u25cb";
+const THREAD_BLOCK_INDENT = 7;
+const THREAD_COMMENT_MAX_LINES = 8;
 const DEFAULT_CONTEXT_LINES = 3;
 const CONTEXT_EXPANSION_LINES = 10;
 const STACKED_LAYOUT_MAX_WIDTH = 99;
@@ -756,6 +775,20 @@ function getLineCommentIndex(state: ReviewState, fileId: string, scope: ReviewSc
   return index;
 }
 
+function pushThreadEntry(map: Map<string, PlacedReviewThread[]>, key: string, placed: PlacedReviewThread): void {
+  const list = map.get(key);
+  if (list == null) map.set(key, [placed]);
+  else if (!list.includes(placed)) list.push(placed);
+}
+
+function getThreadPaths(file: ReviewFile, scope: ReviewScope): Record<ReviewThreadSide, string | undefined> {
+  const comparison = getScopeComparison(file, scope);
+  return {
+    added: comparison?.newPath == null ? undefined : joinReviewPath(file.pathPrefix, comparison.newPath),
+    deleted: comparison?.oldPath == null ? undefined : joinReviewPath(file.pathPrefix, comparison.oldPath),
+  };
+}
+
 function getCommentPanelItems(state: ReviewState, fileId: string | null, scope: ReviewScope, global = false): CommentPanelItem[] {
   const items: CommentPanelItem[] = [];
   if (state.draft.allComment.trim().length > 0) {
@@ -783,6 +816,16 @@ function getCommentIndicator(theme: Theme, intent: CommentIntent): string {
   if (intent === "modify") return theme.fg("accent", "\u25cf");
   if (intent === "comment") return theme.fg("success", "\u25a0");
   return theme.fg("warning", "\u25c6");
+}
+
+/** The reviewer's own feedback keeps the gutter; an open PR thread shows only on lines without it. */
+function getLineIndicator(theme: Theme, lineComment: DiffReviewComment | undefined, threaded: boolean): string {
+  if (lineComment != null) return getCommentIndicator(theme, lineComment.intent);
+  return threaded ? theme.fg("mdLink", THREAD_MARKER) : " ";
+}
+
+function getLineIndicatorKey(lineComment: DiffReviewComment | undefined, threaded: boolean): string {
+  return lineComment?.intent ?? (threaded ? "thread" : "-");
 }
 
 function formatLineSideLabel(side: ReviewLineTarget["side"]): string {
@@ -1614,6 +1657,11 @@ export class ReviewApp {
   private repliesPageSize = 1;
   private selectedReplyIndex = 0;
   private threadData: ReviewRepliesPanelSource["threadData"];
+  private showPullRequestThreads: boolean;
+  private readonly threadPlacements = new Map<string, FileThreadPlacement>();
+  private threadPlacementVersion = 0;
+  private threadBlockCache = new WeakMap<readonly PlacedReviewThread[], Map<number, string[]>>();
+  private threadCounts?: { data: NonNullable<ReviewRepliesPanelSource["threadData"]>; counts: Map<string, number> };
   private threadRows?: ReviewReplyItem[];
   private openedThread?: ReplyThread;
   private threadScroll = 0;
@@ -1689,6 +1737,7 @@ export class ReviewApp {
     this.navigatorTreeMode = options.initialSession?.navigatorTreeMode ?? preferences.navigatorTreeMode;
     this.navigatorFileOrder = preferences.navigatorFileOrder;
     this.commentsGlobal = options.initialSession?.commentsGlobal ?? preferences.commentsGlobal;
+    this.showPullRequestThreads = preferences.showPullRequestThreads;
     this.paneVisibility = { ...preferences.paneVisibility };
     this.showAllLocales = options.initialSession?.showAllLocales ?? false;
     this.message = options.initialBanner ?? null;
@@ -1750,6 +1799,7 @@ export class ReviewApp {
       if (options.initialComposition != null) void this.recoverComposition(options.initialComposition);
       else this.ensureActiveEntry();
       this.ensureContextPanel();
+      this.ensureRepliesPanel(true);
       this.requestRender();
     });
     if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
@@ -1781,6 +1831,7 @@ export class ReviewApp {
     this.diffLayoutCache.clear();
     this.diffActionHintCache = null;
     this.codeRowModels = new WeakMap();
+    this.threadBlockCache = new WeakMap();
   }
 
   private syncCursorMode(): void {
@@ -1876,8 +1927,9 @@ export class ReviewApp {
     });
   }
 
-  private ensureRepliesPanel(): void {
-    if (this.options.repliesSource == null || !this.paneVisibility.replies) return;
+  /** In the background, the shared read also fetches the threads marked on diff lines while Replies is hidden. */
+  private ensureRepliesPanel(background = false): void {
+    if (this.options.repliesSource == null || (!background && !this.paneVisibility.replies)) return;
     if (this.repliesPanelState.status !== "idle") return;
     const current = this.options.repliesSource.current;
     if (current != null) this.applyReplies(current);
@@ -2155,6 +2207,120 @@ export class ReviewApp {
     });
   }
 
+  private getThreadPlacement(file: ReviewFile, scope: ReviewScope, entry: LoadedEntryReady): FileThreadPlacement | null {
+    const data = this.threadData;
+    if (data == null || data.threads.length === 0) return null;
+    const key = this.cacheKey(file.id, scope);
+    const cached = this.threadPlacements.get(key);
+    if (cached?.data === data && cached.contents === entry.contents) return cached;
+    const comparison = getScopeComparison(file, scope);
+    const paths = getThreadPaths(file, scope);
+    const sideLines: Partial<Record<ReviewThreadSide, string[]>> = {};
+    const linesFor = (side: ReviewThreadSide) => sideLines[side] ??= (side === "added"
+      ? entry.contents.modifiedAvailable === false ? "" : entry.contents.modifiedContent
+      : entry.contents.originalAvailable === false ? "" : entry.contents.originalContent).split(/\r\n|\n|\r/);
+    let unchangedPairs: Map<string, string> | undefined;
+    const pairedKey = (key: string) => {
+      unchangedPairs ??= new Map(entry.baseDiff.rows.flatMap((row) => row.kind !== "equal" || row.oldLineNumber == null || row.newLineNumber == null ? []
+        : [[`deleted:${row.oldLineNumber}`, `added:${row.newLineNumber}`], [`added:${row.newLineNumber}`, `deleted:${row.oldLineNumber}`]] as Array<[string, string]>));
+      return unchangedPairs.get(key);
+    };
+    const placement: FileThreadPlacement = { data, contents: entry.contents, version: ++this.threadPlacementVersion, total: 0, placed: 0,
+      marks: new Map(), anchors: new Map(), unifiedMarks: new Map(), unifiedAnchors: new Map() };
+    const place = (map: Map<string, PlacedReviewThread[]>, unified: Map<string, PlacedReviewThread[]>, key: string, placed: PlacedReviewThread) => {
+      pushThreadEntry(map, key, placed);
+      pushThreadEntry(unified, key, placed);
+      const paired = pairedKey(key);
+      if (paired != null) pushThreadEntry(unified, paired, placed);
+    };
+    for (const thread of data.threads) {
+      const side = thread.side ?? "added";
+      if (!isOpenReviewThread(thread) || paths[side] == null || thread.path !== paths[side]) continue;
+      placement.total += 1;
+      const revision = side === "added" ? comparison?.modifiedRevision : comparison?.originalRevision;
+      const threadRevision = side === "added" ? thread.headRevision : thread.baseRevision;
+      const placed = placeReviewThread(thread, { side, lines: linesFor(side),
+        sameRevision: revision != null && COMMIT_ID_PATTERN.test(revision) && threadRevision === revision });
+      if (placed == null) continue;
+      placement.placed += 1;
+      for (let line = placed.startLine; line <= placed.endLine; line += 1) place(placement.marks, placement.unifiedMarks, `${side}:${line}`, placed);
+      place(placement.anchors, placement.unifiedAnchors, `${side}:${placed.endLine}`, placed);
+    }
+    setBoundedMapEntry(this.threadPlacements, key, placement, MAX_LOADED_FILE_ENTRIES);
+    return placement;
+  }
+
+  private getOpenThreadCount(file: ReviewFile, scope: ReviewScope): number {
+    const data = this.threadData;
+    if (data == null) return 0;
+    if (this.threadCounts?.data !== data) {
+      const counts = new Map<string, number>();
+      for (const thread of data.threads) {
+        if (!isOpenReviewThread(thread) || thread.path == null) continue;
+        const key = `${thread.side ?? "added"}:${thread.path}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      this.threadCounts = { data, counts };
+    }
+    const paths = getThreadPaths(file, scope);
+    return (paths.added == null ? 0 : this.threadCounts.counts.get(`added:${paths.added}`) ?? 0)
+      + (paths.deleted == null ? 0 : this.threadCounts.counts.get(`deleted:${paths.deleted}`) ?? 0);
+  }
+
+  /** Read-only PR thread text under its anchored line; it never joins the review draft. */
+  private buildThreadBlockLines(threads: readonly PlacedReviewThread[], width: number): string[] {
+    let byWidth = this.threadBlockCache.get(threads);
+    if (byWidth == null) {
+      byWidth = new Map();
+      this.threadBlockCache.set(threads, byWidth);
+    }
+    const cached = byWidth.get(width);
+    if (cached != null) return cached;
+    const prefix = `${" ".repeat(Math.max(0, Math.min(THREAD_BLOCK_INDENT, width - 12)))}${this.theme.fg("mdLink", "\u2506")} `;
+    const textWidth = Math.max(1, width - visibleWidth(prefix));
+    const lines: string[] = [];
+    const push = (text: string, color: "text" | "dim") => {
+      for (const line of wrapTextWithAnsi(text, textWidth)) lines.push(`${prefix}${this.theme.fg(color, line)}`);
+    };
+    for (const placed of threads) {
+      const { thread } = placed;
+      const facts = [
+        thread.resolved == null ? "resolution unknown" : "unresolved",
+        ...(thread.outdated === true ? ["outdated"] : []),
+        ...(placed.startLine === placed.endLine ? [] : [`lines ${placed.startLine}-${placed.endLine}`]),
+        ...(placed.movedFrom == null ? [] : [`was line ${placed.movedFrom}`]),
+      ];
+      push(`${THREAD_MARKER} PR thread \u00b7 ${facts.join(" \u00b7 ")}`, "dim");
+      for (const comment of thread.comments) {
+        const date = comment.createdAt?.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+        push(sanitizeTerminalText(date == null ? comment.author : `${comment.author} \u00b7 ${date}`), "text");
+        const body = sanitizeTerminalMultilineText(comment.body.replace(/\r\n?/g, "\n").trim()).split("\n")
+          .flatMap((line) => wrapTextWithAnsi(line, Math.max(1, textWidth - 2)));
+        const shown = body.slice(0, THREAD_COMMENT_MAX_LINES);
+        if (body.length > shown.length) shown[shown.length - 1] = `${truncateToWidth(shown[shown.length - 1]!, Math.max(1, textWidth - 3), "", false)}\u2026`;
+        for (const line of shown) lines.push(`${prefix}  ${this.theme.fg("muted", line)}`);
+      }
+    }
+    byWidth.set(width, lines);
+    return lines;
+  }
+
+  private togglePullRequestThreads(): void {
+    if (this.options.repliesSource == null) {
+      this.setMessage("PR threads show only in pull request reviews.");
+      this.requestRender();
+      return;
+    }
+    this.showPullRequestThreads = !this.showPullRequestThreads;
+    saveReviewPreference({ showPullRequestThreads: this.showPullRequestThreads });
+    this.setMessage(!this.showPullRequestThreads
+      ? `PR threads hidden; ${THREAD_MARKER} still marks their lines.`
+      : this.threadData == null
+        ? "PR threads will show under their lines when the read finishes."
+        : "PR threads shown under their lines.");
+    this.requestRender();
+  }
+
   private effectivePaneVisibility(): ReviewPaneVisibility {
     return {
       ...this.paneVisibility,
@@ -2196,7 +2362,7 @@ export class ReviewApp {
     return highlighted;
   }
 
-  private buildUnifiedRowContent(row: DisplayRow, language: string | undefined, isCurrent: boolean, lineComment: DiffReviewComment | undefined): { contentText: string; code: string; tone: DiffTone } {
+  private buildUnifiedRowContent(row: DisplayRow, language: string | undefined, isCurrent: boolean, lineComment: DiffReviewComment | undefined, threaded = false): { contentText: string; code: string; tone: DiffTone } {
     if (row.kind === "gap") {
       return { contentText: this.theme.fg("muted", centerText(row.codeText, Math.max(row.codeText.length + 2, 10))), code: "", tone: "context" };
     }
@@ -2208,7 +2374,7 @@ export class ReviewApp {
       : row.sign === "-"
         ? this.theme.fg("error", row.sign)
         : this.theme.fg("toolDiffContext", row.sign);
-    const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
+    const commentIndicator = getLineIndicator(this.theme, lineComment, threaded);
     const code = this.getCachedHighlightedCode(tone, row.codeText, language);
     return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code, tone };
   }
@@ -2222,8 +2388,9 @@ export class ReviewApp {
     isSearchMatch: boolean,
     lineComment: DiffReviewComment | undefined,
     measureOnly = false,
+    threaded = false,
   ): string[] {
-    const { contentText, tone } = this.buildUnifiedRowContent(row, language, isCurrent, lineComment);
+    const { contentText, tone } = this.buildUnifiedRowContent(row, language, isCurrent, lineComment, threaded);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width - 2), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -4354,22 +4521,23 @@ export class ReviewApp {
     if (surface.mode === "unified") {
       const row = (surface.rows as readonly DisplayRow[])[rowIndex];
       if (row == null || row.kind === "gap") return null;
-      const lineComment = row.commentLineNumber == null || row.commentSide == null
-        ? undefined
-        : surface.lineComments.get(`${row.commentSide}:${row.commentLineNumber}`);
-      return this.cachedCodeRowModel(row, `${surface.paneWidth}:${wrap}:${lineComment?.intent ?? "-"}`, row.codeText, () => ({
-        content: this.buildUnifiedRowContent(row, surface.language, false, lineComment),
-        visual: this.buildUnifiedRowLines(row, surface.paneWidth, surface.language, false, false, false, lineComment, true),
+      const lineKey = row.commentLineNumber == null || row.commentSide == null ? undefined : `${row.commentSide}:${row.commentLineNumber}`;
+      const lineComment = lineKey == null ? undefined : surface.lineComments.get(lineKey);
+      const threaded = lineKey != null && surface.threadMarks?.has(lineKey) === true;
+      return this.cachedCodeRowModel(row, `${surface.paneWidth}:${wrap}:${getLineIndicatorKey(lineComment, threaded)}`, row.codeText, () => ({
+        content: this.buildUnifiedRowContent(row, surface.language, false, lineComment, threaded),
+        visual: this.buildUnifiedRowLines(row, surface.paneWidth, surface.language, false, false, false, lineComment, true, threaded),
       }));
     }
     const row = (surface.rows as readonly SideBySideDisplayRow[])[rowIndex];
     const cell = side === "deleted" ? row?.oldCell : row?.newCell;
     if (cell == null) return null;
     const width = side === "deleted" ? surface.oldWidth : surface.newWidth;
-    const intent = surface.lineComments.get(`${cell.side}:${cell.lineNumber}`)?.intent ?? "-";
+    const cellKey = `${cell.side}:${cell.lineNumber}`;
+    const intent = getLineIndicatorKey(surface.lineComments.get(cellKey), surface.threadMarks?.has(cellKey) === true);
     return this.cachedCodeRowModel(cell, `${width}:${wrap}:${intent}`, cell.text, () => ({
-      content: this.buildSideBySideCellContent(cell, surface.language, surface.lineComments),
-      visual: this.renderSideBySideCellLines(cell, width, surface.language, false, false, false, surface.lineComments, true),
+      content: this.buildSideBySideCellContent(cell, surface.language, surface.lineComments, surface.threadMarks),
+      visual: this.renderSideBySideCellLines(cell, width, surface.language, false, false, false, surface.lineComments, true, surface.threadMarks),
     }));
   }
 
@@ -4618,6 +4786,7 @@ export class ReviewApp {
       return;
     }
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.requestCancel(); return; }
+    if (matchesReviewAction("prThreads", data)) { this.togglePullRequestThreads(); return; }
 
     if ((this.state.focus === "context" || this.state.focus === "replies") && (data === "r" || data === "m")) {
       if (data === "r") this.refreshConversation({ refresh: true });
@@ -4977,7 +5146,9 @@ export class ReviewApp {
       const commentMarker = count > 0 ? this.theme.fg("success", ` ${count}●`) : this.theme.fg("dim", "  ·");
       const submoduleMarker = getSubmoduleInfo(file, this.state.activeScope) == null ? "" : this.theme.fg(active ? "accent" : "muted", " ↗");
       const reviewedMarker = this.reviewedFileIds.has(file.id) ? this.theme.fg("success", " done") : "";
-      const pathMarkers = `${submoduleMarker}${reviewedMarker}`;
+      const threadCount = this.getOpenThreadCount(file, this.state.activeScope);
+      const threadMarker = threadCount === 0 ? "" : this.theme.fg("mdLink", ` ${threadCount}${THREAD_MARKER}`);
+      const pathMarkers = `${threadMarker}${submoduleMarker}${reviewedMarker}`;
       const trailing = `${formatNavigatorChangeCounts(palette, file, this.state.activeScope, countWidths)}${commentMarker}${NAVIGATOR_PADDING}`;
       const fixedWidth = visibleWidth(prefixText) + visibleWidth(pathMarkers) + visibleWidth(trailing);
       const displayPath = getReviewFileDisplayPath(file, this.state.activeScope);
@@ -4998,8 +5169,9 @@ export class ReviewApp {
     return renderBox("Navigator", width, height, this.theme, lines, this.state.focus === "navigator");
   }
 
-  private buildSideBySideCellContent(cell: SideBySideCell, language: string | undefined, lineComments: Map<string, DiffReviewComment>): { contentText: string; code: string } {
+  private buildSideBySideCellContent(cell: SideBySideCell, language: string | undefined, lineComments: Map<string, DiffReviewComment>, threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>): { contentText: string; code: string } {
     const lineComment = lineComments.get(`${cell.side}:${cell.lineNumber}`);
+    const threaded = threadMarks?.has(`${cell.side}:${cell.lineNumber}`) === true;
     const lineLabel = String(cell.lineNumber).padStart(4, " ");
     const gutterLine = this.theme.fg("borderMuted", lineLabel);
     const gutterSign = cell.sign === "+"
@@ -5007,15 +5179,15 @@ export class ReviewApp {
       : cell.sign === "-"
         ? this.theme.fg("error", cell.sign)
         : this.theme.fg("toolDiffContext", cell.sign);
-    const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
+    const commentIndicator = getLineIndicator(this.theme, lineComment, threaded);
     const code = this.getCachedHighlightedCode(cell.tone, cell.text, language);
     return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code };
   }
 
-  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false): string[] {
+  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false, threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>): string[] {
     if (cell == null) return [" ".repeat(Math.max(1, width))];
 
-    const { contentText } = this.buildSideBySideCellContent(cell, language, lineComments);
+    const { contentText } = this.buildSideBySideCellContent(cell, language, lineComments, threadMarks);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -5027,7 +5199,7 @@ export class ReviewApp {
     });
   }
 
-  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number): { lines: string[]; meta: Array<DiffSurfaceLine | null>; rows: readonly SideBySideDisplayRow[]; oldWidth: number; newWidth: number; newLeft: number; selectedIndex: number; selectedEndIndex: number; renderedStartOffset: number } {
+  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number, threadPlacement: FileThreadPlacement | null = null): { lines: string[]; meta: Array<DiffSurfaceLine | null>; rows: readonly SideBySideDisplayRow[]; oldWidth: number; newWidth: number; newLeft: number; selectedIndex: number; selectedEndIndex: number; selectedBlockHeight: number; renderedStartOffset: number } {
     const innerWidth = Math.max(1, width - 2);
     const separator = this.theme.fg("borderMuted", " │ ");
     const separatorWidth = visibleWidth(separator);
@@ -5036,14 +5208,26 @@ export class ReviewApp {
     const selectedRange = selectedTarget == null ? null : getLineTargetRange(selectedTarget);
     const layout = this.getDiffLayout(fileId, this.state.activeScope);
     const rows = layout?.sideBySideRows ?? buildSideBySideDisplayRows(diff);
-    const heightKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}`;
+    const threadMarks = threadPlacement?.marks;
+    const showThreads = this.showPullRequestThreads && threadPlacement != null && threadPlacement.placed > 0;
+    const threadBlock = (row: SideBySideDisplayRow | undefined): { left: string[]; right: string[]; height: number } | null => {
+      if (!showThreads || row == null || row.kind === "gap") return null;
+      const left = row.oldCell == null ? undefined : threadPlacement.anchors.get(`deleted:${row.oldCell.lineNumber}`);
+      const right = row.newCell == null ? undefined : threadPlacement.anchors.get(`added:${row.newCell.lineNumber}`);
+      if (left == null && right == null) return null;
+      const leftLines = left == null ? [] : this.buildThreadBlockLines(left, oldWidth);
+      const rightLines = right == null ? [] : this.buildThreadBlockLines(right, newWidth);
+      return { left: leftLines, right: rightLines, height: Math.max(leftLines.length, rightLines.length) };
+    };
+    const heightKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}:${showThreads ? threadPlacement.version : "-"}`;
     let rowHeights = layout?.sideBySideRowHeights.get(heightKey);
     if (rowHeights == null) {
-      rowHeights = !this.state.wrapLines ? new Array<number>(rows.length + 1).fill(1) : [1, ...rows.map((row) => {
-        if (row.kind === "gap") return 1;
+      rowHeights = [1, ...rows.map((row) => {
+        const block = threadBlock(row)?.height ?? 0;
+        if (row.kind === "gap" || !this.state.wrapLines) return 1 + block;
         const oldLines = this.renderSideBySideCellLines(row.oldCell, oldWidth, language, false, false, false, lineComments, true);
         const newLines = this.renderSideBySideCellLines(row.newCell, newWidth, language, false, false, false, lineComments, true);
-        return Math.max(oldLines.length, newLines.length);
+        return Math.max(oldLines.length, newLines.length) + block;
       })];
       layout?.sideBySideRowHeights.set(heightKey, rowHeights);
     }
@@ -5061,8 +5245,9 @@ export class ReviewApp {
       : layout?.sideBySideTargetRowIndexes.get(`${selectedTarget.side}:${selectedTarget.line}`) ?? -1;
     let selectedIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 1] ?? 0;
     let selectedEndIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 2] ?? selectedIndex + 1;
+    const selectedBlockHeight = selectedRowIndex < 0 ? 0 : threadBlock(rows[selectedRowIndex])?.height ?? 0;
     if (selectedRowIndex >= 0 && !this.diffWheelScrolling) {
-      this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex);
+      this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex - selectedBlockHeight);
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const lines: string[] = [];
@@ -5098,8 +5283,10 @@ export class ReviewApp {
       const newCurrent = row.newCell != null && selectedTarget?.side === row.newCell.side && selectedTarget.line === row.newCell.lineNumber;
       const oldSearchMatched = row.oldCell != null && diffTextMatchesSearch(row.oldCell.text, this.diffSearchQuery);
       const newSearchMatched = row.newCell != null && diffTextMatchesSearch(row.newCell.text, this.diffSearchQuery);
-      const oldIntent = row.oldCell == null ? "-" : lineComments.get(`${row.oldCell.side}:${row.oldCell.lineNumber}`)?.intent ?? "-";
-      const newIntent = row.newCell == null ? "-" : lineComments.get(`${row.newCell.side}:${row.newCell.lineNumber}`)?.intent ?? "-";
+      const oldKey = row.oldCell == null ? "" : `${row.oldCell.side}:${row.oldCell.lineNumber}`;
+      const newKey = row.newCell == null ? "" : `${row.newCell.side}:${row.newCell.lineNumber}`;
+      const oldIntent = row.oldCell == null ? "-" : getLineIndicatorKey(lineComments.get(oldKey), threadMarks?.has(oldKey) === true);
+      const newIntent = row.newCell == null ? "-" : getLineIndicatorKey(lineComments.get(newKey), threadMarks?.has(newKey) === true);
       const cacheKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}:${oldSelected ? 1 : 0}:${newSelected ? 1 : 0}:${oldCurrent ? 1 : 0}:${newCurrent ? 1 : 0}:${oldSearchMatched ? 1 : 0}:${newSearchMatched ? 1 : 0}:${oldIntent}:${newIntent}`;
       let rowCache = layout?.sideBySideRowRenderCache.get(row);
       if (rowCache == null) {
@@ -5109,8 +5296,8 @@ export class ReviewApp {
       let cachedLines = rowCache.get(cacheKey);
       if (cachedLines == null) {
         cachedLines = {
-          oldLines: this.renderSideBySideCellLines(row.oldCell, oldWidth, language, oldSelected, oldCurrent, oldSearchMatched, lineComments),
-          newLines: this.renderSideBySideCellLines(row.newCell, newWidth, language, newSelected, newCurrent, newSearchMatched, lineComments),
+          oldLines: this.renderSideBySideCellLines(row.oldCell, oldWidth, language, oldSelected, oldCurrent, oldSearchMatched, lineComments, false, threadMarks),
+          newLines: this.renderSideBySideCellLines(row.newCell, newWidth, language, newSelected, newCurrent, newSearchMatched, lineComments, false, threadMarks),
         };
         rowCache.set(cacheKey, cachedLines);
       }
@@ -5119,13 +5306,18 @@ export class ReviewApp {
         lines.push(`${cachedLines.oldLines[index] ?? " ".repeat(oldWidth)}${separator}${cachedLines.newLines[index] ?? " ".repeat(newWidth)}`);
         meta.push({ rowIndex, visual: index });
       }
+      const block = threadBlock(row);
+      for (let index = 0; index < (block?.height ?? 0); index += 1) {
+        lines.push(`${padLine(block!.left[index] ?? "", oldWidth)}${separator}${padLine(block!.right[index] ?? "", newWidth)}`);
+        meta.push(null);
+      }
       if (oldCurrent || newCurrent) {
         selectedIndex = virtualRange.offsets[itemIndex] ?? selectedIndex;
         selectedEndIndex = virtualRange.offsets[itemIndex + 1] ?? selectedIndex + rowHeight;
       }
     }
 
-    return { lines, meta, rows, oldWidth, newWidth, newLeft: oldWidth + separatorWidth, selectedIndex, selectedEndIndex, renderedStartOffset: virtualRange.startOffset };
+    return { lines, meta, rows, oldWidth, newWidth, newLeft: oldWidth + separatorWidth, selectedIndex, selectedEndIndex, selectedBlockHeight, renderedStartOffset: virtualRange.startOffset };
   }
 
   private renderExactEditor(width: number, height?: number): string[] {
@@ -5248,10 +5440,20 @@ export class ReviewApp {
       selectedTarget.side === "deleted" ? row.oldLineNumber === selectedTarget.line : row.newLineNumber === selectedTarget.line
     ));
     const hunk = diff.hunks.find((candidate) => candidate.displayStartRow <= selectedRow && selectedRow <= candidate.displayEndRow);
+    const threadPlacement = this.getThreadPlacement(file, this.state.activeScope, entry);
+    if (threadPlacement != null && threadPlacement.total > 0) {
+      const others = threadPlacement.total - threadPlacement.placed;
+      const count = (value: number) => `${value} PR thread${value === 1 ? "" : "s"}`;
+      const summary = threadPlacement.placed === 0
+        ? `${count(others)} in Replies`
+        : `${THREAD_MARKER} ${count(threadPlacement.placed)}${others > 0 ? `, ${others} more in Replies` : ""} (I ${this.showPullRequestThreads ? "hide" : "show"})`;
+      lines[1] = `${this.theme.fg("mdLink", summary)} · ${lines[1]}`;
+    }
     if (hunk != null) {
       const counts = `${this.theme.fg("success", `+${hunk.additions}`)} ${this.theme.fg("error", `−${hunk.deletions}`)}`;
       lines[1] = `Hunk ${hunk.index + 1}/${diff.hunks.length} · ${counts} · ${lines[1]}`;
     }
+    const showThreads = this.showPullRequestThreads && threadPlacement != null && threadPlacement.placed > 0;
     const maxBody = Math.max(1, height - lines.length - 2);
     let rendered: string[];
     let renderedMeta: Array<DiffSurfaceLine | null>;
@@ -5262,8 +5464,9 @@ export class ReviewApp {
     let renderedStartOffset = 0;
     let selectedIndex = 0;
     let selectedEndIndex = 0;
+    let selectedBlockHeight = 0;
     if (this.diffViewMode === "side-by-side") {
-      const sideBySide = this.renderSideBySideDiff(diff, width, file.id, language, selectedTarget, lineComments, maxBody);
+      const sideBySide = this.renderSideBySideDiff(diff, width, file.id, language, selectedTarget, lineComments, maxBody, threadPlacement);
       rendered = sideBySide.lines;
       renderedMeta = sideBySide.meta;
       surfaceRows = sideBySide.rows;
@@ -5273,6 +5476,7 @@ export class ReviewApp {
       renderedStartOffset = sideBySide.renderedStartOffset;
       selectedIndex = sideBySide.selectedIndex;
       selectedEndIndex = sideBySide.selectedEndIndex;
+      selectedBlockHeight = sideBySide.selectedBlockHeight;
     } else {
       const displayRows = layout.unifiedRows;
       const rowRenderCache = layout.rowRenderCache;
@@ -5282,11 +5486,17 @@ export class ReviewApp {
       const selectedRange = selectedTarget == null ? null : getLineTargetRange(selectedTarget);
       const selectedSide = selectedTarget?.side ?? null;
       const wrapFlag = this.state.wrapLines ? 1 : 0;
-      const heightKey = `${width}:${wrapFlag}`;
+      const threadMarks = threadPlacement?.unifiedMarks;
+      const threadBlock = (row: DisplayRow | undefined): string[] => {
+        if (!showThreads || row?.commentLineNumber == null || row.commentSide == null) return [];
+        const threads = threadPlacement.unifiedAnchors.get(`${row.commentSide}:${row.commentLineNumber}`);
+        return threads == null ? [] : this.buildThreadBlockLines(threads, Math.max(1, width - 2));
+      };
+      const heightKey = `${width}:${wrapFlag}:${showThreads ? threadPlacement.version : "-"}`;
       let rowHeights = layout.unifiedRowHeights.get(heightKey);
       if (rowHeights == null) {
-        rowHeights = !this.state.wrapLines ? new Array<number>(displayRows.length).fill(1)
-          : displayRows.map((row) => this.buildUnifiedRowLines(row, width, language, false, false, false, undefined, true).length);
+        rowHeights = displayRows.map((row) => (this.state.wrapLines
+          ? this.buildUnifiedRowLines(row, width, language, false, false, false, undefined, true).length : 1) + threadBlock(row).length);
         layout.unifiedRowHeights.set(heightKey, rowHeights);
       }
       let rowOffsets = layout.unifiedRowOffsets.get(heightKey);
@@ -5303,8 +5513,9 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
+        selectedBlockHeight = threadBlock(displayRows[selectedRowIndex]).length;
         if (this.alignStoryAnchor) this.diffScroll = Math.max(0, selectedIndex - 2);
-        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex - selectedBlockHeight);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       renderedStartOffset = virtualRange.startOffset;
@@ -5322,13 +5533,13 @@ export class ReviewApp {
           && selectedSide === row.commentSide
           && selectedRange.startLine <= row.commentLineNumber
           && row.commentLineNumber <= selectedRange.endLine;
-        const lineComment = row.commentLineNumber != null && row.commentSide != null
-          ? lineComments.get(`${row.commentSide}:${row.commentLineNumber}`)
-          : undefined;
+        const lineKey = row.commentLineNumber != null && row.commentSide != null ? `${row.commentSide}:${row.commentLineNumber}` : undefined;
+        const lineComment = lineKey == null ? undefined : lineComments.get(lineKey);
+        const threaded = lineKey != null && threadMarks?.has(lineKey) === true;
         const isSearchMatch = diffTextMatchesSearch(row.codeText, this.diffSearchQuery);
 
         const renderMode = this.renderingStoryAnchor == null ? "diff" : "story";
-        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${lineComment?.intent ?? "-"}\u001f${renderMode}`;
+        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${getLineIndicatorKey(lineComment, threaded)}\u001f${renderMode}`;
         let memo = rowRenderCache.get(row);
         if (memo == null) {
           memo = new Map();
@@ -5336,14 +5547,17 @@ export class ReviewApp {
         }
         let renderedLines = memo.get(memoKey);
         if (renderedLines == null) {
-          renderedLines = this.buildUnifiedRowLines(row, width, language, isSelected, isCurrentTarget, isSearchMatch, lineComment);
+          renderedLines = this.buildUnifiedRowLines(row, width, language, isSelected, isCurrentTarget, isSearchMatch, lineComment, false, threaded);
           memo.set(memoKey, renderedLines);
         }
 
         if (isCurrentTarget) selectedIndex = virtualRange.offsets[rowIndex] ?? selectedIndex;
         rendered.push(...renderedLines);
         for (let visual = 0; visual < renderedLines.length; visual += 1) renderedMeta.push(row.kind === "gap" ? null : { rowIndex, visual });
-        if (isCurrentTarget) selectedEndIndex = virtualRange.offsets[rowIndex + 1] ?? selectedIndex + renderedLines.length;
+        const block = threadBlock(row);
+        rendered.push(...block.map((line) => padLine(line, Math.max(1, width - 2))));
+        renderedMeta.push(...block.map(() => null));
+        if (isCurrentTarget) selectedEndIndex = virtualRange.offsets[rowIndex + 1] ?? selectedIndex + renderedLines.length + block.length;
       }
     }
 
@@ -5370,7 +5584,7 @@ export class ReviewApp {
       if (editorEnd >= this.diffScroll + maxBody) this.diffScroll = editorEnd - maxBody + 1;
       if (anchorTop < this.diffScroll && editorEnd - anchorTop < maxBody) this.diffScroll = anchorTop;
     } else if (!this.diffWheelScrolling) {
-      this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+      this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex - selectedBlockHeight);
     }
     this.diffScroll = Math.max(0, this.diffScroll);
     const visibleStart = Math.max(0, this.diffScroll - renderedStartOffset);
@@ -5391,6 +5605,7 @@ export class ReviewApp {
         newLeft,
         language,
         lineComments,
+        threadMarks: this.diffViewMode === "side-by-side" ? threadPlacement?.marks : threadPlacement?.unifiedMarks,
         lines: renderedMeta.slice(visibleStart, visibleStart + maxBody),
         scrollable: this.renderingStoryAnchor == null,
       }, visibleLines);
@@ -5598,7 +5813,7 @@ export class ReviewApp {
       ...(this.message ? [this.theme.fg("warning", this.message)] : []),
       this.theme.fg("dim", "Shift+←/→ step · ←/→ pane · [/] related"),
       this.theme.fg("dim", "c comment · d discuss · R seen · s finish"),
-      this.theme.fg("dim", `h comments · i story/files${this.options.contextPanelSource == null ? "" : " · 4 PR context"} · F full diff`),
+      this.theme.fg("dim", `h comments · i story/files${this.options.contextPanelSource == null ? "" : " · 4 PR context"}${this.options.repliesSource == null ? "" : " · I PR threads"} · F full diff`),
     ];
     const bodyHeight = height - header.length - footer.length - 2;
     const stacked = inner < 100;

@@ -152,6 +152,7 @@ Common review controls:
 | `gd` or Ctrl+click | Search for where the double-clicked or Ctrl+clicked symbol is defined. Needs the `search` setting. |
 | `Enter` or `m` | Edit the selected line |
 | `v` | Toggle unified and side-by-side views; from an opened PR thread, jump to its verified code location |
+| `I` | Show or hide open PR threads under the lines they belong to. The lines keep a `○` marker either way. |
 | `s` | Finish the review |
 | `Esc` | Go back or close safely |
 | Replies: `t` / `Enter` / `o` / `A` | Switch personal/all fetched threads; inspect full text; open browser; analyze read-only. PgUp/PgDn and gg/G scroll; Esc returns. |
@@ -166,6 +167,8 @@ The context pane starts with the brief and fetched PR facts. When an optional ge
 Known checks, comments, and reviews appear while slower conversation reads are still pending. Failed or limited sections are labeled unavailable; successfully fetched facts remain visible.
 
 PR context and Replies distinguish missing resolution from an unresolved thread. Replies from deleted or unavailable authors remain visible as `unknown`.
+
+A remote review reads the PR's review threads in the background when it opens, even when PR context and Replies are hidden. A `○` marks each line with an open thread (unresolved, or with unknown resolution) when the thread's anchor matches the reviewed code, and the Navigator shows each file's count, such as `2○`. Press `I` to show or hide the thread text under its line; pi-coder remembers the choice. These threads are read-only. They never join your draft, the Comments pane, the submission, or the agent prompt, and your own feedback marker keeps a shared line. The diff header counts threads it could not place as `N more in Replies`, where `t` lists every fetched thread.
 
 Both panes label incomplete thread reads. An empty partial result means no replies were found in the fetched threads, not that the whole PR conversation is empty.
 

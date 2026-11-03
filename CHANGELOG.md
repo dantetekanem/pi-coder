@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Mark open PR threads on the diff lines they belong to. A remote review reads the threads in the background when it opens, even with PR context and Replies hidden. A `○` marks each line whose thread anchor matches the reviewed code, and the Navigator shows each file's count. Press `I` to show or hide the thread text under its line. The threads are read-only: they never join your draft, the Comments pane, the submission, or the agent prompt.
+- A REST provider can map `commentDiffHunk` to each comment's diff hunk (`diff_hunk` in GitHub-shaped APIs), so a thread written on an older push still finds its line after the code moves. GitHub reviews read it through GraphQL without extra settings.
+
 ## 0.9.6 - 2026-11-02
 
 ### Changed

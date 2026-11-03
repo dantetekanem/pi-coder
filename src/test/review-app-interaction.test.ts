@@ -2283,7 +2283,7 @@ describe("Replies pane", () => {
     app.dispose();
   });
 
-  it("loads only while visible and renders sanitized reply details", async () => {
+  it("reads replies once in the background and renders sanitized reply details when shown", async () => {
     const load = vi.fn(async () => makeRepliesSnapshot(1, {
       author: "reviewer\x1b[31m",
       body: "Please revisit\x07 this line.",
@@ -2297,12 +2297,11 @@ describe("Replies pane", () => {
 
     app.handleInput("5");
     app.render(200);
-    expect(load).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
+    expect(load).toHaveBeenCalledTimes(1);
 
     app.handleInput("5");
     expect(load).toHaveBeenCalledTimes(1);
-    expect(app.render(200).join("\n")).toContain("Loading replies");
-    await vi.waitFor(() => expect((app as any).repliesPanelState.status).toBe("ready"));
 
     const rendered = app.render(200).join("\n");
     expect(rendered).toContain("reviewer\\x1b[31m");

@@ -42,6 +42,7 @@
     "src/review-order.ts",
     "src/review-receipts.ts",
     "src/review-replies.ts",
+    "src/review-threads.ts",
     "src/review-session.ts",
     "src/review-session-persistence.ts",
     "src/review-composition.ts",

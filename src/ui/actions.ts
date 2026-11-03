@@ -55,6 +55,7 @@ export const REVIEW_ACTIONS: ReviewActionDefinition[] = [
   { id: "delete", section: "Diff actions", keys: "x", label: "delete comment", inputs: ["x"] },
   { id: "fileComment", section: "Diff actions", keys: "l", label: "file comment", inputs: ["l"] },
   { id: "allLines", section: "Diff actions", keys: "a", label: "all-lines comment", inputs: ["a"] },
+  { id: "prThreads", section: "Diff actions", keys: "I", label: "show/hide open PR threads under their lines (○ marks them)", inputs: ["I"] },
   { id: "commentMove", section: "Comments", keys: "↑↓/j/k", label: "move comments" },
   { id: "commentEdit", section: "Comments", keys: "e/Enter", label: "edit selected comment" },
   { id: "commentDelete", section: "Comments", keys: "d/r", label: "delete selected comment", inputs: ["d", "r"] },
