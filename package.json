@@ -1,6 +1,6 @@
 {
   "name": "pi-coder",
-  "version": "0.9.8",
+  "version": "1.0.0",
   "packageManager": "pnpm@10.28.0",
   "type": "module",
   "description": "Interactive diff review, diff stories, and code workbench for Pi, any agent harness, or a plain terminal, with annotations, pull-request reviews, and agent handoffs.",
