@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.9.7 - 2026-11-03
+
+### Changed
+
+- Require matching Pi AI, coding-agent, and TUI releases at 0.79.10 or newer, with Node.js 22.19.0 or newer. The lockfile tests that minimum; newer hosts still need their own compatibility checks.
+
+### Security
+
+- Upgrade development tooling to Vitest 4.1.12 and Vite 7.3.7, removing the vulnerable mocker and Tinypool dependency paths.
+- Refresh the locked Pi packages to 0.79.10 and compatible protobufjs, zod, and brace-expansion resolutions. Known upstream advisories remain; this does not update an installed Pi host or sandbox extensions.
 
 ### Fixed
 
