@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Show each line of a multi-line review comment on its own row in the Comments and Replies panes, instead of printing the line break as `\x0a`. A preview that stops early ends its last shown line with `…`.
+- Ctrl+J adds a line break in the comment, modify, and thread response editors, like Shift+Enter. A plain line feed now adds a line break instead of saving a comment or closing a response editor.
+
 ## 0.9.6 - 2026-11-02
 
 ### Changed
