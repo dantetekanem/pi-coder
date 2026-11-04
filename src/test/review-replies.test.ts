@@ -282,6 +282,7 @@ describe("review replies", () => {
     for (const [, args] of exec.mock.calls) {
       expect(args.join(" ")).toContain("diffSide");
       expect(args.join(" ")).toContain("pullRequest { headRefOid baseRefOid }");
+      expect(args.join(" ")).toContain("firstComment: comments(first: 1) { nodes { diffHunk } }");
     }
     expect(fetched.comments.map((comment) => comment.id)).toEqual([...comments.map((comment) => comment.id), "100"]);
     expect(fetched.comments.at(-1)).toMatchObject({ authorUnknown: true, body: anonymous.body });
@@ -330,6 +331,32 @@ describe("review replies", () => {
       side: id === "github" ? "added" : "deleted", headRevision: (id === "github" ? "a" : "b").repeat(40) });
     expect(thread.baseRevision).toBeUndefined();
     expect(groupFlatReviewComments([{ ...row, side: "invalid", edge: "invalid" }], configured)[0]?.side).toBeUndefined();
+  });
+
+  it("keeps each thread's range, original line, outdated state, and hunk text", () => {
+    const configured = structuredClone(requireProviderSettings("github"));
+    configured.fields = { ...configured.fields, commentOutdated: ["outdated"], commentDiffHunk: ["diff_hunk"] };
+    const hunk = "@@ -10,3 +10,4 @@ class Cart\n context above\n-old line\n+new line one\n+new line two";
+    const rest = groupFlatReviewComments([
+      { id: 1, body: "Question", user: { login: "reviewer" }, path: "src/app.ts", line: 12, start_line: 11, original_line: 14,
+        side: "RIGHT", outdated: true, diff_hunk: hunk },
+      { id: 2, in_reply_to_id: 1, body: "Reply", user: { login: "author" }, path: "src/app.ts", line: 12, side: "RIGHT", outdated: false, diff_hunk: "@@ other" },
+    ], configured);
+    expect(rest).toEqual([expect.objectContaining({ id: "1", line: 12, startLine: 11, originalLine: 14, outdated: true, side: "added",
+      anchorText: ["context above", "new line one", "new line two"] })]);
+    expect(rest[0]?.comments.map((comment) => comment.id)).toEqual(["1", "2"]);
+
+    const plain = groupFlatReviewComments([{ id: 3, body: "Note", user: { login: "reviewer" }, path: "src/app.ts", line: 4, side: "RIGHT" }], configured)[0]!;
+    expect(plain).not.toHaveProperty("anchorText");
+    expect(plain).not.toHaveProperty("outdated");
+    expect(plain).not.toHaveProperty("startLine");
+
+    const graphql = parseGraphqlReplyThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: [{
+      id: "thread", isResolved: false, isOutdated: false, diffSide: "LEFT", path: "src/app.ts", line: 5, startLine: 4, originalLine: 7,
+      firstComment: { nodes: [{ diffHunk: "@@ -1,5 +1,4 @@\n keep\n-removed one\n-removed two" }] },
+      comments: { nodes: [{ databaseId: 1, author: { login: "reviewer" }, body: "Why?" }] },
+    }] } } } } });
+    expect(graphql[0]).toMatchObject({ side: "deleted", line: 5, startLine: 4, originalLine: 7, anchorText: ["keep", "removed one", "removed two"] });
   });
 
   it("groups configured flat comment fields when thread queries are disabled", async () => {

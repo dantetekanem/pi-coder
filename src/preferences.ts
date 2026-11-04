@@ -28,6 +28,7 @@ export interface ReviewPreferences {
   navigatorFileOrder: PersistedNavigatorFileOrder;
   contextLineNavigation: boolean;
   commentsGlobal: boolean;
+  showPullRequestThreads: boolean;
   paneVisibility: ReviewPaneVisibility;
   lastReviewVerdict: PersistedReviewVerdict | null;
   storyAgent: ReviewAgentSelection;
@@ -49,6 +50,7 @@ export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
   navigatorFileOrder: "risk",
   contextLineNavigation: false,
   commentsGlobal: false,
+  showPullRequestThreads: false,
   paneVisibility: DEFAULT_REVIEW_PANE_VISIBILITY,
   lastReviewVerdict: null,
   storyAgent: DEFAULT_STORY_AGENT,
@@ -118,6 +120,7 @@ export function loadReviewPreferences(): ReviewPreferences {
       lastReviewVerdict: isPersistedReviewVerdict(record.lastReviewVerdict) ? record.lastReviewVerdict : DEFAULT_REVIEW_PREFERENCES.lastReviewVerdict,
       contextLineNavigation: typeof record.contextLineNavigation === "boolean" ? record.contextLineNavigation : DEFAULT_REVIEW_PREFERENCES.contextLineNavigation,
       commentsGlobal: typeof record.commentsGlobal === "boolean" ? record.commentsGlobal : DEFAULT_REVIEW_PREFERENCES.commentsGlobal,
+      showPullRequestThreads: typeof record.showPullRequestThreads === "boolean" ? record.showPullRequestThreads : DEFAULT_REVIEW_PREFERENCES.showPullRequestThreads,
       paneVisibility: loadPaneVisibility(record.paneVisibility),
       storyAgent: isReviewAgentSelection(record.storyAgent) ? record.storyAgent : { ...DEFAULT_STORY_AGENT },
     };
