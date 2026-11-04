@@ -4,7 +4,7 @@
 
 ### Added
 
-- Configure how a pull request review fetches from a provider with an optional `fetch` block in its settings. `progress` passes `--progress` to `git fetch`, `timeoutSeconds` limits each attempt, and `retry` fetches again after a doubling delay when the git error contains a listed text, such as a busy server's request to retry later. Without the block, a review fetches once within 60 seconds, as before.
+- Configure how a pull request review fetches from a provider with an optional `fetch` block in its settings. `progress` passes `--progress` to `git fetch`, `timeoutSeconds` limits each attempt, and `retry` fetches again after a doubling delay when the git error contains a listed text, such as a busy server's request to retry later. Without the block, each fetch sequence makes one quiet attempt with a 60-second timeout, as before. An existing fallback can start a separate sequence.
 
 ### Fixed
 
