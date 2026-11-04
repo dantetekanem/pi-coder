@@ -202,6 +202,30 @@ export function pairStoryTests(units: StoryUnit[]): Map<string, string> {
   return pairs;
 }
 
+/** The most anchored lines of one test file that a single step shows. */
+export const STORY_TEST_FILE_LINES = 30;
+
+function anchoredLines(unit: StoryUnit): number {
+  return unit.anchors.reduce((total, anchor) => total + anchor.endLine - anchor.startLine + 1, 0);
+}
+
+/** Splits tests in source order into chunks of whole units. A unit that would push its file past the limit starts a new chunk; one unit over the limit still gets a chunk. */
+export function splitStoryTests(tests: readonly StoryUnit[], maxLines: number): StoryUnit[][] {
+  const chunks: StoryUnit[][] = [[]];
+  let used = new Map<string, number>();
+  for (const test of tests) {
+    const lines = anchoredLines(test);
+    const inFile = used.get(test.path) ?? 0;
+    if (inFile > 0 && inFile + lines > maxLines) {
+      chunks.push([]);
+      used = new Map();
+    }
+    chunks.at(-1)!.push(test);
+    used.set(test.path, (used.get(test.path) ?? 0) + lines);
+  }
+  return chunks;
+}
+
 function rangeGap(left: Omit<StoryAnchor, "hash">, right: Omit<StoryAnchor, "hash">): number {
   if (left.side !== right.side) return Infinity;
   return Math.max(0, left.startLine - right.endLine, right.startLine - left.endLine);

@@ -12,12 +12,20 @@ const result = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], {
 }))[0];
 const packed = new Set(result.files.map((file) => file.path));
 const required = [
+  "bin/pi-coder.mjs",
   "src/index.ts",
+  "src/engine.ts",
+  "src/cli/main.ts",
+  "src/cli/launch.ts",
+  "src/cli/mcp.ts",
   "docs/access.md",
+  "docs/cli.md",
+  "docs/harnesses.md",
   "docs/remote-providers.md",
   "docs/workbench.md",
   "prompts/diff-story.md",
   "skills/diff-story/SKILL.md",
+  "skills/pi-coder/SKILL.md",
   "LICENSE",
   "README.md",
 ];

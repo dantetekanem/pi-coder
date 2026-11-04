@@ -53,6 +53,12 @@ describe("Pi code coordinator", () => {
     expect(() => parseDirectCodeArgs(args)).toThrow();
   });
 
+  it("names the code command in argument errors", () => {
+    expect(() => parseDirectCodeArgs("--wat value")).toThrow("Invalid /code arguments: unknown option --wat.");
+    expect(() => parseDirectCodeArgs("--wat value", "pi-coder code")).toThrow("Invalid pi-coder code arguments: unknown option --wat.");
+    expect(() => parseDirectCodeArgs("--path 'open", "pi-coder code")).toThrow("Invalid pi-coder code arguments: unterminated single quote.");
+  });
+
   it("shares one process guard, rejects overlap, and releases after success and failure", async () => {
     let finish!: (result: WorkbenchCompletionResult) => void;
     const firstRunner = vi.fn(() => new Promise<WorkbenchCompletionResult>((resolve) => { finish = resolve; }));

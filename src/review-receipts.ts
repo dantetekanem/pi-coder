@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 import { getProviderSettings } from "./provider-settings.js";
 import type { PullRequestProvider } from "./remote.js";
 import { sanitizeTerminalText } from "./sanitize.js";

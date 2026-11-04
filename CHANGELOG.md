@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Run pi-coder without Pi. The `pi-coder` command opens the same review, diff story, and code workbench in any terminal: `pi-coder diff`, `pi-coder story`, and `pi-coder code` take the same targets as `/diff`, `/diff-story`, and `/code`. It shares settings, drafts, and submissions with the Pi extension, so a review parked in one resumes in the other.
+- Hand feedback to any agent. When a review ends, the command prints the text Pi gives its agent: review feedback, DISCUSS notes, or a code discussion. `--json` prints one result object with the prompt, the tool details, follow-up messages, and notices.
+- `pi-coder tool <name>` runs `open_code`, `open_code_diff`, `open_code_diff_story`, and `submit_pr_review` with the same JSON input and result as the Pi tools, so agents in other harnesses can reopen a discussed review and submit a confirmed one.
+- Open the screen from an agent's shell. Without a terminal, pi-coder opens a new Herdr or tmux pane (or a configured terminal command), waits for the user, closes the pane, and prints the result. `--detach` returns a launch id, and `pi-coder wait <id>` collects the result later.
+- `pi-coder mcp` serves the four tools over MCP, plus `pi_coder_wait`, for Claude Code, Codex, and other MCP clients.
+- Configure model commands for the grammar pass, the story agent, and reply analysis outside Pi with `models` in `pi-coder-settings.json`. Without one, pi-coder runs `pi -p` when Pi is installed.
+- A `pi-coder` skill tells agents in other harnesses how to open reviews, read feedback, continue a discussion, and submit a review.
+- `Ctrl+?` opens a popup with every shortcut, in the review and in the diff story. `?` and `Ctrl+/` also open it, for terminals that send `Ctrl+?` as Backspace.
+- In a diff story, `Option+Up/Down` scrolls the other pane without moving focus, `Option+PgUp/PgDn` pages it, and `Option+Shift+Up/Down` or `Option+Home/End` jump it to its top or bottom. `Home`/`End` jump the focused pane, in the review too.
+- In a diff story, `i` opens the story info in a popup: the step, the pull request, totals, captured files, and every step.
+
+### Changed
+
+- The diff story is task-first: each step puts the changed tests on the left and the code they exercise on the right, and the code pane has focus when the story opens, when it resumes, and on every new step. When a step's tests in one file pass 30 changed lines, they split across steps that repeat the same code. Saved stories keep their steps.
+- The story header shows only the step title and its number. The review and the story footers are one line: `Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)`, plus `i (Info)` in the story. The hint line inside the diff pane is gone.
+- In a diff story, `Option` no longer moves the cursor onto unchanged lines; `C` still lets the arrows reach them. `Shift+Tab` now cycles the story panes backward, and `t` templates open only in the full diff.
+- The story agent starts as `anthropic/claude-opus-5-5` with `low` thinking, instead of `openai-codex/gpt-5.6-luna` with `max`. A saved selection is kept.
+- The Pi coding agent and Pi AI packages are optional peers. pi-coder uses them only inside Pi; Pi TUI is now a regular dependency.
+
 ## 0.9.8 - 2026-11-04
 
 ### Added

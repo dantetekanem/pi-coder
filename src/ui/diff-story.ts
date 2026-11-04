@@ -1,13 +1,12 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createStorySnapshot, validateSavedDiffStory, type DiffStory, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
 import { createStoryAgentGenerator } from "../diff-story/agent.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
 import { generateDiffStory, type DiffStoryGenerate } from "../diff-story/generate.js";
 import type { StorySessionData } from "../diff-story/navigation.js";
+import type { HostContext } from "../host/types.js";
 import { filterReviewFilesByLocale } from "../locale-files.js";
 import { loadReviewPreferences, saveReviewPreference } from "../preferences.js";
-import { validateReviewAgent } from "../review-agent.js";
 import { sanitizeTerminalText } from "../sanitize.js";
 import { getReviewFileDisplayPath, type ReviewFile, type ReviewFileContents, type ReviewScope } from "../types.js";
 import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
@@ -21,36 +20,40 @@ export interface PreparedDiffStory {
   snapshot: StorySnapshot;
 }
 
-export async function selectStoryAgent(ctx: ExtensionContext): Promise<void> {
-  const models = ctx.modelRegistry.getAvailable();
-  const labels = models.map((model) => `${model.provider}/${model.id}`);
-  const selected = await ctx.ui.select("Story agent (independent of this conversation)", labels);
-  const model = selected == null ? undefined : models[labels.indexOf(selected)];
-  if (model == null) return;
+type StoryContext = Pick<HostContext, "ui" | "models">;
 
-  const levels = Object.entries(model.thinkingLevelMap ?? {})
-    .filter(([, value]) => value != null)
-    .map(([level]) => level);
-  if (levels.length === 0) {
-    ctx.ui.notify("This model does not advertise exact thinking levels.", "warning");
-    return;
+export async function selectStoryAgent(ctx: StoryContext): Promise<boolean> {
+  const agents = ctx.models.storyAgents();
+  if (agents.length === 0) {
+    ctx.ui.notify("No story models to choose from. In Pi, sign in to a model provider. Outside Pi, set models.story.command in pi-coder-settings.json; it can use {provider}, {model}, and {thinking}.", "warning");
+    return false;
   }
-  const thinking = await ctx.ui.select("Story thinking level (no automatic downgrade)", levels);
-  if (thinking == null) return;
+  const labels = agents.map((agent) => agent.label);
+  const selected = await ctx.ui.select("Story agent (independent of this conversation)", labels);
+  const agent = selected == null ? undefined : agents[labels.indexOf(selected)];
+  if (agent == null) return false;
 
-  const selection = { provider: model.provider, model: model.id, thinking };
-  validateReviewAgent(ctx, selection);
+  if (agent.thinkingLevels.length === 0) {
+    ctx.ui.notify("This model does not advertise exact thinking levels.", "warning");
+    return false;
+  }
+  const thinking = await ctx.ui.select("Story thinking level (no automatic downgrade)", agent.thinkingLevels);
+  if (thinking == null) return false;
+
+  const selection = { provider: agent.provider, model: agent.model, thinking };
+  ctx.models.validateStoryAgent(selection);
   saveReviewPreference({ storyAgent: selection });
   const saved = loadReviewPreferences().storyAgent;
   if (saved.provider !== selection.provider || saved.model !== selection.model || saved.thinking !== selection.thinking) {
     ctx.ui.notify("Could not save the story agent. The previous model selection is still in use.", "error");
-    return;
+    return false;
   }
   ctx.ui.notify(`Story agent: ${selected} · ${thinking}`, "info");
+  return true;
 }
 
 export function prepareDiffStory(
-  ctx: ExtensionContext,
+  ctx: StoryContext,
   files: ReviewFile[],
   scope: ReviewScope,
   load: (file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>,
@@ -101,7 +104,7 @@ export function prepareDiffStory(
       timer = animate();
       let acceptingOutput = true;
       try {
-        const generator = generate ?? createStoryAgentGenerator(ctx, selection, (activity: StoryAgentActivity) => {
+        const generator = generate ?? createStoryAgentGenerator(ctx.models, selection, (activity: StoryAgentActivity) => {
           if (settled || !acceptingOutput) return;
           carousel.addActivity(activity);
           tui.requestRender();

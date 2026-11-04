@@ -7,8 +7,10 @@ export type PiWorkbenchOrigin = "direct-code" | "open-code" | "review-bridge";
 
 let activeOrigin: PiWorkbenchOrigin | null = null;
 
+class CodeArgumentError extends Error {}
+
 function argumentError(message: string): never {
-  throw new Error(`Invalid /code arguments: ${message}`);
+  throw new CodeArgumentError(message);
 }
 
 export function tokenizeCodeArgs(input: string): string[] {
@@ -70,7 +72,16 @@ function parseStory(value: string): CodeStory {
   return parsed as CodeStory;
 }
 
-export function parseDirectCodeArgs(args: string): WorkbenchLaunch {
+export function parseDirectCodeArgs(args: string, command = "/code"): WorkbenchLaunch {
+  try {
+    return parseCodeArguments(args);
+  } catch (error) {
+    if (error instanceof CodeArgumentError) throw new Error(`Invalid ${command} arguments: ${error.message}`);
+    throw error;
+  }
+}
+
+function parseCodeArguments(args: string): WorkbenchLaunch {
   const tokens = tokenizeCodeArgs(args);
   if (tokens.length === 1 && !tokens[0]!.startsWith("--")) {
     return normalizeWorkbenchLaunch({

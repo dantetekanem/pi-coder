@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parsePiCoderSettings, requireProviderSettings } from "../provider-settings.js";
 import { createConversationRead } from "../conversation.js";
+import { createPiModelGateway } from "../pi/models.js";
 import {
   analyzeReviewReply,
   buildReplyAnalysisPrompt,
@@ -448,7 +449,7 @@ describe("review replies", () => {
       expect(args).toEqual(expect.arrayContaining(["--no-tools", "--no-extensions", "--no-session", "-p"]));
       return { code: 0, stdout: "Asks:\nClarification.\u001b[31m", stderr: "", killed: false };
     });
-    const result = await analyzeReviewReply({ exec } as never, {} as never, target("primary") as never, reply);
+    const result = await analyzeReviewReply(createPiModelGateway({ exec } as never, {} as never), target("primary") as never, reply);
 
     expect(result).toContain("Asks:\nClarification.");
     expect(result).not.toContain("\u001b");

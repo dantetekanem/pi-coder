@@ -1,6 +1,6 @@
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner } from "./host/types.js";
 import { isReviewableFilePath, type ReviewPathPolicy } from "./path-policy.js";
 import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope, ReviewSubmoduleByScope, ReviewSubmoduleInfo } from "./types.js";
 
@@ -69,7 +69,7 @@ interface ReviewFileSeed {
   submodule?: ReviewSubmoduleByScope;
 }
 
-async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
+async function runGit(pi: CommandRunner, repoRoot: string, args: string[]): Promise<string> {
   const result = await pi.exec("git", args, { cwd: repoRoot, timeout: LOCAL_GIT_TIMEOUT_MS });
   if (result.code !== 0) {
     const message = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`;
@@ -78,13 +78,13 @@ async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promi
   return result.stdout;
 }
 
-async function runGitAllowFailure(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
+async function runGitAllowFailure(pi: CommandRunner, repoRoot: string, args: string[]): Promise<string> {
   const result = await pi.exec("git", args, { cwd: repoRoot, timeout: LOCAL_GIT_TIMEOUT_MS });
   if (result.code !== 0) return "";
   return result.stdout;
 }
 
-export async function getRepoRoot(pi: ExtensionAPI, cwd: string): Promise<string> {
+export async function getRepoRoot(pi: CommandRunner, cwd: string): Promise<string> {
   const result = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: LOCAL_GIT_TIMEOUT_MS });
   if (result.code !== 0) {
     throw new Error("Not inside a git repository.");
@@ -92,7 +92,7 @@ export async function getRepoRoot(pi: ExtensionAPI, cwd: string): Promise<string
   return result.stdout.trim();
 }
 
-async function hasHead(pi: ExtensionAPI, repoRoot: string): Promise<boolean> {
+async function hasHead(pi: CommandRunner, repoRoot: string): Promise<boolean> {
   const result = await pi.exec("git", ["rev-parse", "--verify", "HEAD"], { cwd: repoRoot, timeout: LOCAL_GIT_TIMEOUT_MS });
   return result.code === 0;
 }
@@ -397,7 +397,7 @@ interface LoadedReviewContent {
   available: boolean;
 }
 
-async function getRevisionContentResult(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<LoadedReviewContent> {
+async function getRevisionContentResult(pi: CommandRunner, repoRoot: string, revision: string, path: string): Promise<LoadedReviewContent> {
   const objectSpec = `${revision}:${path}`;
   const sizeResult = await pi.exec("git", ["cat-file", "-s", objectSpec], { cwd: repoRoot });
   if (sizeResult.code === 0) {
@@ -410,7 +410,7 @@ async function getRevisionContentResult(pi: ExtensionAPI, repoRoot: string, revi
   return { content: result.stdout, available: true };
 }
 
-async function getRevisionContent(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<string> {
+async function getRevisionContent(pi: CommandRunner, repoRoot: string, revision: string, path: string): Promise<string> {
   return (await getRevisionContentResult(pi, repoRoot, revision, path)).content;
 }
 
@@ -465,7 +465,7 @@ function rawDiffMap(changes: RawDiffChange[]): Map<string, RawDiffChange> {
   return new Map(changes.map((change) => [normalizeGitPath(getChangeKey(change)), change]));
 }
 
-async function getNestedRepoRoot(pi: ExtensionAPI, parentRepoRoot: string, submodulePath: string): Promise<{ repoRoot: string } | { unavailableReason: string }> {
+async function getNestedRepoRoot(pi: CommandRunner, parentRepoRoot: string, submodulePath: string): Promise<{ repoRoot: string } | { unavailableReason: string }> {
   const result = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: join(parentRepoRoot, submodulePath) });
   if (result.code !== 0) return { unavailableReason: "submodule is not initialized locally" };
   const repoRoot = result.stdout.trim();
@@ -484,7 +484,7 @@ function buildSubmoduleInfo(repoRoot: string | null, raw: RawDiffChange, unavail
   };
 }
 
-async function resolveSubmoduleInfo(pi: ExtensionAPI, repoRoot: string, raw: RawDiffChange): Promise<ReviewSubmoduleInfo> {
+async function resolveSubmoduleInfo(pi: CommandRunner, repoRoot: string, raw: RawDiffChange): Promise<ReviewSubmoduleInfo> {
   const submodulePath = raw.newPath ?? raw.oldPath;
   if (submodulePath == null || raw.newPath == null) return buildSubmoduleInfo(null, raw, "submodule is not available in the working tree");
   const nested = await getNestedRepoRoot(pi, repoRoot, submodulePath);
@@ -633,7 +633,7 @@ function createSeed(path: string, hasWorkingTreeFile: boolean): ReviewFileSeed {
   };
 }
 
-async function getFirstExistingRef(pi: ExtensionAPI, repoRoot: string, refs: string[]): Promise<string | null> {
+async function getFirstExistingRef(pi: CommandRunner, repoRoot: string, refs: string[]): Promise<string | null> {
   for (const ref of refs) {
     const result = await pi.exec("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: repoRoot });
     if (result.code === 0) return ref;
@@ -641,7 +641,7 @@ async function getFirstExistingRef(pi: ExtensionAPI, repoRoot: string, refs: str
   return null;
 }
 
-export async function getDefaultBranchRef(pi: ExtensionAPI, repoRoot: string): Promise<string | null> {
+export async function getDefaultBranchRef(pi: CommandRunner, repoRoot: string): Promise<string | null> {
   const originHead = (await runGitAllowFailure(pi, repoRoot, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])).trim();
   if (originHead.length > 0 && originHead !== "origin/HEAD") return originHead;
 
@@ -680,13 +680,13 @@ export function selectClosestAncestorBranch(candidates: AncestorBranchCandidate[
   return sorted[0]?.name ?? null;
 }
 
-async function getCurrentBranchName(pi: ExtensionAPI, repoRoot: string): Promise<string | null> {
+async function getCurrentBranchName(pi: CommandRunner, repoRoot: string): Promise<string | null> {
   const result = await pi.exec("git", ["branch", "--show-current"], { cwd: repoRoot });
   if (result.code !== 0) return null;
   return result.stdout.trim() || null;
 }
 
-async function getClosestAncestorBranchRef(pi: ExtensionAPI, repoRoot: string, currentBranch: string | null): Promise<string | null> {
+async function getClosestAncestorBranchRef(pi: CommandRunner, repoRoot: string, currentBranch: string | null): Promise<string | null> {
   if (currentBranch == null) return null;
 
   const branchRefsOutput = await runGitAllowFailure(pi, repoRoot, ["for-each-ref", "--format=%(refname:short)%09%(objectname)", "refs/heads"]);
@@ -708,14 +708,14 @@ async function getClosestAncestorBranchRef(pi: ExtensionAPI, repoRoot: string, c
   return selectClosestAncestorBranch(candidates);
 }
 
-export async function getBranchBaseRef(pi: ExtensionAPI, repoRoot: string): Promise<string | null> {
+export async function getBranchBaseRef(pi: CommandRunner, repoRoot: string): Promise<string | null> {
   const currentBranch = await getCurrentBranchName(pi, repoRoot);
   const closestAncestorBranch = await getClosestAncestorBranchRef(pi, repoRoot, currentBranch);
   if (closestAncestorBranch != null) return closestAncestorBranch;
   return getDefaultBranchRef(pi, repoRoot);
 }
 
-export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options: ReviewWindowOptions = {}): Promise<ReviewWindowData> {
+export async function getReviewWindowData(pi: CommandRunner, cwd: string, options: ReviewWindowOptions = {}): Promise<ReviewWindowData> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const requestedWorkspace = options.workspacePath == null ? inferWorkspacePath(repoRoot, cwd) : normalizeGitPath(options.workspacePath);
   const workspacePath = options.wholeRepo || requestedWorkspace?.startsWith("../") ? undefined : requestedWorkspace;
@@ -775,7 +775,7 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options
   return { repoRoot, files, branchBaseRevision: null, scope: "git-diff", workspacePath };
 }
 
-export async function getReviewWindowDataForRevisionRange(pi: ExtensionAPI, cwd: string, branchBaseRevision: string, modifiedRevision: string, options: RevisionRangeOptions = {}): Promise<ReviewWindowData> {
+export async function getReviewWindowDataForRevisionRange(pi: CommandRunner, cwd: string, branchBaseRevision: string, modifiedRevision: string, options: RevisionRangeOptions = {}): Promise<ReviewWindowData> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const resolvedBaseRevision = options.mergeBase
     ? (await runGit(pi, repoRoot, ["merge-base", branchBaseRevision, modifiedRevision])).trim()
@@ -839,7 +839,7 @@ export async function getReviewWindowDataForRevisionRange(pi: ExtensionAPI, cwd:
   };
 }
 
-export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope, branchBaseRevision?: string | null, modifiedRevision = "HEAD"): Promise<ReviewFileContents> {
+export async function loadReviewFileContents(pi: CommandRunner, repoRoot: string, file: ReviewFile, scope: ReviewScope, branchBaseRevision?: string | null, modifiedRevision = "HEAD"): Promise<ReviewFileContents> {
   const comparison = scope === "git-diff" ? file.gitDiff : scope === "all-files" ? file.allFiles : null;
   const unavailable: LoadedReviewContent = { content: "", available: false };
 

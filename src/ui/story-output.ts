@@ -1,10 +1,10 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
+import type { HostTheme } from "../host/types.js";
 import { sanitizeTerminalMultilineText } from "../sanitize.js";
 
 const OPACITY = [0.2, 0.4, 0.6, 0.8, 1];
-type OutputTheme = Pick<Theme, "fg"> & Partial<Pick<Theme, "getFgAnsi" | "getBgAnsi">>;
+type OutputTheme = Pick<HostTheme, "fg"> & Partial<Pick<HostTheme, "getFgAnsi" | "getBgAnsi">>;
 
 interface ActivityEntry {
   key: string;

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 import { getShortcutConfigPath } from "./shortcuts.js";
 import { DEFAULT_STORY_AGENT, type ReviewAgentSelection } from "./review-agent.js";
 import { DEFAULT_SHIKI_THEME } from "./workbench/node/shiki.js";

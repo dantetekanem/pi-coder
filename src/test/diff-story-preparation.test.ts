@@ -6,6 +6,7 @@ vi.mock("../diff-story/agent.js", () => storyAgent);
 
 import { prepareDiffStory, selectStoryAgent } from "../ui/diff-story.js";
 import * as preferences from "../preferences.js";
+import { createPiModelGateway } from "../pi/models.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
 import { createStorySnapshot, validateDiffStory } from "../diff-story/plan.js";
 import { restoreStoryNavigation } from "../diff-story/navigation.js";
@@ -74,14 +75,46 @@ describe("story agent selection", () => {
     vi.spyOn(preferences, "saveReviewPreference").mockImplementation(() => {});
     vi.spyOn(preferences, "loadReviewPreferences").mockReturnValue(preferences.DEFAULT_REVIEW_PREFERENCES);
     const ctx = {
-      modelRegistry: { getAvailable: () => [model], find: () => model },
+      models: createPiModelGateway({} as never, { modelRegistry: { getAvailable: () => [model], find: () => model } } as never),
       ui: { select: vi.fn().mockResolvedValueOnce(`${model.provider}/${model.id}`).mockResolvedValueOnce("high"), notify: vi.fn() },
     };
 
-    await selectStoryAgent(ctx as never);
+    await expect(selectStoryAgent(ctx as never)).resolves.toBe(false);
 
     expect(ctx.ui.notify).toHaveBeenCalledOnce();
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/could not save/i), "error");
+  });
+
+  it("saves the chosen model and thinking level", async () => {
+    const model = { provider: "anthropic", id: "claude-opus-5-5", thinkingLevelMap: { low: "low", off: null } };
+    const save = vi.spyOn(preferences, "saveReviewPreference").mockImplementation(() => {});
+    vi.spyOn(preferences, "loadReviewPreferences").mockReturnValue({ ...preferences.DEFAULT_REVIEW_PREFERENCES, storyAgent: { provider: "anthropic", model: "claude-opus-5-5", thinking: "low" } });
+    const select = vi.fn().mockResolvedValueOnce("anthropic/claude-opus-5-5").mockResolvedValueOnce("low");
+    const ctx = {
+      models: createPiModelGateway({} as never, { modelRegistry: { getAvailable: () => [model], find: () => model } } as never),
+      ui: { select, notify: vi.fn() },
+    };
+
+    await expect(selectStoryAgent(ctx as never)).resolves.toBe(true);
+
+    expect(select).toHaveBeenLastCalledWith(expect.any(String), ["low"]);
+    expect(save).toHaveBeenCalledWith({ storyAgent: { provider: "anthropic", model: "claude-opus-5-5", thinking: "low" } });
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Story agent: anthropic/claude-opus-5-5 \u00b7 low", "info");
+  });
+
+  it("tells the user how to configure story models when the host lists none", async () => {
+    const ctx = {
+      models: { storyAgents: () => [] },
+      ui: { select: vi.fn(), notify: vi.fn() },
+    };
+
+    await expect(selectStoryAgent(ctx as never)).resolves.toBe(false);
+
+    expect(ctx.ui.select).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledExactlyOnceWith(
+      "No story models to choose from. In Pi, sign in to a model provider. Outside Pi, set models.story.command in pi-coder-settings.json; it can use {provider}, {model}, and {thinking}.",
+      "warning",
+    );
   });
 });
 

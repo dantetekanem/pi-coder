@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { generateDiffStory } from "../diff-story/generate.js";
-import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, type StoryFile } from "../diff-story/plan.js";
+import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, validateSavedDiffStory, type StoryFile } from "../diff-story/plan.js";
 import { restoreStoryNavigation, storyAnchors, storyPages } from "../diff-story/navigation.js";
-import { prepareStoryUnits } from "../diff-story/units.js";
+import { prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "../diff-story/units.js";
 
 function file(path: string, before: string, after: string): StoryFile {
   return {
@@ -272,6 +272,96 @@ end
     )).toBe(false);
     expect(uncoveredStoryChanges(completed, captured)).toEqual([]);
     expect(completeDiffStory(completed, captured)).toEqual(completed);
+  });
+
+  describe("task-sized steps", () => {
+    const unitOf = (id: string, path: string, lines: number): StoryUnit => ({
+      id, path, symbol: id, test: true, code: "",
+      anchors: [{ fileId: path, side: "added", startLine: 1, endLine: lines }],
+    });
+    const cases = (count: number, prefix = "case") => Array.from({ length: count }, (_, index) =>
+      `it('${prefix} ${index}', () => {\n${Array.from({ length: 10 }, (_, line) => `  expect(charge(${line})).toBe(${line});`).join("\n")}\n});\n`).join("");
+    const billing = "export function charge(amount: number) {\n  return amount;\n}\n";
+    const arranged = (files: StoryFile[]) => {
+      const captured = createStorySnapshot(files);
+      return generateDiffStory(captured, async () => '{"order":[],"pairs":[]}', new AbortController().signal, () => {}).then((story) => ({ captured, story }));
+    };
+    const places = (anchors: ReadonlyArray<{ fileId: string; side: string; startLine: number; endLine: number }>) =>
+      anchors.map((anchor) => `${anchor.fileId}:${anchor.side}:${anchor.startLine}-${anchor.endLine}`);
+
+    it("splits whole tests greedily in source order, per file", () => {
+      expect(STORY_TEST_FILE_LINES).toBe(30);
+      expect(splitStoryTests([], 30)).toEqual([[]]);
+      const long = unitOf("a", "a.test.ts", 45);
+      expect(splitStoryTests([long], 30)).toEqual([[long]]);
+
+      const a1 = unitOf("a1", "a.test.ts", 15);
+      const a2 = unitOf("a2", "a.test.ts", 15);
+      const a3 = unitOf("a3", "a.test.ts", 1);
+      expect(splitStoryTests([a1, a2], 30)).toEqual([[a1, a2]]);
+      expect(splitStoryTests([a1, a2, a3], 30)).toEqual([[a1, a2], [a3]]);
+
+      const b1 = unitOf("b1", "b.test.ts", 20);
+      const a4 = unitOf("a4", "a.test.ts", 20);
+      const a5 = unitOf("a5", "a.test.ts", 20);
+      expect(splitStoryTests([a4, b1, a5], 30).map((chunk) => chunk.map((unit) => unit.id))).toEqual([["a4", "b1"], ["a5"]]);
+      expect(splitStoryTests([a4, b1, unitOf("b2", "b.test.ts", 9)], 30).map((chunk) => chunk.map((unit) => unit.id))).toEqual([["a4", "b1", "b2"]]);
+    });
+
+    it("splits a long test file into steps that repeat the implementation", async () => {
+      const { captured, story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(3)),
+      ]);
+
+      expect(story.steps.map((step) => step.id)).toEqual(["u1", "u1~2"]);
+      expect(story.steps.map((step) => step.title)).toEqual(["lib/billing.ts \u00b7 charge \u00b7 tests 1/2", "lib/billing.ts \u00b7 charge \u00b7 tests 2/2"]);
+      expect(story.steps[1]!.implementation).toEqual(story.steps[0]!.implementation);
+      expect(story.steps.map((step) => step.tests.length)).toEqual([2, 1]);
+      const [first, second] = story.steps.map((step) => places(step.tests));
+      expect(first!.filter((place) => second!.includes(place))).toEqual([]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+      expect(completeDiffStory(story, captured)).toEqual(story);
+      expect(() => validateSavedDiffStory(JSON.parse(JSON.stringify(story)), captured)).not.toThrow();
+
+      const navigation = restoreStoryNavigation(story);
+      const pages = [0, 1].map((step) => storyPages({ ...navigation, step }, "implementation").map((page) => page.key));
+      expect(pages[1]).toEqual(pages[0]);
+    });
+
+    it("keeps short tests in one step", async () => {
+      const { captured, story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(2)),
+      ]);
+
+      expect(story.steps.map((step) => [step.id, step.title, step.tests.length])).toEqual([["u1", "lib/billing.ts \u00b7 charge", 2]]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+    });
+
+    it("counts each test file on its own and keeps several short files with their change", async () => {
+      const { story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(2)),
+        file("test/billing_refund.test.ts", "", cases(2, "refund")),
+      ]);
+
+      expect(story.steps).toHaveLength(1);
+      expect(story.steps[0]!.tests.map((anchor) => anchor.fileId)).toEqual(["test/billing.test.ts", "test/billing.test.ts", "test/billing_refund.test.ts", "test/billing_refund.test.ts"]);
+    });
+
+    it("splits a long unpaired test file with the same limit", async () => {
+      const { captured, story } = await arranged([file("test/misc.test.ts", "", cases(4))]);
+
+      expect(story.steps.map((step) => [step.id, step.title])).toEqual([
+        ["u1", "test/misc.test.ts \u00b7 case 0 and 1 more \u00b7 tests 1/2"],
+        ["u1~2", "test/misc.test.ts \u00b7 case 2 and 1 more \u00b7 tests 2/2"],
+      ]);
+      expect(story.steps.map((step) => step.tests)).toEqual([[], []]);
+      expect(story.steps.map((step) => step.implementation.length)).toEqual([2, 2]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+      expect(completeDiffStory(story, captured)).toEqual(story);
+    });
   });
 
   it("prepares 4,000 changed lines with complete coverage and a compact response", async () => {

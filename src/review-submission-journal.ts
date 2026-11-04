@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 import { withReviewSessionLock, writeReviewSessionFileAtomic } from "./review-session-persistence.js";
 import type { ReviewSubmissionStep, SubmitReviewInput } from "./review-submit.js";
 

@@ -2,10 +2,19 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRemotePullRequestSources, createRemotePullRequestSummarySource } from "../pr-summary.js";
-import { createRemoteReviewRepliesSource } from "../review-replies.js";
+import { toHostContext } from "../pi/context.js";
+import * as summaries from "../pr-summary.js";
+import * as replies from "../review-replies.js";
 import type { RemoteReviewTarget } from "../remote.js";
 import { requireProviderSettings } from "../provider-settings.js";
+
+const piHost = (pi: never, ctx: object) => toHostContext(pi, ctx as never);
+const createRemotePullRequestSources = (pi: never, ctx: object, target: RemoteReviewTarget | undefined) =>
+  summaries.createRemotePullRequestSources(pi, piHost(pi, ctx), target);
+const createRemotePullRequestSummarySource = (pi: never, ctx: object, target: RemoteReviewTarget | undefined, reader?: Parameters<typeof summaries.createRemotePullRequestSummarySource>[3]) =>
+  summaries.createRemotePullRequestSummarySource(pi, piHost(pi, ctx), target, reader);
+const createRemoteReviewRepliesSource = (pi: never, ctx: object, target: RemoteReviewTarget | undefined) =>
+  replies.createRemoteReviewRepliesSource(pi, piHost(pi, ctx), target);
 
 const originalSettingsPath = process.env.PI_CODER_SETTINGS_PATH;
 let directory: string;

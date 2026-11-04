@@ -25,12 +25,16 @@ export interface StoryPage {
   anchors: StoryAnchor[];
 }
 
+export function defaultStoryMember(story: StorySessionData): StoryMember {
+  return storyAnchor(story, "implementation") == null ? "tests" : "implementation";
+}
+
 export function restoreStoryNavigation(plan: DiffStory, saved?: StorySessionData): StorySessionData {
   const same = saved?.plan?.snapshot === plan.snapshot;
-  return {
+  const story: StorySessionData = {
     plan,
     step: same && Number.isSafeInteger(saved.step) ? Math.max(0, Math.min(plan.steps.length - 1, saved.step)) : 0,
-    member: same && saved.member === "tests" ? "tests" : "implementation",
+    member: "implementation",
     related: {
       implementation: same && Number.isSafeInteger(saved.related?.implementation) ? saved.related.implementation : 0,
       tests: same && Number.isSafeInteger(saved.related?.tests) ? saved.related.tests : 0,
@@ -38,6 +42,8 @@ export function restoreStoryNavigation(plan: DiffStory, saved?: StorySessionData
     viewedStepIds: same && Array.isArray(saved.viewedStepIds) ? saved.viewedStepIds.filter((id) => plan.steps.some((step) => step.id === id)) : [],
     viewports: same && saved.viewports != null && typeof saved.viewports === "object" ? { ...saved.viewports } : {},
   };
+  story.member = defaultStoryMember(story);
+  return story;
 }
 
 export function storyPages(story: StorySessionData, member = story.member): StoryPage[] {

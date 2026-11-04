@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type DiffStory, type StorySnapshot, validateDiffStory } from "./plan.js";
-import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, type StoryUnit } from "./units.js";
+import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "./units.js";
 
 export type DiffStoryGenerate = (system: string, prompt: string, signal: AbortSignal) => Promise<string>;
 export type DiffStoryProgress = (phase: "Preparing code and test units" | "Generating story" | "Validating story") => void;
@@ -46,15 +46,17 @@ function orderedStory(snapshot: StorySnapshot, units: StoryUnit[], pairs: Map<st
     version: 1,
     snapshot: snapshot.fingerprint,
     summary: "",
-    steps: ordered.filter((unit) => !pairs.has(unit.id) && (!unit.test || independentTests.get(unit.path)![0] === unit)).map((unit) => {
-      const group = unit.test ? independentTests.get(unit.path)! : [unit];
-      return {
-        id: unit.id,
-        title: `${unit.path} · ${unit.symbol}${group.length > 1 ? ` and ${group.length - 1} more` : ""}`,
+    steps: ordered.filter((unit) => !pairs.has(unit.id) && (!unit.test || independentTests.get(unit.path)![0] === unit)).flatMap((unit) => {
+      const pieces = unit.test
+        ? splitStoryTests(independentTests.get(unit.path)!, STORY_TEST_FILE_LINES).map((group) => ({ lead: group[0]!, implementation: group, tests: [] as StoryUnit[] }))
+        : splitStoryTests(units.filter((test) => pairs.get(test.id) === unit.id), STORY_TEST_FILE_LINES).map((tests) => ({ lead: unit, implementation: [unit], tests }));
+      return pieces.map((piece, index) => ({
+        id: index === 0 ? unit.id : `${unit.id}~${index + 1}`,
+        title: `${unit.path} · ${piece.lead.symbol}${piece.implementation.length > 1 ? ` and ${piece.implementation.length - 1} more` : ""}${pieces.length > 1 ? ` · tests ${index + 1}/${pieces.length}` : ""}`,
         explanation: "",
-        implementation: group.flatMap((member) => member.anchors),
-        tests: units.filter((test) => pairs.get(test.id) === unit.id).flatMap((test) => test.anchors),
-      };
+        implementation: piece.implementation.flatMap((member) => member.anchors),
+        tests: piece.tests.flatMap((test) => test.anchors),
+      }));
     }),
   }, snapshot);
 }

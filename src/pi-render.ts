@@ -1,14 +1,14 @@
-import { getLanguageFromPath, highlightCode } from "@earendil-works/pi-coding-agent";
+import { highlightLine, languageForPath } from "./host/runtime.js";
 import { sanitizeTerminalText } from "./sanitize.js";
 
 export function detectPiLanguage(filePath: string): string | undefined {
-  return getLanguageFromPath(filePath);
+  return languageForPath(filePath);
 }
 
 export function highlightCodeLineWithPi(text: string, language: string | undefined): string {
   const sanitizedText = sanitizeTerminalText(text);
   if (sanitizedText.length === 0) return "";
-  return highlightCode(sanitizedText, language)[0] ?? sanitizedText;
+  return highlightLine(sanitizedText, language);
 }
 
 function replaceTabs(text: string): string {

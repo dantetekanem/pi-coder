@@ -1,4 +1,5 @@
-import { copyToClipboard, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyText } from "../../host/runtime.js";
+import type { HostContext, HostTheme } from "../../host/types.js";
 import { createWorkbench } from "../../workbench/app.js";
 import { type TargetOpenResult, type Workbench, type WorkbenchCompletionResult, type WorkbenchLaunch, type WorkbenchRepository } from "../../workbench/contracts.js";
 import { cleanupWorkbench, formatTargetOpenIssue } from "../../workbench/host-boundary.js";
@@ -8,7 +9,7 @@ import { normalizeWorkbenchLaunch } from "../../workbench/target.js";
 import { fullScreenOverlayOptions } from "../../ui/full-screen-overlay.js";
 import { createWorkbenchComponent, type WorkbenchTheme } from "../../workbench/ui/component.js";
 
-function mapPiTheme(theme: Theme): WorkbenchTheme {
+function mapPiTheme(theme: HostTheme): WorkbenchTheme {
   return {
     fg: (color, text) => theme.fg(color, text),
     bg: (color, text) => theme.bg(color, text),
@@ -41,7 +42,7 @@ const defaultDependencies: PiWorkbenchRunnerDependencies = {
   createWorkbench,
   explorerStateForWorkspace: (workspaceKey) => processExplorerStateStore.forWorkspace(workspaceKey),
   createComponent: createWorkbenchComponent,
-  copyText: copyToClipboard,
+  copyText,
 };
 
 interface PiKeybindingsLike {
@@ -168,7 +169,7 @@ function failed(error: unknown, code?: string): WorkbenchCompletionResult {
 
 /** Pi overlay lifecycle owner. It never stages prompts or sends agent messages. */
 export async function runPiWorkbench(
-  ctx: ExtensionContext,
+  ctx: Pick<HostContext, "hasUI" | "ui">,
   options: PiWorkbenchRunOptions,
   dependencies: PiWorkbenchRunnerDependencies = defaultDependencies,
 ): Promise<WorkbenchCompletionResult> {
@@ -191,7 +192,7 @@ export async function runPiWorkbench(
     outcome = await ctx.ui.custom<WorkbenchCompletionResult>(
       (tui, theme, keybindings, done) => {
         const component = dependencies.createComponent(tui, mapPiTheme(theme), workbench!, done, explorerState, launch, {
-          writeText: dependencies.copyText ?? copyToClipboard,
+          writeText: dependencies.copyText ?? copyText,
         });
         return mountPiComponent(component, keybindings as unknown as PiKeybindingsLike);
       },

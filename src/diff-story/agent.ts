@@ -1,19 +1,18 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { streamReviewAgent, type ReviewAgentSelection } from "../review-agent.js";
+import type { ModelGateway, StoryAgentSelection } from "../host/types.js";
 import type { StoryActivityListener } from "./activity.js";
 import type { DiffStoryGenerate } from "./generate.js";
 
 /** One provider request over the prepared units, isolated from the outer conversation. */
 export function createStoryAgentGenerator(
-  ctx: ExtensionContext,
-  selection: ReviewAgentSelection,
+  models: Pick<ModelGateway, "streamStory">,
+  selection: StoryAgentSelection,
   onActivity: StoryActivityListener,
 ): DiffStoryGenerate {
   return async (system, prompt, signal) => {
     signal.throwIfAborted();
     onActivity({ kind: "status", text: "Arranging prepared code and test units" });
     try {
-      return await streamReviewAgent(ctx, selection, {
+      return await models.streamStory(selection, {
         system, prompt, signal,
         onText: (text) => onActivity({ kind: "text", id: "order", text }),
       });
