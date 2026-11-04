@@ -1109,10 +1109,14 @@ function pushWrappedText(lines: string[], theme: Theme, text: string, width: num
 }
 
 export function buildCommentPanelTextLines(theme: Theme, width: number, text: string, color: "muted" | "dim" = "muted", prefix = "", maxLines?: number): string[] {
-  const lines: string[] = [];
-  const contentWidth = Math.max(1, width - 2);
-  pushWrappedText(lines, theme, text, contentWidth, color, prefix);
-  return maxLines == null ? lines : lines.slice(0, Math.max(0, maxLines));
+  const availableWidth = Math.max(1, width - 2 - visibleWidth(prefix));
+  const rows = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "").split("\n")
+    .flatMap((line) => wrapAnsiText(sanitizeTerminalText(line), availableWidth, true));
+  const shown = rows.slice(0, Math.max(0, maxLines ?? rows.length));
+  if (shown.length > 0 && shown.length < rows.length) {
+    shown[shown.length - 1] = truncateToWidth(`${shown[shown.length - 1]}…`, availableWidth, "…");
+  }
+  return shown.map((row) => `${prefix}${theme.fg(color, row)}`);
 }
 
 export function buildCommentPanelEmptyStateLines(theme: Theme, width: number): string[] {
@@ -4641,7 +4645,7 @@ export class ReviewApp {
     this.mouseSelection.clear();
     if (this.editingResponse != null) {
       const id = this.editingResponse;
-      if (matchesKey(data, Key.shift("enter"))) this.editor.handleInput("\n");
+      if (matchesKey(data, Key.shift("enter")) || matchesKey(data, Key.ctrl("j"))) this.editor.handleInput("\n");
       else if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.editingResponse = null;
       else this.editor.handleInput(data);
       this.responseDrafts.set(id, this.editor.getExpandedText());
@@ -4681,7 +4685,7 @@ export class ReviewApp {
         this.toggleEditIntent();
         return;
       }
-      if (matchesKey(data, Key.shift("enter"))) {
+      if (matchesKey(data, Key.shift("enter")) || matchesKey(data, Key.ctrl("j"))) {
         this.handleEditorTextInput("\n");
         this.compositionChanged();
         this.requestRender();

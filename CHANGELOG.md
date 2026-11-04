@@ -7,6 +7,22 @@
 - Mark open PR threads on the diff lines they belong to. A remote review reads the threads in the background when it opens, even with PR context and Replies hidden. A `○` marks each line whose thread anchor matches the reviewed code, and the Navigator shows each file's count. Press `I` to show or hide the thread text under its line. The threads are read-only: they never join your draft, the Comments pane, the submission, or the agent prompt.
 - A REST provider can map `commentDiffHunk` to each comment's diff hunk (`diff_hunk` in GitHub-shaped APIs), so a thread written on an older push still finds its line after the code moves. GitHub reviews read it through GraphQL without extra settings.
 
+## 0.9.7 - 2026-11-03
+
+### Changed
+
+- Require matching Pi AI, coding-agent, and TUI releases at 0.79.10 or newer, with Node.js 22.19.0 or newer. The lockfile tests that minimum; newer hosts still need their own compatibility checks.
+
+### Security
+
+- Upgrade development tooling to Vitest 4.1.12 and Vite 7.3.7, removing the vulnerable mocker and Tinypool dependency paths.
+- Refresh the locked Pi packages to 0.79.10 and compatible protobufjs, zod, and brace-expansion resolutions. Known upstream advisories remain; this does not update an installed Pi host or sandbox extensions.
+
+### Fixed
+
+- Show each line of a multi-line review comment on its own row in the Comments and Replies panes, instead of printing the line break as `\x0a`. A preview that stops early ends its last shown line with `…`.
+- Ctrl+J adds a line break in the comment, modify, and thread response editors, like Shift+Enter. A plain line feed now adds a line break instead of saving a comment or closing a response editor.
+
 ## 0.9.6 - 2026-11-02
 
 ### Changed

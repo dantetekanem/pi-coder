@@ -600,6 +600,36 @@ describe("action and shortcut help rendering", () => {
     expect(lines.every((line) => visibleWidth(line) <= 22)).toBe(true);
   });
 
+  it("shows each line of a multi-line comment preview on its own row", () => {
+    const lines = buildCommentPanelTextLines(plainTheme as any, 24, "first\nsecond\r\nthird\rfourth", "muted", "   ", 6);
+
+    expect(lines).toEqual(["   first", "   second", "   third", "   fourth"]);
+    expect(lines.join("\n")).not.toContain("\\x0a");
+  });
+
+  it("keeps blank lines inside a multi-line comment preview", () => {
+    expect(buildCommentPanelTextLines(plainTheme as any, 24, "first\n\nthird", "muted", "   ", 3)).toEqual(["   first", "   ", "   third"]);
+  });
+
+  it("ends the last shown preview line with an ellipsis when the cap hides lines", () => {
+    expect(buildCommentPanelTextLines(plainTheme as any, 24, "one\ntwo\nthree\nfour", "muted", "   ", 3)).toEqual(["   one", "   two", "   three…"]);
+  });
+
+  it("keeps the ellipsis inside the panel width when a wrapped preview line is cut", () => {
+    const [line] = buildCommentPanelTextLines(plainTheme as any, 24, `${"x".repeat(40)}\nnext`, "muted", "   ", 1);
+
+    expect(line!.replace(/\u001b\[[\d;]*m/g, "")).toBe(`   ${"x".repeat(18)}…`);
+    expect(visibleWidth(line!)).toBeLessThanOrEqual(22);
+  });
+
+  it("does not add an ellipsis when the preview shows every line, ignoring a trailing line break", () => {
+    expect(buildCommentPanelTextLines(plainTheme as any, 24, "one\ntwo\n", "muted", "   ", 2)).toEqual(["   one", "   two"]);
+  });
+
+  it("escapes control characters inside a preview line but keeps the line break", () => {
+    expect(buildCommentPanelTextLines(plainTheme as any, 24, "first\u001b[31m\nsecond", "muted", "   ", 3)).toEqual(["   first\\x1b[31m", "   second"]);
+  });
+
   it("shows line action keys in the diff pane hint", () => {
     const hint = buildDiffActionHintLine(plainTheme as any, 120);
 
