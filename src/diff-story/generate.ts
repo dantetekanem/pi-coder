@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type DiffStory, type StoryChangeRange, type StorySnapshot, validateDiffStory } from "./plan.js";
-import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "./units.js";
+import { attachUnpairedTests, pairStoryTests, prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, unitIdentifiers, type StoryUnit } from "./units.js";
 
 export type DiffStoryGenerate = (system: string, prompt: string, signal: AbortSignal) => Promise<string>;
 export type DiffStoryProgress = (phase: "Preparing code and test units" | "Generating story" | "Validating story") => void;
@@ -103,7 +103,7 @@ function orderedStory(snapshot: StorySnapshot, units: StoryUnit[], pairs: Map<st
     const source = unitFor(pair[0]);
     const test = unitFor(pair[1]);
     if (source.test || !test.test) throw new Error("Diff story pairs must link code to tests.");
-    pairs.set(test.id, source.id);
+    if (!test.helper) pairs.set(test.id, source.id);
   }
   attachUnpairedTests(units, pairs);
   const ordered = [...new Set([...result.order.map((id) => unitFor(id)), ...units])];
@@ -160,12 +160,15 @@ export async function generateDiffStory(
   const changedLines = changedLineReader(snapshot);
   const context = {
     units: units.map((unit) => {
-      const { id, path, symbol, test, code } = unit;
-      const identifiers = new Set(code.match(/[A-Za-z_$][\w$!?]*/g));
+      const { id, path, symbol, test } = unit;
+      const identifiers = unitIdentifiers(unit, units);
       const references = implementation
         .filter((candidate) => candidate.id !== id && identifiers.has(candidate.symbol))
         .map((candidate) => candidate.id);
-      return { id, path, symbol, test, references, ...(notesTemplate == null ? {} : { changes: changedLines(unit, changeLimit) }) };
+      return {
+        id, path, symbol, test, ...(unit.helper ? { helper: true } : {}), references,
+        ...(notesTemplate == null ? {} : { changes: changedLines(unit, changeLimit) }),
+      };
     }),
     pairs: [...pairs].map(([test, source]) => [source, test]),
   };

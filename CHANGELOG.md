@@ -24,6 +24,10 @@
 - The story agent starts as `anthropic/claude-opus-5-5` with `low` thinking, instead of `openai-codex/gpt-5.6-luna` with `max`. A saved selection is kept.
 - The Pi coding agent and Pi AI packages are optional peers. pi-coder uses them only inside Pi; Pi TUI is now a regular dependency.
 
+### Fixed
+
+- A diff story no longer pairs a helper method from a test file, such as a private method the tests call, with code as if it were a test. A helper follows the first test that calls it, and a split never leaves a helper on its own. A test pairs through the helpers it calls, quoted strings such as test names no longer count as code references, and a changed file named like the test file wins over name matches in other files.
+
 ## 0.9.8 - 2026-11-04
 
 ### Added

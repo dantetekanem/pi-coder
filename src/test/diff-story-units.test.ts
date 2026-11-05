@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { generateDiffStory } from "../diff-story/generate.js";
 import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, validateSavedDiffStory, type StoryFile } from "../diff-story/plan.js";
 import { restoreStoryNavigation, storyAnchors, storyPages } from "../diff-story/navigation.js";
-import { prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "../diff-story/units.js";
+import { pairStoryTests, prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "../diff-story/units.js";
 
 function file(path: string, before: string, after: string): StoryFile {
   return {
@@ -300,6 +300,8 @@ end
       const a3 = unitOf("a3", "a.test.ts", 1);
       expect(splitStoryTests([a1, a2], 30)).toEqual([[a1, a2]]);
       expect(splitStoryTests([a1, a2, a3], 30)).toEqual([[a1, a2], [a3]]);
+      const helper = { ...unitOf("h", "a.test.ts", 20), helper: true };
+      expect(splitStoryTests([a1, a2, helper, a3], 30)).toEqual([[a1, a2, helper], [a3]]);
 
       const b1 = unitOf("b1", "b.test.ts", 20);
       const a4 = unitOf("a4", "a.test.ts", 20);
@@ -380,6 +382,81 @@ end
     expect(uncoveredStoryChanges(story, captured)).toEqual([]);
     expect(generate).toHaveBeenCalledOnce();
     expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("test helpers", () => {
+  const rendering = [
+    "test \"shows the price in the merchant money format\" do",
+    "  assert_equal \"$12.00\", card_price_text",
+    "end",
+    "",
+    "test \"shows the price as today without a money format\" do",
+    "  assert_equal \"12.00 USD\", card_price_text",
+    "end",
+    "",
+    "private",
+    "",
+    "def card_price_text",
+    "  storefront.prepare_messages(products: [\"shirt\"]).first",
+    "end",
+    "",
+  ].join("\n");
+  const changed = (path: string, name: string) => file(path, `def ${name}\n  0\nend\n`, `def ${name}\n  1\nend\n`);
+  const captured = () => createStorySnapshot([
+    changed("lib/storefront.rb", "prepare_messages"),
+    changed("lib/money_format.rb", "format"),
+    changed("lib/catalog.rb", "products"),
+    file("test/storefront/rendering_test.rb", "", rendering),
+  ]);
+  const steps = (story: { steps: Array<{ title: string; tests: Array<{ unitId?: string; side: string }> }> }) =>
+    story.steps.map((step) => [step.title, [...new Set(step.tests.filter((anchor) => anchor.side === "added").map((anchor) => anchor.unitId))]]);
+
+  it("pairs real tests through the helper they call, ignoring test names and key labels, and puts the helper after them", async () => {
+    const units = prepareStoryUnits(captured());
+    expect(units.filter((unit) => unit.test).map((unit) => [unit.id, unit.symbol, unit.helper])).toEqual([
+      ["u4", "shows the price in the merchant money format", false],
+      ["u5", "shows the price as today without a money format", false],
+      ["u6", "card_price_text", true],
+    ]);
+    expect([...pairStoryTests(units)]).toEqual([["u4", "u1"], ["u5", "u1"]]);
+
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      const context = payload(prompt);
+      expect(context.units[3]).toMatchObject({ symbol: "shows the price in the merchant money format", references: ["u1"] });
+      expect(context.units[5]).toMatchObject({ symbol: "card_price_text", helper: true });
+      expect(context.units[3]).not.toHaveProperty("helper");
+      return '{"order":[],"pairs":[]}';
+    });
+    const story = await generateDiffStory(captured(), generate, new AbortController().signal, () => {});
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(steps(story)).toEqual([
+      ["lib/storefront.rb \u00b7 prepare_messages", ["u4", "u5", "u6"]],
+      ["lib/money_format.rb \u00b7 format", []],
+      ["lib/catalog.rb \u00b7 products", []],
+    ]);
+  });
+
+  it("ignores a model pair for a helper, which follows the first test that calls it", async () => {
+    const story = await generateDiffStory(captured(), async () => '{"order":[],"pairs":[["u2","u4"],["u3","u6"]]}', new AbortController().signal, () => {});
+
+    expect(steps(story)).toEqual([
+      ["lib/storefront.rb \u00b7 prepare_messages", ["u5"]],
+      ["lib/money_format.rb \u00b7 format", ["u4", "u6"]],
+      ["lib/catalog.rb \u00b7 products", []],
+    ]);
+  });
+
+  it("pairs a test with the changed file named like its file before a name match elsewhere, and counts def test_ as a test", () => {
+    const units = prepareStoryUnits(createStorySnapshot([
+      changed("app/tools/update_cart.rb", "build_product"),
+      changed("app/services/localization.rb", "call"),
+      file("test/tools/update_cart_test.rb", "", "def test_call_attaches_the_product\n  assert tool.call(lines: [])\nend\n"),
+    ]));
+
+    expect(units[2]).toMatchObject({ symbol: "test_call_attaches_the_product", test: true, helper: false });
+    expect([...pairStoryTests(units)]).toEqual([["u3", "u1"]]);
   });
 });
 

@@ -6,9 +6,13 @@ export interface StoryUnit {
   path: string;
   symbol: string;
   test: boolean;
+  /** A declaration in a test file that is not a test case, such as a private method the tests call. */
+  helper?: boolean;
   anchors: Omit<StoryAnchor, "hash">[];
   code: string;
 }
+
+const TEST_CASE = /^\s*(?:(?:test|it|specify)(?:\.(?:only|skip))?\s*(?:\(\s*)?["'`]|def\s+test_)/;
 
 function lines(text: string): string[] {
   if (!text) return [];
@@ -25,8 +29,9 @@ function declaration(line: string): string | undefined {
     ?? /^\s*(?:(?:private|public|protected|static|async|override|get|set)\s+)*([\w$]+)\s*\([^;]*\)\s*(?::[^=;]+)?\s*\{/.exec(line)?.[1];
 }
 
-function functionOwners(source: string[]): Array<string | undefined> {
+function functionOwners(source: string[]): { owners: Array<string | undefined>; cases: Set<string> } {
   const owners: Array<string | undefined> = new Array(source.length);
+  const cases = new Set<string>();
   const occurrences = new Map<string, number>();
   for (let start = 0; start < source.length; start += 1) {
     const name = declaration(source[start]!);
@@ -34,6 +39,7 @@ function functionOwners(source: string[]): Array<string | undefined> {
     const occurrence = (occurrences.get(name) ?? 0) + 1;
     occurrences.set(name, occurrence);
     const key = `${name}\u001f${occurrence}`;
+    if (TEST_CASE.test(source[start]!)) cases.add(key);
     const indent = source[start]!.search(/\S/);
     let end = start;
     const inline = /\{.*\}\s*[);,]*$/.test(source[start]!) || /^\s*def\s+\S+\s*=\s+/.test(source[start]!);
@@ -54,7 +60,7 @@ function functionOwners(source: string[]): Array<string | undefined> {
     // Nested declarations take ownership of their own lines on the next pass.
     for (let line = start; line <= end; line += 1) owners[line] = key;
   }
-  return owners;
+  return { owners, cases };
 }
 
 function foldLooseChanges(
@@ -117,13 +123,13 @@ export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
       added: functionOwners(sourceLines.added),
       deleted: functionOwners(sourceLines.deleted),
     };
-    const addedSymbols = new Set(ownership.added);
-    const deletedSymbols = new Set(ownership.deleted);
+    const addedSymbols = new Set(ownership.added.owners);
+    const deletedSymbols = new Set(ownership.deleted.owners);
     const renamed = new Map<string, string>();
     for (const row of diff.rows) {
       if (row.kind !== "replace" || row.oldLineNumber == null || row.newLineNumber == null) continue;
-      const oldOwner = ownership.deleted[row.oldLineNumber - 1];
-      const newOwner = ownership.added[row.newLineNumber - 1];
+      const oldOwner = ownership.deleted.owners[row.oldLineNumber - 1];
+      const newOwner = ownership.added.owners[row.newLineNumber - 1];
       if (oldOwner == null || newOwner == null || addedSymbols.has(oldOwner) || deletedSymbols.has(newOwner)) continue;
       if (declaration(row.oldText) !== oldOwner.split("\u001f")[0]
         || declaration(row.newText) !== newOwner.split("\u001f")[0]) continue;
@@ -132,7 +138,7 @@ export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
     const bySymbol = new Map<string, StoryUnit>();
     for (const side of ["added", "deleted"] as const) {
       const source = sourceLines[side];
-      const owners = ownership[side];
+      const { owners, cases } = ownership[side];
       const changed = new Map<number, number>();
       for (const hunk of diff.hunks) {
         for (const row of diff.rows.slice(hunk.changeStartRow, hunk.changeEndRow + 1)) {
@@ -154,11 +160,13 @@ export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
           const key = owner ?? `hunk:${changed.get(touched[0]!)}`;
           let unit = bySymbol.get(key);
           if (unit == null) {
+            const test = /(?:^|\/)(?:test|tests|spec|specs|__tests__)\/|(?:[._](?:test|spec)|_tests)\.[^.]+$/.test(file.path);
             unit = {
               id: "",
               path: file.path,
               symbol: owner?.split("\u001f")[0] ?? `lines ${start + 1}–${end + 1}`,
-              test: /(?:^|\/)(?:test|tests|spec|specs|__tests__)\/|(?:[._](?:test|spec)|_tests)\.[^.]+$/.test(file.path),
+              test,
+              helper: test && originalOwner != null && !cases.has(originalOwner),
               anchors: [], code: "",
             };
             bySymbol.set(key, unit);
@@ -184,19 +192,44 @@ function fileStem(path: string): string {
   return path.replace(/\.[^.]+$/, "").replace(/[._](?:tests?|spec)$/, "").split("/").at(-1)!;
 }
 
-/** Obvious file/symbol matches need no model discovery; uncertain tests stay independent. */
+function filenameScore(testStem: string, path: string): number {
+  const sourceStem = fileStem(path);
+  if (sourceStem === testStem) return 2;
+  return ["_", "-", "."].some((separator) => testStem.startsWith(`${sourceStem}${separator}`)) ? 1 : 0;
+}
+
+/** Quoted strings (test names, URLs, hash keys) and `key:` labels are data, not references. */
+function codeIdentifiers(code: string): Set<string> {
+  return new Set(code
+    .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\\n]|\\.)*`/g, " ")
+    .replace(/\b[A-Za-z_]\w*[!?]?:(?!:)/g, " ")
+    .match(/[A-Za-z_$][\w$!?]*/g));
+}
+
+/** The names a unit's code mentions. A test also reads the helpers in its file that it calls, directly or through other helpers. */
+export function unitIdentifiers(unit: StoryUnit, units: readonly StoryUnit[]): Set<string> {
+  const identifiers = codeIdentifiers(unit.code);
+  let pending = unit.test ? units.filter((other) => other.helper && other !== unit && other.path === unit.path) : [];
+  let reached = pending.filter((helper) => identifiers.has(helper.symbol));
+  while (reached.length > 0) {
+    pending = pending.filter((helper) => !reached.includes(helper));
+    for (const helper of reached) for (const name of codeIdentifiers(helper.code)) identifiers.add(name);
+    reached = pending.filter((helper) => identifiers.has(helper.symbol));
+  }
+  return identifiers;
+}
+
+/** Obvious file/symbol matches need no model discovery; uncertain tests stay independent. Only test cases pair, and a changed file named like the test file outranks name matches in other files. */
 export function pairStoryTests(units: StoryUnit[]): Map<string, string> {
   const pairs = new Map<string, string>();
   const implementation = units.filter((unit) => !unit.test);
-  for (const test of units.filter((unit) => unit.test && !unit.symbol.startsWith("lines "))) {
-    const identifiers = new Set(test.code.match(/[A-Za-z_$][\w$!?]*/g));
+  for (const test of units.filter((unit) => unit.test && !unit.helper && !unit.symbol.startsWith("lines "))) {
+    const identifiers = unitIdentifiers(test, units);
     const testStem = fileStem(test.path);
-    const matches = implementation.map((unit) => {
-      const sourceStem = fileStem(unit.path);
-      const prefixed = ["_", "-", "."].some((separator) => testStem.startsWith(`${sourceStem}${separator}`));
-      const filenameScore = sourceStem === testStem ? 2 : prefixed ? 1 : 0;
-      return { unit, score: filenameScore + (identifiers.has(unit.symbol) ? 3 : 0) };
-    }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score);
+    const named = implementation.filter((unit) => filenameScore(testStem, unit.path) > 0);
+    const matches = (named.length > 0 ? named : implementation)
+      .map((unit) => ({ unit, score: filenameScore(testStem, unit.path) + (identifiers.has(unit.symbol) ? 3 : 0) }))
+      .filter(({ score }) => score > 0).sort((a, b) => b.score - a.score);
     if (matches[0] && matches[0].score > (matches[1]?.score ?? 0)) pairs.set(test.id, matches[0].unit.id);
   }
   return pairs;
@@ -209,14 +242,14 @@ function anchoredLines(unit: StoryUnit): number {
   return unit.anchors.reduce((total, anchor) => total + anchor.endLine - anchor.startLine + 1, 0);
 }
 
-/** Splits tests in source order into chunks of whole units. A unit that would push its file past the limit starts a new chunk; one unit over the limit still gets a chunk. */
+/** Splits tests in source order into chunks of whole units. A unit that would push its file past the limit starts a new chunk; one unit over the limit still gets a chunk. A helper never starts a chunk, so it stays with the tests before it. */
 export function splitStoryTests(tests: readonly StoryUnit[], maxLines: number): StoryUnit[][] {
   const chunks: StoryUnit[][] = [[]];
   let used = new Map<string, number>();
   for (const test of tests) {
     const lines = anchoredLines(test);
     const inFile = used.get(test.path) ?? 0;
-    if (inFile > 0 && inFile + lines > maxLines) {
+    if (inFile > 0 && inFile + lines > maxLines && !test.helper) {
       chunks.push([]);
       used = new Map();
     }
@@ -231,15 +264,30 @@ function rangeGap(left: Omit<StoryAnchor, "hash">, right: Omit<StoryAnchor, "has
   return Math.max(0, left.startLine - right.endLine, right.startLine - left.endLine);
 }
 
-/** Setup, helpers and other unpaired tests join the step that owns the nearest paired test in their file. */
+/** A helper joins the step of the first test that calls it. Setup, other helpers and unpaired tests join the step that owns the nearest paired test in their file. */
 export function attachUnpairedTests(units: StoryUnit[], pairs: Map<string, string>): void {
+  const nearestStep = (test: StoryUnit, owners: Map<string, string>) => {
+    const siblings = units.filter((unit) => unit.test && unit.path === test.path && owners.has(unit.id));
+    if (siblings.length === 0) return undefined;
+    const distance = (sibling: StoryUnit) => Math.min(...test.anchors.flatMap((own) => sibling.anchors.map((other) => rangeGap(own, other))));
+    return owners.get(siblings.reduce((best, sibling) => distance(sibling) < distance(best) ? sibling : best).id);
+  };
   const paired = new Map(pairs);
   for (const test of units) {
-    if (!test.test || paired.has(test.id)) continue;
-    const siblings = units.filter((unit) => unit.test && unit.path === test.path && paired.has(unit.id));
-    if (siblings.length === 0) continue;
-    const distance = (sibling: StoryUnit) => Math.min(...test.anchors.flatMap((own) => sibling.anchors.map((other) => rangeGap(own, other))));
-    const nearest = siblings.reduce((best, sibling) => distance(sibling) < distance(best) ? sibling : best);
-    pairs.set(test.id, paired.get(nearest.id)!);
+    if (!test.test || test.helper || paired.has(test.id)) continue;
+    const step = nearestStep(test, paired);
+    if (step != null) pairs.set(test.id, step);
+  }
+  const calls = new Map<StoryUnit, Set<string>>();
+  const callsOf = (unit: StoryUnit) => {
+    if (!calls.has(unit)) calls.set(unit, unitIdentifiers(unit, units));
+    return calls.get(unit)!;
+  };
+  for (const helper of units) {
+    if (!helper.helper || pairs.has(helper.id)) continue;
+    const caller = units.find((unit) => unit.test && !unit.helper && unit.path === helper.path && pairs.has(unit.id)
+      && callsOf(unit).has(helper.symbol));
+    const step = caller == null ? nearestStep(helper, pairs) : pairs.get(caller.id);
+    if (step != null) pairs.set(helper.id, step);
   }
 }
