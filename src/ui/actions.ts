@@ -99,6 +99,7 @@ export const STORY_ACTIONS: StoryActionDefinition[] = [
   { id: "storyStep", section: "Story", keys: "Shift+←/→", label: "previous/next step" },
   { id: "storySeen", section: "Story", keys: "R", label: "mark the step seen" },
   { id: "storyInfo", section: "Story", keys: "i", label: "story info: steps, files, totals" },
+  { id: "storySidebar", section: "Story", keys: "1", label: "show/hide the step sidebar; hidden, new stories skip the agent's step notes" },
   { id: "storyContext", section: "Story", keys: "4", label: "PR context • D brief/description • Esc back" },
   { id: "storyThreads", section: "Story", keys: "I", label: "show/hide open PR threads under their lines" },
   { id: "storyFullDiff", section: "Story", keys: "F", label: "full diff; F returns to the story" },

@@ -14,6 +14,7 @@
 - `Ctrl+?` opens a popup with every shortcut, in the review and in the diff story. `?` and `Ctrl+/` also open it, for terminals that send `Ctrl+?` as Backspace.
 - In a diff story, `Option+Up/Down` scrolls the other pane without moving focus, `Option+PgUp/PgDn` pages it, and `Option+Shift+Up/Down` or `Option+Home/End` jump it to its top or bottom. `Home`/`End` jump the focused pane, in the review too.
 - In a diff story, `i` opens the story info in a popup: the step, the pull request, totals, captured files, and every step.
+- A diff story shows a **Steps** sidebar on the left. It lists every step, highlights the current one with a short note from the story agent, and points down to the steps that follow. It moves with `Shift+Left/Right`. For the notes, the story agent receives each unit's changed lines and writes a summary plus a title and note for each step. The sidebar is on by default. `1` hides it and saves the choice; while it is hidden, new stories skip the notes.
 
 ### Changed
 

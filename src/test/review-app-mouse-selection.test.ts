@@ -316,6 +316,7 @@ describe("ReviewApp mouse selection in diffs", () => {
       },
     });
     try {
+      expect(app.render(120).join("\n")).toContain("Steps");
       const tests = locate(app, "expectReuse");
       selectWithTerminalInput(app, tests, right(tests, "expectReuse()".length - 1));
       await vi.waitFor(() => expect(clipboard.copy).toHaveBeenLastCalledWith("expectReuse()"));

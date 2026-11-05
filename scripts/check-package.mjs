@@ -24,6 +24,7 @@ const required = [
   "docs/remote-providers.md",
   "docs/workbench.md",
   "prompts/diff-story.md",
+  "prompts/diff-story-notes.md",
   "skills/diff-story/SKILL.md",
   "skills/pi-coder/SKILL.md",
   "LICENSE",

@@ -382,3 +382,108 @@ end
     expect(performance.now() - started).toBeLessThan(1000);
   });
 });
+
+describe("story notes", () => {
+  const arrange = (captured: ReturnType<typeof snapshot>, output: unknown) =>
+    generateDiffStory(captured, async () => JSON.stringify(output), new AbortController().signal, () => {}, { notes: true });
+
+  it("sends each unit's changed lines and puts the agent's titles, notes and summary on the steps", async () => {
+    const captured = snapshot();
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      expect(prompt).toContain("Add two fields to the JSON");
+      const context = payload(prompt);
+      expect(context.units[0].changes).toBe("-   return 0;\n+   return 1;");
+      expect(context.units[2].changes).toBe("-   expect(parse()).toBe(0);\n+   expect(parse()).toBe(1);");
+      return JSON.stringify({
+        order: ["u2", "u1"],
+        pairs: [],
+        summary: "Both helpers return one.",
+        notes: {
+          u1: { title: "Return one from parse", text: "parse returns 1 now." },
+          u2: { title: "Return one from print", text: "print follows parse.\nIts test checks the new value." },
+        },
+      });
+    });
+
+    const story = await generateDiffStory(captured, generate, new AbortController().signal, () => {}, { notes: true });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.summary).toBe("Both helpers return one.");
+    expect(story.steps.map((step) => [step.title, step.explanation])).toEqual([
+      ["Return one from print", "print follows parse. Its test checks the new value."],
+      ["Return one from parse", "parse returns 1 now."],
+    ]);
+    expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+  });
+
+  it("sends no changed lines and asks for no notes when notes are off", async () => {
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      expect(prompt).not.toContain("Add two fields to the JSON");
+      expect(payload(prompt).units.some((unit: object) => "changes" in unit)).toBe(false);
+      return '{"order":[],"pairs":[]}';
+    });
+
+    const story = await generateDiffStory(snapshot(), generate, new AbortController().signal, () => {});
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.summary).toBe("");
+    expect(story.steps.map((step) => step.explanation)).toEqual(["", ""]);
+  });
+
+  it("keeps the host title when a note is missing or malformed, and strips control characters", async () => {
+    const story = await arrange(snapshot(), {
+      order: [],
+      pairs: [],
+      summary: 42,
+      notes: { u1: "parse", u2: { title: "Print\u001b[31m one\u202e\n", text: 7 } },
+    });
+
+    expect(story.summary).toBe("");
+    expect(story.steps.map((step) => [step.title, step.explanation])).toEqual([
+      ["src/parser.ts \u00b7 parse", ""],
+      ["Print [31m one", ""],
+    ]);
+  });
+
+  it("finds a test file's note on any of its tests and repeats a note on split steps", async () => {
+    const billing = "export function charge(amount: number) {\n  return amount;\n}\n";
+    const cases = Array.from({ length: 3 }, (_, index) =>
+      `it('case ${index}', () => {\n${Array.from({ length: 10 }, (_, line) => `  expect(charge(${line})).toBe(${line});`).join("\n")}\n});\n`).join("");
+    const captured = createStorySnapshot([
+      file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+      file("test/billing.test.ts", "", cases),
+      file("test/misc.test.ts", "", "it('first', () => {\n  expect(1).toBe(1);\n});\nit('second', () => {\n  expect(2).toBe(2);\n});\n"),
+    ]);
+
+    const story = await arrange(captured, {
+      order: [],
+      pairs: [],
+      notes: {
+        u1: { title: "Add one to every charge", text: "charge adds one." },
+        u6: { title: "Check the basics", text: "Two sanity tests." },
+      },
+    });
+
+    expect(story.steps.map((step) => [step.id, step.title, step.explanation])).toEqual([
+      ["u1", "Add one to every charge \u00b7 tests 1/2", "charge adds one."],
+      ["u1~2", "Add one to every charge \u00b7 tests 2/2", "charge adds one."],
+      ["u5", "Check the basics", "Two sanity tests."],
+    ]);
+  });
+
+  it("cuts a long unit's changed lines short", async () => {
+    const body = Array.from({ length: 100 }, (_, index) => `  const v${index} = ${index};`).join("\n");
+    const captured = createStorySnapshot([file("src/big.ts", "", `export function big() {\n${body}\n}\n`)]);
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      const changes = payload(prompt).units[0].changes.split("\n");
+      expect(changes).toHaveLength(61);
+      expect(changes[0]).toBe("+ export function big() {");
+      expect(changes.at(-1)).toBe("\u2026 42 more changed lines");
+      return '{"order":[],"pairs":[]}';
+    });
+
+    await generateDiffStory(captured, generate, new AbortController().signal, () => {}, { notes: true });
+
+    expect(generate).toHaveBeenCalledOnce();
+  });
+});

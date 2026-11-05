@@ -61,7 +61,7 @@ export function prepareDiffStory(
   generate?: DiffStoryGenerate,
   orientation?: { header: ReviewHeaderInfo; brief?: string },
 ): Promise<PreparedDiffStory | "diff" | undefined> {
-  const selection = loadReviewPreferences().storyAgent;
+  const { storyAgent: selection, storySidebar: notes } = loadReviewPreferences();
   const storyFiles = filterReviewFilesByLocale(files, false);
   const hiddenLocales = files.length - storyFiles.length;
   const localeNote = hiddenLocales === 0 ? "" : ` · ${hiddenLocales} locale${hiddenLocales === 1 ? "" : "s"} hidden`;
@@ -110,8 +110,9 @@ export function prepareDiffStory(
           tui.requestRender();
         });
         const plan = await generateDiffStory(snapshot!, generator, abort.signal, (progress) => {
-          update(progress === "Generating story" ? "Constructing storyline and connecting changed tests" : progress);
-        });
+          if (progress !== "Generating story") update(progress);
+          else update(notes ? "Constructing storyline and writing step notes" : "Constructing storyline and connecting changed tests");
+        }, { notes });
         if (!settled) finish({ plan, snapshot: snapshot! });
       } catch (failure) {
         if (settled) return;

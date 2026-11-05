@@ -119,6 +119,23 @@ describe("story agent selection", () => {
 });
 
 describe("centered story preparation", () => {
+  it.each([
+    [true, "Constructing storyline and writing step notes"],
+    [false, "Constructing storyline and connecting changed tests"],
+  ])("asks the agent for step notes only while the step sidebar is on (%s)", async (storySidebar, phase) => {
+    vi.spyOn(preferences, "loadReviewPreferences").mockReturnValue({ ...preferences.DEFAULT_REVIEW_PREFERENCES, storySidebar });
+    const preparation = harness();
+    let finish!: (value: string) => void;
+    const generate = vi.fn((_system: string, _prompt: string) => new Promise<string>((resolve) => { finish = resolve; }));
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+
+    expect(generate.mock.calls[0]![1].includes("Add two fields to the JSON")).toBe(storySidebar);
+    expect(preparation.view().render(80).join("\n")).toContain(phase);
+    finish(orderOutput);
+    await expect(ready).resolves.toMatchObject({ plan: { steps: [expect.objectContaining({ id: "u1" })] } });
+  });
+
   it("keeps remote orientation visible while generation is pending and still cancels immediately", async () => {
     const preparation = harness();
     const generate = vi.fn(() => new Promise<string>(() => {}));

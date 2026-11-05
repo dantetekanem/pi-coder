@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { generateDiffStory } from "../diff-story/generate.js";
 import { storyViewportKey, type StoryMember } from "../diff-story/navigation.js";
 import { createStorySnapshot, uncoveredStoryChanges, validateDiffStory } from "../diff-story/plan.js";
 import { configureRuntime, resetRuntime } from "../host/runtime.js";
-import { getHalfPageStep, ReviewApp } from "../ui/review-app.js";
+import { buildStorySidebarLines, getHalfPageStep, getStorySidebarWidth, ReviewApp } from "../ui/review-app.js";
 import type { ReviewFile } from "../types.js";
 import type { ReviewSessionData } from "../review-session.js";
 
@@ -1301,6 +1301,88 @@ describe("paired diff story", () => {
       } finally {
         app.dispose();
       }
+    });
+  });
+
+  describe("step sidebar", () => {
+    it("shows the summary and steps left of the panes and follows Shift+\u2190/\u2192", async () => {
+      const { app } = harness(undefined, 40);
+      try {
+        await Promise.resolve();
+        let rows = app.render(140);
+        const top = rows.find((row) => row.includes("Steps"))!;
+        expect(top.indexOf("Steps")).toBeLessThan(top.indexOf("Related changed tests"));
+        let text = rows.join("\n");
+        for (const line of ["Reuse an in-flight", "\u25b8 1 Reuse pending work", "The caller reuses", "\u2193", "  2 Remove the old entry"]) expect(text).toContain(line);
+        expect(rows).toHaveLength(40);
+        expect(rows.every((row) => visibleWidth(row) === 140)).toBe(true);
+
+        app.handleInput("\x1b[1;2C");
+        text = app.render(140).join("\n");
+        for (const line of ["  1 Reuse pending work", "\u25b8 2 Remove the old entry", "The old entry is no"]) expect(text).toContain(line);
+        expect(text).not.toContain("The caller reuses");
+
+        app.handleInput("R");
+        app.handleInput("\x1b[1;2D");
+        rows = app.render(140);
+        expect(rows.join("\n")).toContain("\u2713 2 Remove the old entry");
+        expect(app.render(80).join("\n")).not.toContain("Steps");
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("hides with 1, gives its room to the panes and keeps the choice for the next story", async () => {
+      const first = harness(undefined, 40);
+      try {
+        await Promise.resolve();
+        const before = first.app.render(140).find((row) => row.includes("Related changed tests"))!;
+        first.app.handleInput("1");
+        const rows = first.app.render(140);
+        expect(rows.join("\n")).not.toContain("Steps");
+        expect(rows.at(-3)).toContain("Step sidebar hidden. New stories skip the agent's step notes; 1 shows it again.");
+        expect(rows.find((row) => row.includes("Related changed tests"))!.indexOf("Related changed tests")).toBeLessThan(before.indexOf("Related changed tests"));
+        expect(JSON.parse(readFileSync(process.env.PI_CODER_PREFERENCES_PATH!, "utf8")).storySidebar).toBe(false);
+      } finally {
+        first.app.dispose();
+      }
+
+      const second = harness(undefined, 40);
+      try {
+        await Promise.resolve();
+        expect(second.app.render(140).join("\n")).not.toContain("Steps");
+        second.app.handleInput("1");
+        expect(second.app.render(140).join("\n")).toContain("\u25b8 1 Reuse pending work");
+        expect(JSON.parse(readFileSync(process.env.PI_CODER_PREFERENCES_PATH!, "utf8")).storySidebar).toBe(true);
+      } finally {
+        second.app.dispose();
+      }
+    });
+
+    it("folds the steps that do not fit around the current one", () => {
+      const theme = { fg: (_: string, text: string) => text };
+      const many = { ...plan, summary: "", steps: Array.from({ length: 40 }, (_, index) => ({ ...plan.steps[0]!, id: `s${index + 1}`, title: `Step ${index + 1}`, explanation: index === 20 ? "Builds on step 20." : "" })) };
+      const lines = buildStorySidebarLines(theme as never, 30, 12, { plan: many, step: 20, viewedStepIds: ["s20"] });
+
+      expect(lines).toEqual([
+        "   1\u201319 \u00b7 19 earlier",
+        " \u2713 20 Step 20",
+        " \u25b8 21 Step 21",
+        "      Builds on step 20.",
+        "",
+        "    \u2193",
+        "   22 Step 22",
+        "   23 Step 23",
+        "   24 Step 24",
+        "   25 Step 25",
+        "   26 Step 26",
+        "   27\u201340 \u00b7 14 more",
+      ]);
+      expect(buildStorySidebarLines(theme as never, 30, 12, { plan: many, step: 0, viewedStepIds: [] }).slice(0, 4)).toEqual([
+        " \u25b8  1 Step 1", "", "    \u2193", "    2 Step 2",
+      ]);
+      expect(getStorySidebarWidth(99)).toBe(0);
+      expect([100, 138, 300].map(getStorySidebarWidth)).toEqual([28, 30, 48]);
     });
   });
 });

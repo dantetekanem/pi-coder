@@ -105,7 +105,7 @@ Inside Pi, the grammar pass, the story agent, and reply analysis use Pi's models
 }
 ```
 
-- Purposes: `grammar` (checks review text before it posts), `story` (orders a diff story), `analysis` (explains a PR reply and writes the PR explanation), and `default` (used when a purpose has no command).
+- Purposes: `grammar` (checks review text before it posts), `story` (orders a diff story and writes its step notes), `analysis` (explains a PR reply and writes the PR explanation), and `default` (used when a purpose has no command).
 - `{provider}`, `{model}`, and `{thinking}` come from the saved story agent (`/diff-story agent` in Pi). It starts as `anthropic/claude-opus-5-5` with `low` thinking.
 - `{system}` puts the system instructions in that argument. Without it, the instructions come first on standard input.
 

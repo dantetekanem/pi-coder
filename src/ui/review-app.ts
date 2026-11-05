@@ -232,6 +232,11 @@ const MAX_SYNTAX_LINE_ENTRIES = 5000;
 const STATUS_TEXT_MAX_CELLS = 96;
 const STATUS_TEXT_MAX_BYTES = 256;
 const OTHER_PANE_CHORDS = ["up", "down", "pageUp", "pageDown", "home", "end", "u", "d", "b", "f"] as const;
+const STORY_SIDEBAR_MIN_INNER_WIDTH = 100;
+const STORY_SIDEBAR_WIDTH_SHARE = 0.22;
+const STORY_SIDEBAR_MIN_WIDTH = 28;
+const STORY_SIDEBAR_MAX_WIDTH = 48;
+const STORY_SIDEBAR_TITLE_LINES = 3;
 const REVIEW_PANE_ORDER = ["navigator", "diff", "comments", "context", "replies"] as const;
 type ReviewPaneName = typeof REVIEW_PANE_ORDER[number];
 
@@ -1060,6 +1065,18 @@ function truncateMiddle(text: string, maxWidth: number): string {
   return `${head}…${tail}`;
 }
 
+/** Plain-text end truncation; pi-tui's truncateToWidth inserts a color reset before its ellipsis. */
+function truncateEnd(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  let head = "";
+  for (const character of text) {
+    if (visibleWidth(`${head}${character}`) > maxWidth - 1) break;
+    head += character;
+  }
+  return `${head.trimEnd()}…`;
+}
+
 export function formatPaneTitle(title: string, focused: boolean): string {
   return focused ? `▶ ${title}` : title;
 }
@@ -1326,6 +1343,64 @@ export function buildStoryInfoLines(theme: Theme, width: number, info: StoryInfo
   lines.push("");
   pushWrappedText(lines, theme, [info.hasContext ? "4 PR context" : null, info.hasThreads ? "I PR threads" : null, "F full diff"].filter(Boolean).join(" · "), contentWidth, "dim");
   return lines;
+}
+
+/** The sidebar width beside the story panes; 0 when the panes need the whole row. */
+export function getStorySidebarWidth(innerWidth: number): number {
+  if (innerWidth < STORY_SIDEBAR_MIN_INNER_WIDTH) return 0;
+  return Math.max(STORY_SIDEBAR_MIN_WIDTH, Math.min(STORY_SIDEBAR_MAX_WIDTH, Math.round(innerWidth * STORY_SIDEBAR_WIDTH_SHARE)));
+}
+
+function wrapStoryText(text: string, width: number, maxLines: number): string[] {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const wrapped = wrapAnsiText(sanitizeTerminalText(clean), width, true);
+  const shown = wrapped.slice(0, Math.max(0, maxLines));
+  if (shown.length > 0 && shown.length < wrapped.length) shown[shown.length - 1] = truncateEnd(`${shown.at(-1)}\u2026`, width);
+  return shown;
+}
+
+/** The steps around the current one: its title and note, an arrow to what follows, and folded ranges for steps that do not fit. */
+export function buildStorySidebarLines(theme: Theme, width: number, height: number, story: Pick<StorySessionData, "plan" | "step" | "viewedStepIds">): string[] {
+  const { steps, summary } = story.plan;
+  const textWidth = Math.max(1, width - 2);
+  const lines = summary ? [...wrapStoryText(summary, textWidth, Math.max(1, Math.floor(height / 5))).map((line) => ` ${theme.fg("muted", line)}`), ""] : [];
+  if (steps.length === 0) return lines.slice(0, height);
+
+  const current = Math.max(0, Math.min(steps.length - 1, story.step));
+  const digits = String(steps.length).length;
+  const indent = " ".repeat(digits + 3);
+  const titleWidth = Math.max(1, textWidth - indent.length);
+  const number = (index: number) => String(index + 1).padStart(digits);
+  const row = (index: number) => {
+    const mark = story.viewedStepIds.includes(steps[index]!.id) ? theme.fg("success", "\u2713") : " ";
+    return ` ${mark} ${theme.fg("dim", number(index))} ${theme.fg("muted", wrapStoryText(steps[index]!.title, titleWidth, 1)[0] ?? "")}`;
+  };
+  const folded = (first: number, last: number, noun: string) => first === last
+    ? row(first)
+    : `   ${theme.fg("dim", truncateEnd(`${first + 1}\u2013${last + 1} \u00b7 ${last - first + 1} ${noun}`, Math.max(1, textWidth - 2)))}`;
+
+  const earlier = current;
+  const later = steps.length - current - 1;
+  const room = Math.max(0, height - lines.length);
+  const block = wrapStoryText(steps[current]!.title, titleWidth, STORY_SIDEBAR_TITLE_LINES).map((line, index) => index === 0
+    ? ` ${theme.fg("accent", "\u25b8")} ${theme.fg("accent", number(current))} ${theme.fg("accent", line)}`
+    : ` ${indent}${theme.fg("accent", line)}`);
+  const flow = later > 0 ? 2 : 0;
+  const noteRoom = Math.max(1, room - block.length - flow - Math.min(earlier, 1) - Math.min(later, 1));
+  block.push(...wrapStoryText(steps[current]!.explanation, titleWidth, noteRoom).map((line) => ` ${indent}${theme.fg("text", line)}`));
+  if (later > 0) block.push("", ` ${" ".repeat(digits + 1)}${theme.fg("accent", "\u2193")}`);
+
+  const rest = Math.max(0, room - block.length);
+  const earlierShare = Math.min(earlier, Math.floor(rest / 3), Math.max(0, rest - Math.min(later, 1)));
+  const laterRoom = Math.min(later, rest - earlierShare);
+  const earlierRoom = Math.min(earlier, rest - laterRoom);
+  const indices = (first: number, last: number) => Array.from({ length: Math.max(0, last - first + 1) }, (_, offset) => first + offset);
+  const before = earlierRoom >= earlier ? indices(0, current - 1).map(row)
+    : earlierRoom === 0 ? [] : [folded(0, current - earlierRoom, "earlier"), ...indices(current - earlierRoom + 1, current - 1).map(row)];
+  const after = laterRoom >= later ? indices(current + 1, steps.length - 1).map(row)
+    : laterRoom === 0 ? [] : [...indices(current + 1, current + laterRoom - 1).map(row), folded(current + laterRoom, steps.length - 1, "more")];
+  return [...lines, ...before, ...block, ...after].slice(0, height);
 }
 
 /** The scroll position after a popup key, or null for any other key. End is clamped when the popup renders. */
@@ -1752,6 +1827,7 @@ export class ReviewApp {
   private storyInfoPageSize = 1;
   private storyPaneMetrics: Partial<Record<StoryMember, { max: number; page: number }>> = {};
   private readonly storyFreeScroll = new Set<StoryMember>();
+  private storySidebar: boolean;
   private storyContextReturnFocus?: ReviewState["focus"];
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
@@ -1815,6 +1891,7 @@ export class ReviewApp {
     this.commentsGlobal = options.initialSession?.commentsGlobal ?? preferences.commentsGlobal;
     this.showPullRequestThreads = preferences.showPullRequestThreads;
     this.paneVisibility = { ...preferences.paneVisibility };
+    this.storySidebar = preferences.storySidebar;
     this.showAllLocales = options.initialSession?.showAllLocales ?? false;
     this.message = options.initialBanner ?? null;
     this.state = createInitialReviewState(options.files, options.scope);
@@ -5797,7 +5874,11 @@ export class ReviewApp {
     } else if (data === "i") {
       this.storyInventory = true;
       this.storyInventoryScroll = 0;
-    } else if (data === "v" || /^[1-5]$/.test(data) || ["T", "O", "L", "t"].includes(data)) {
+    } else if (data === "1") {
+      this.storySidebar = !this.storySidebar;
+      saveReviewPreference({ storySidebar: this.storySidebar });
+      this.setMessage(this.storySidebar ? "Step sidebar shown. New stories ask the agent for step notes." : "Step sidebar hidden. New stories skip the agent's step notes; 1 shows it again.");
+    } else if (data === "v" || /^[2-5]$/.test(data) || ["T", "O", "L", "t"].includes(data)) {
       this.setMessage("Story uses paired read-only diffs. F opens the full diff; Shift+←/→ moves steps.");
     } else return false;
     this.requestRender();
@@ -5917,23 +5998,30 @@ export class ReviewApp {
     ];
     const footer = buildFooterLines(this.theme, this.message, inner, "story");
     const bodyHeight = height - header.length - footer.length - 2;
-    const stacked = inner < 100;
-    const leftWidth = stacked ? inner : Math.floor((inner - 1) / 2);
+    const sidebarWidth = this.storySidebar ? getStorySidebarWidth(inner) : 0;
+    const paneWidth = sidebarWidth > 0 ? inner - sidebarWidth - 1 : inner;
+    const paneCol = sidebarWidth > 0 ? 1 + sidebarWidth + 1 : 1;
+    const stacked = paneWidth < 100;
+    const leftWidth = stacked ? paneWidth : Math.floor((paneWidth - 1) / 2);
     const leftHeight = stacked ? Math.floor((bodyHeight - 1) / 2) : bodyHeight;
-    const rightWidth = stacked ? inner : inner - leftWidth - 1;
+    const rightWidth = stacked ? paneWidth : paneWidth - leftWidth - 1;
     const rightHeight = stacked ? bodyHeight - leftHeight - 1 : bodyHeight;
     const bodyTop = 1 + header.length;
-    const leftOrigin = { row: bodyTop, col: 1, member: "tests" as const };
+    const leftOrigin = { row: bodyTop, col: paneCol, member: "tests" as const };
     const rightOrigin = stacked
-      ? { row: bodyTop + leftHeight + 1, col: 1, member: "implementation" as const }
-      : { row: bodyTop, col: 1 + leftWidth + 1, member: "implementation" as const };
+      ? { row: bodyTop + leftHeight + 1, col: paneCol, member: "implementation" as const }
+      : { row: bodyTop, col: paneCol + leftWidth + 1, member: "implementation" as const };
     const left = this.renderStoryMember("tests", leftWidth, leftHeight, leftOrigin);
     const right = this.renderStoryMember("implementation", rightWidth, rightHeight, rightOrigin);
     const panes = [
       { top: leftOrigin.row, bottom: leftOrigin.row + leftHeight - 1, left: leftOrigin.col, right: leftOrigin.col + leftWidth - 1 },
       { top: rightOrigin.row, bottom: rightOrigin.row + rightHeight - 1, left: rightOrigin.col, right: rightOrigin.col + rightWidth - 1 },
     ].map((box) => ({ box, inner: innerRect(box) }));
-    const body = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
+    const paired = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
+    const sidebar = sidebarWidth > 0
+      ? renderBox("Steps", sidebarWidth, bodyHeight, this.theme, buildStorySidebarLines(this.theme, sidebarWidth - 2, bodyHeight - 2, story))
+      : undefined;
+    const body = sidebar == null ? paired : paired.map((line, index) => `${sidebar[index] ?? ""} ${line}`);
     let rendered = renderBox("diff-story", width, height, this.theme, [...header, ...body, ...footer], true);
     if (this.storyInventory) rendered = renderCenteredOverlay(rendered, this.renderStoryInfo(width, height), width, height);
     else if (this.storyContextReturnFocus != null) rendered = renderCenteredOverlay(rendered, this.renderContextPanel(width - 4, height - 4), width, height);
