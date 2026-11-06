@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner } from "./host/types.js";
 import {
   getProviderCapability,
   readConfiguredField,
@@ -229,7 +229,7 @@ function parseJson(value: string, provider: ProviderSettings, label: string): un
 }
 
 async function executeOperation(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   input: SubmitReviewInput,
   provider: ProviderSettings,
   operation: string,
@@ -240,7 +240,7 @@ async function executeOperation(
   return pi.exec(provider.executable, configured.args, { cwd: input.gitRoot, timeout });
 }
 
-async function getCurrentActor(pi: ExtensionAPI, input: SubmitReviewInput, provider: ProviderSettings): Promise<SubmissionActor> {
+async function getCurrentActor(pi: CommandRunner, input: SubmitReviewInput, provider: ProviderSettings): Promise<SubmissionActor> {
   if (provider.operations.identity == null) throw new Error(`${provider.label} must configure identity before a submission intent can be confirmed.`);
   const result = await executeOperation(pi, input, provider, "identity", { repo: input.repo, number: input.prNumber }, 15000);
   if (result.code !== 0 || result.stdout.trim().length === 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `${provider.label} identity lookup failed.`);
@@ -251,7 +251,7 @@ async function getCurrentActor(pi: ExtensionAPI, input: SubmitReviewInput, provi
   return id == null ? { kind: "login", value: login, login } : { kind: "id", value: id, login };
 }
 
-async function validateLiveTarget(pi: ExtensionAPI, input: SubmitReviewInput, provider: ProviderSettings): Promise<void> {
+async function validateLiveTarget(pi: CommandRunner, input: SubmitReviewInput, provider: ProviderSettings): Promise<void> {
   if (!getProviderCapability(provider, "validateTargetBeforeSubmit")) return;
   const result = await executeOperation(pi, input, provider, "pullRequest", { repo: input.repo, number: input.prNumber }, 15000);
   if (result.code !== 0 || result.stdout.trim().length === 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `${provider.label} target validation failed.`);
@@ -353,7 +353,7 @@ function readSubmissionResponse(
   return { ...evidence, status: "submitted", reviewId: id };
 }
 
-async function postReview(pi: ExtensionAPI, input: SubmitReviewInput, provider: ProviderSettings, planned: ReviewSubmissionStep, actor: SubmissionActor): Promise<ReviewSubmissionStep> {
+async function postReview(pi: CommandRunner, input: SubmitReviewInput, provider: ProviderSettings, planned: ReviewSubmissionStep, actor: SubmissionActor): Promise<ReviewSubmissionStep> {
   let directory: string | undefined;
   let started = false;
   let outcome: ReviewSubmissionStep = { ...planned, status: "rejected" };
@@ -518,7 +518,7 @@ function resolveHandoff(input: SubmitReviewInput, provider: ProviderSettings, ha
   };
 }
 
-export async function submitPullRequestReview(pi: ExtensionAPI, input: SubmitReviewInput, options: SubmitReviewOptions = {}): Promise<SubmitReviewResult> {
+export async function submitPullRequestReview(pi: CommandRunner, input: SubmitReviewInput, options: SubmitReviewOptions = {}): Promise<SubmitReviewResult> {
   let provider: ProviderSettings | undefined;
   let actor: SubmissionActor | undefined;
   let attempt: SubmissionAttempt | undefined;

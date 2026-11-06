@@ -151,7 +151,15 @@ vi.mock("../git-change-status.js", () => ({
   },
 }));
 
-const { buildReviewEndActions, composeRemoteDiscussionPrompt, composeReviewSubmissionPrompt, mergeReviewBodies, submitUiConfirmedReview, default: codeDiffExtension } = await import("../index.js");
+const { buildReviewEndActions, composeRemoteDiscussionPrompt, composeReviewSubmissionPrompt, mergeReviewBodies, submitUiConfirmedReview: submitHostReview, default: codeDiffExtension } = await import("../index.js");
+const { toHostContext } = await import("../pi/context.js");
+
+const submitUiConfirmedReview = (pi: never, ctx: never, ...rest: Parameters<typeof submitHostReview> extends [unknown, unknown, ...infer Rest] ? Rest : never) =>
+  submitHostReview(pi, toHostContext(pi, ctx), ...rest);
+
+function hostOf(ctx: { cwd?: string; hasUI?: boolean; ui?: unknown }) {
+  return expect.objectContaining({ cwd: ctx.cwd, hasUI: ctx.hasUI, ui: ctx.ui });
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -361,13 +369,14 @@ describe("code diff extension", () => {
     await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalled());
     const options = mocks.runReviewApp.mock.calls[0]![1];
     expect(options.story).toBe(prepared);
+    expect(options.codeCommand).toBe("/code");
     await expect(options.loadFileContents("/repo", file, "all-files")).resolves.toEqual(snapshot.files[0]!.contents);
     expect(mocks.loadReviewFileContents).not.toHaveBeenCalled();
     await commands.get("diff").handler("", ctx);
     await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalledTimes(2));
     expect(mocks.prepareDiffStory).toHaveBeenCalledTimes(1);
     await commands.get("diff-story").handler("agent", ctx);
-    expect(mocks.selectStoryAgent).toHaveBeenCalledWith(ctx);
+    expect(mocks.selectStoryAgent).toHaveBeenCalledWith(hostOf(ctx));
   });
 
   it("passes the same remote brief to story preparation and the mounted review", async () => {
@@ -652,6 +661,7 @@ describe("code diff extension", () => {
 
     await submitUiConfirmedReview(pi as never, ctx as never, remoteTarget(), "comment", undefined, comments);
 
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-coder-grammar", "Checking review grammar with test-model...");
     expect(ctx.ui.select).not.toHaveBeenCalled();
     expect(mocks.submitPullRequestReview).toHaveBeenCalledWith(pi, expect.objectContaining({
       verdict: "comment",
@@ -1037,14 +1047,14 @@ describe("code diff extension", () => {
     await commands.get("code")!.handler("", ctx);
 
     expect(custom).toHaveBeenCalledOnce();
-    expect(mocks.runPiWorkbench).toHaveBeenCalledWith(ctx, {
+    expect(mocks.runPiWorkbench).toHaveBeenCalledWith(hostOf(ctx), {
       cwd: "/repo",
       launch: { capabilities: { discuss: true } },
       syntaxTheme: "github-light",
     });
     expect(commands.get("code")).not.toBe(commands.get("diff"));
     expect(mocks.getReviewWindowData).not.toHaveBeenCalled();
-    expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(ctx);
+    expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(hostOf(ctx));
   });
 
   it("opens a bare /code path at line one already in INSERT mode", async () => {
@@ -1060,7 +1070,7 @@ describe("code diff extension", () => {
 
     await commands.get("code")!.handler("app/models/user.rb", ctx);
 
-    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(hostOf(ctx), {
       cwd: "/repo",
       launch: {
         initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
@@ -1150,7 +1160,7 @@ describe("code diff extension", () => {
     codeDiffExtension(pi as never);
 
     await tools.get("open_code").execute("tool-call", { path: "app/models/user.rb" }, new AbortController().signal, vi.fn(), ctx);
-    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(hostOf(ctx), {
       cwd: "/repo",
       launch: {
         initialTarget: { path: "app/models/user.rb", range: { startLine: 1, endLine: 1 } },
@@ -1163,7 +1173,7 @@ describe("code diff extension", () => {
     mocks.runPiWorkbench.mockClear();
     const target = { path: "app/models/user.rb", range: { startLine: 4, endLine: 6 } };
     await tools.get("open_code").execute("tool-call", { target }, new AbortController().signal, vi.fn(), ctx);
-    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(ctx, {
+    expect(mocks.runPiWorkbench).toHaveBeenCalledExactlyOnceWith(hostOf(ctx), {
       cwd: "/repo",
       launch: { initialTarget: target, capabilities: { discuss: true } },
       syntaxTheme: "github-dark",
@@ -2008,7 +2018,7 @@ describe("code diff extension", () => {
       body: "General review comment\n\nExisting review-wide note",
       comments: [{ path: "src/app.ts", line: 4, side: "RIGHT", body: "Keep this inline comment" }],
     }), expect.any(Object));
-    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
+    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, hostOf(ctx), expect.objectContaining({ repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
 
   });
@@ -2089,7 +2099,7 @@ describe("code diff extension", () => {
         { path: "src/app.ts", subject_type: "file", body: "File note" },
       ],
     }), expect.any(Object));
-    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, ctx, expect.objectContaining({ provider: "secondary", repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
+    expect(mocks.createRemoteReviewRepliesSource).toHaveBeenCalledWith(pi, hostOf(ctx), expect.objectContaining({ provider: "secondary", repo: "example/widgets" }), expect.objectContaining({ load: expect.any(Function) }));
     expect(mocks.runReviewApp.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ repliesSource: mocks.repliesSource }));
   });
 
@@ -2977,7 +2987,7 @@ describe("code diff extension", () => {
       ],
     }, new AbortController().signal, vi.fn(), ctx);
 
-    expect(mocks.runReviewApp).toHaveBeenCalledWith(ctx, expect.objectContaining({
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(hostOf(ctx), expect.objectContaining({
       seedComments: [
         { fileId: "src/app.ts::working::::", scope: "git-diff", side: "added", intent: "comment", startLine: 3, endLine: 3, body: "Handle the nil case." },
       ],
@@ -3031,7 +3041,7 @@ describe("code diff extension", () => {
       ],
     }, new AbortController().signal, vi.fn(), ctx);
 
-    expect(mocks.runReviewApp).toHaveBeenCalledWith(ctx, expect.objectContaining({
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(hostOf(ctx), expect.objectContaining({
       initialSession: expect.objectContaining({ state: expect.objectContaining({ draft: expect.objectContaining({ comments: [{ ...existing, anchorStatus: "stale" }] }) }) }),
       seedComments: [
         { fileId: file.id, scope: "git-diff", side: "added", intent: "comment", startLine: 5, endLine: 5, body: "New generated finding." },
@@ -3062,7 +3072,7 @@ describe("code diff extension", () => {
     }, new AbortController().signal, vi.fn(), ctx);
 
     const seed = { fileId: file.id, scope: "git-diff", side: "added" };
-    expect(mocks.runReviewApp).toHaveBeenCalledWith(ctx, expect.objectContaining({
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(hostOf(ctx), expect.objectContaining({
       seedComments: [
         { ...seed, intent: "comment", startLine: 3, endLine: 3, body: "Handle the nil case.", captureHash: hashTargetSlice(modifiedContent, { startLine: 3, endLine: 3 }) },
         { ...seed, intent: "modify", startLine: 4, endLine: 4, body: "replacement()", originalText: "four()", captureHash: hashTargetSlice(modifiedContent, { startLine: 4, endLine: 4 }) },
@@ -3111,7 +3121,7 @@ describe("code diff extension", () => {
     }, new AbortController().signal, vi.fn(), ctx);
 
     expect(mocks.getReviewWindowDataForRevisionRange).toHaveBeenCalledWith(pi, "/repo", "base", "head");
-    expect(mocks.runReviewApp).toHaveBeenCalledWith(ctx, expect.objectContaining({
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(hostOf(ctx), expect.objectContaining({
       seedComments: [
         { fileId: "src/app.ts::all::base::head", scope: "all-files", side: "added", intent: "comment", startLine: 5, endLine: 5, body: "Range note." },
       ],
@@ -3157,10 +3167,10 @@ describe("code diff extension", () => {
     await commands.get("diff")!.handler("", ctx);
     await vi.waitFor(() => expect(mocks.runReviewApp).toHaveBeenCalled());
 
-    expect(mocks.runReviewApp).toHaveBeenCalledWith(ctx, expect.objectContaining({ seedComments: [] }));
+    expect(mocks.runReviewApp).toHaveBeenCalledWith(hostOf(ctx), expect.objectContaining({ seedComments: [] }));
     await vi.waitFor(() => expect(ctx.ui.setEditorText).toHaveBeenCalledTimes(1));
     expect(ctx.ui.setEditorText).toHaveBeenCalledWith("generated review prompt");
-    await vi.waitFor(() => expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(ctx));
+    await vi.waitFor(() => expect(mocks.repositoryStatusRefresh).toHaveBeenCalledWith(hostOf(ctx)));
   });
 
   it("expands --cwd for the diff command", async () => {
@@ -3290,7 +3300,7 @@ describe("code diff extension", () => {
     await shortcutRun;
 
     expect(mocks.repositoryStatusRefresh).toHaveBeenCalledTimes(1);
-    expect(mocks.repositoryStatusRefresh).toHaveBeenLastCalledWith(ctx);
+    expect(mocks.repositoryStatusRefresh).toHaveBeenLastCalledWith(hostOf(ctx));
 
     mocks.getReviewWindowData.mockResolvedValueOnce({ repoRoot: "/repo", files: [], branchBaseRevision: null, modifiedRevision: undefined, scope: "git-diff" });
     const releasedTool = await tools.get("open_code_diff").execute(

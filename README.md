@@ -1,12 +1,13 @@
 # pi-coder
 
-`pi-coder` adds full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono):
+`pi-coder` adds full-screen coding tools to [Pi](https://github.com/badlogic/pi-mono), and runs the same tools without Pi:
 
 - `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
 - `/code` browses and edits a workspace without leaving Pi.
 - `/diff-story` arranges a change as ordered code steps with linked implementation and test diffs.
+- The `pi-coder` command opens all three in any terminal, and hands the result to any agent: Claude Code, Codex, another agent tool, or a plain shell. See [Use it outside Pi](#use-it-outside-pi).
 
-It also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews. New, untracked files count individually and contribute their text additions. If Git cannot return complete counts, incomplete line totals are omitted rather than shown as exact.
+Inside Pi, it also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews. New, untracked files count individually and contribute their text additions. If Git cannot return complete counts, incomplete line totals are omitted rather than shown as exact.
 
 For a deeper walkthrough of the workflow, usage, and the engineering reasoning behind it, read [The Human in the Loop](https://blog.leonardopereira.com/2026/08/19/the-human-in-the-loop/).
 
@@ -32,9 +33,15 @@ pi install https://github.com/dantetekanem/pi-coder
 
 Restart Pi or run `/reload`.
 
+To use pi-coder without Pi, install the command:
+
+```bash
+npm install -g pi-coder
+```
+
 ### Pi compatibility and security baseline
 
-Use Node.js 22.19.0 or newer and `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, and `@earendil-works/pi-tui` at 0.79.10 or newer. Keep the Pi packages on matching releases. The lockfile tests the 0.79.10 minimum; the peer ranges allow newer hosts without requiring Pi 1.x. Newer releases are not all covered by this compatibility check.
+Use Node.js 22.19.0 or newer. Inside Pi, use `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` at 0.79.10 or newer; they are optional peers that the `pi-coder` command does not load. `@earendil-works/pi-tui` is a regular dependency. Keep the Pi packages on matching releases. The lockfile tests the 0.79.10 minimum; the peer ranges allow newer hosts without requiring Pi 1.x. Newer releases are not all covered by this compatibility check.
 
 This baseline includes the Pi fixes described in these advisories:
 
@@ -88,32 +95,43 @@ GitHub pull requests work by default through the authenticated [`gh`](https://cl
 /diff-story agent                  # choose the story model and thinking level
 ```
 
-The story agent starts as `openai-codex/gpt-5.6-luna` with `max` thinking. Its selection is saved independently of the main conversation. Model selection validates support for the chosen thinking level.
+The story agent starts as `anthropic/claude-opus-5-5` with `low` thinking. Its selection is saved independently of the main conversation. Model selection validates support for the chosen thinking level.
 
-A full-screen preparation view shows the captured files, change counts, and generation phase. The capture skips non-English/non-pt-BR locale files, as the `/diff` file list does, and shows how many it hid. Press `F` and then `L` to see them in the full diff. The extension extracts changed functions and individual tests locally. Changed lines outside a function join the nearest function in their file; a file without functions becomes one unit. The extension then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. The extension supplies the exact ranges, complete changed-line coverage, and file/symbol titles. Each paired test appears once beside its implementation. Setup, helpers, and other unpaired tests join the step that owns the nearest paired test in their file, and a test file without pairs gets one step.
+A full-screen preparation view shows the captured files, change counts, and generation phase. The capture skips non-English/non-pt-BR locale files, as the `/diff` file list does, and shows how many it hid. Press `F` and then `L` to see them in the full diff. The extension extracts changed functions and individual tests locally. Changed lines outside a function join the nearest function in their file; a file without functions becomes one unit. The extension then pairs obvious filename and symbol matches. One model request arranges these prepared units and adjusts their test links. While the step sidebar is on, the same request also writes a summary and a short title and note for each step. The extension supplies the exact ranges and complete changed-line coverage. Without notes, it titles each step with its file and symbol. A step is one change with all of its tests: each paired test appears once, with its implementation. Only test cases (`test "…"`, `it "…"`, `specify`, and `def test_…`) pair with code. Other methods in a test file are helpers: a helper joins the step of the first test that calls it. Setup and other unpaired tests join the step that owns the nearest paired test in their file, and a test file without pairs gets one step. To pair a test, the extension also reads the helpers it calls and ignores quoted strings and `key:` labels, and a changed file named like the test file wins over name matches in other files. When one test file has more than 30 anchored lines in a step, the extension splits its tests across several steps that repeat the same code (the titles end with `tests 1/2`, `tests 2/2`). A comment on repeated code stays one comment, and each step keeps its own seen mark and scroll position. Stories saved by an earlier version keep their steps.
 
 During preparation, a centered five-line strip shows public output, errors, and progress as they arrive, including the final ordering JSON. Gray text uses the normal terminal background, with the newest line at the bottom and older lines fading upward through 100% / 80% / 60% / 40% / 20%, approximated with terminal colors. The strip spans up to 120 columns. `Space` pauses/resumes the strip while generation and the running spinner continue. Elapsed time remains visible. The strip disappears when preparation ends. On generation failure, `r` explicitly retries against the same captured files.
 
-File and change totals stay above two unified diffs: **Implementation** and **Related changed tests**. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Each pane shows one file's lines for the current step, plus a few unchanged lines of context. Code owned by another step stays collapsed, so every changed line appears on exactly one page. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack; below 40 columns or 27 rows, resize or switch to the full diff.
+A one-line header shows the step title and its position, such as `2/7`, with `seen` after a marked step. Two unified diffs follow: **Related changed tests** on the left and **Implementation** on the right. The story opens on the code pane, also when you resume, and every step change returns to it. Both panes follow the current step, with faint green/red backgrounds on changed lines and colored addition/deletion counts for the current hunk. You select comment ranges with `Shift+Up/Down`. Each pane shows one file's lines for the current step, plus a few unchanged lines of context. Code owned by another step stays collapsed, so every changed line appears on exactly one page, except code that repeats because its tests were split. Every captured change is reachable through step navigation; omitted units follow the model's ordered steps. At narrow widths the panes stack, with the tests on top; below 40 columns or 27 rows, resize or switch to the full diff.
+
+When a step has no related changed test, the left pane shows the **Existing tests** of its code. pi-coder searches the reviewed revision with `git grep`, inside the code's package: the nearest folder above the code with a package manifest, such as `package.json` or `Gemfile`. A test counts when it names the changed function, or changed code that calls it, and its file mirrors, sits beside, imports, or names that code. pi-coder follows calls only through the files that the change touches. Each file says why its tests match, such as `3 tests mention total, which reaches tax`, and marks the tests that this review changes. Up/Down and PgUp/PgDn scroll the pane when it has focus, and `Option` scrolls it from the code pane. When no test reaches the code, the pane says **No tests found for this code** and names what it searched. That marks untested code, unless a test reaches it through files that the change does not touch. When the search fails or takes more than 20 seconds, the pane says so: that is a gap in pi-coder, not a finding about the code. Steps that change only tests, remove code, or change files that do not run say so instead. The search reads Ruby, Python, and JavaScript/TypeScript tests; for other languages, the pane says that pi-coder cannot read their tests yet.
+
+The **Steps** sidebar on the left shows how the change is built. It starts with the story summary and lists each step by number and title. The current step is highlighted, with the agent's note under it and an arrow down to the steps that follow. It moves with `Shift+Left/Right`. Seen steps show `✓`, and steps that do not fit fold into ranges such as `26–40 · 15 more`. The sidebar is on by default. Press `1` to hide it: pi-coder saves the choice, and new stories then skip the step notes and build faster. Press `1` again to show it. Below 100 columns the sidebar hides and gives its room to the panes.
 
 | Key | Story action |
 | --- | --- |
 | `Shift+Left` / `Shift+Right` | Previous / next step |
-| `Left` / `Right` | Focus implementation / tests |
-| `[` / `]` | Previous / next file in the focused member |
+| `Left` / `Right` | Focus tests / implementation |
+| `Tab` / `Shift+Tab` | Cycle tests, implementation and comments, forward / backward |
+| `h` | Show or hide comments |
+| `[` / `]` | Previous / next file in the focused pane |
+| `Home` / `End`, `gg` / `G` | Jump the focused pane to its first / last line |
+| `Option+Up` / `Option+Down` | Scroll the other pane one row; focus stays where it is |
+| `Option+PgUp` / `Option+PgDn` | Scroll the other pane one page |
+| `Option+Shift+Up` / `Option+Shift+Down`, `Option+Home` / `Option+End` | Move the other pane to its top / bottom |
 | `R` | Mark the current step seen |
 | `c` / `d` | Comment / discuss at the selected range |
-| `h` / `Tab` | Reach comments or the paired panes |
-| `i` | View captured files, story steps, and saved notes |
+| `i` | Open the story info: the step, review, totals, captured files, and every step |
+| `1` | Show or hide the step sidebar; while it is hidden, new stories skip the step notes |
 | `4` | Open PR context; `D` toggles the full description and `Esc` returns to the same step |
 | `F` | Inspect the full captured diff, or return to the story |
 | `s` | Finish through the normal review flow |
+| `Ctrl+?` / `?` / `Ctrl+/` | Open the shortcuts list for the story |
 
-In either review mode, diff movement follows changed lines by default. Hold `Option` (`Alt`) with movement keys to reach unchanged code; `Option+Shift+↑/↓` selects a context range for a note. In a story, movement stays inside the current page. Cursor keys stay with an active editor. Steps with no related changed test show an empty test pane. `F` opens the full diff with the same saved comments.
+In a review or the full diff, movement follows changed lines by default. Hold `Option` (`Alt`) with movement keys to reach unchanged code; `Option+Shift+↑/↓` selects a context range for a note. In a story, movement stays inside the current page and `Option` scrolls the other pane instead of moving the cursor. Press `C` to let Up/Down and Shift+Up/Down visit the page's unchanged context lines. Cursor keys stay with an active editor. `F` opens the full diff with the same saved comments.
 
-Resume retains the active step, per-member selections/scroll, marks, and comments. Changed bytes invalidate the saved story: explicitly rebuild it, use the ordinary diff, or cancel. Existing feedback remains subject to its usual anchor validation.
+Resume retains the active step, per-pane selections/scroll, marks, and comments, and reopens on the code pane. Changed bytes invalidate the saved story: explicitly rebuild it, use the ordinary diff, or cancel. Existing feedback remains subject to its usual anchor validation.
 
-The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. Full captured code stays available through `F`. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
+The model receives unit identifiers, filenames, symbols, reference matches, and proposed test pairs. While the step sidebar is on, it also receives each unit's changed lines, up to 60 per unit and fewer on large changes, so it can write the notes. Full captured code stays available through `F`. Requests use the provider's token, timeout, and retry settings. Cancel preparation with `Esc` or `Ctrl+C`. Before opening a story, the extension validates its anchors against the captured revision and reports unreadable files, binary content, or invalid output.
 
 ### Discuss saved review notes
 
@@ -153,11 +171,13 @@ The `.write-lock` mutex never waits or removes an owner based on age or PID stat
 
 GitHub pull requests work through the authenticated [`gh`](https://cli.github.com/) CLI without extra configuration. See [Remote providers](docs/remote-providers.md) to add another code host or configure repository-specific paths.
 
-Common review controls:
+The footer is one line, `Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)`. A story adds `- i (Info)`. Common review controls:
 
 | Key | Action |
 | --- | --- |
+| `Ctrl+?` / `?` / `Ctrl+/` | Open or close the shortcuts list over the review or story. Up/Down, PgUp/PgDn and Home/End scroll it and `Esc` closes it. Legacy terminals, and tmux without `extended-keys`, send Ctrl+? as the Backspace byte, so pi-coder never reads Backspace as this key; `?` and `Ctrl+/` work everywhere. |
 | Arrow keys | Navigate files and changed diff lines by default |
+| `Home` / `End`, `gg` / `G` | Jump the focused pane to its first / last item |
 | `Option`/`Alt` + `↑` / `↓` / `PgUp` / `PgDn` / `Home` / `End` | Reach any code line, revealing collapsed context as needed; add `Shift` to select a range |
 | `c` / `d` | Add a comment / discussion |
 | Mouse drag | Select text and copy it when you release. In a diff, the copy holds only code, without line numbers, `+`/`-` signs, or the other side. Double-click selects a word and triple-click a line. |
@@ -246,6 +266,26 @@ Agents can use the same interfaces through:
 - `open_code_diff_story` — open `/diff-story` with the same targets and `cwd`. It always uses the built-in story view, even with a configured code command.
 - `submit_pr_review` — submit a confirmed configured-provider review.
 
+## Use it outside Pi
+
+The `pi-coder` command runs the same review, diff story, and workbench in a terminal:
+
+```bash
+pi-coder diff main...HEAD
+pi-coder story remote https://github.com/owner/repository/pull/123
+pi-coder code src/app.ts
+```
+
+When you finish, it prints the text Pi would give its agent: your review feedback or DISCUSS notes. Add `--json` for one result object. It reads the same settings, drafts, and submissions as the extension.
+
+Agents in other harnesses call the same tools:
+
+- `pi-coder tool open_code_diff --input '<json>'` runs a tool with the Pi tool input and result. From an agent's shell, the screen opens in a new Herdr or tmux pane and the command waits for the user.
+- `pi-coder mcp` serves the tools over MCP for Claude Code, Codex, and other MCP clients.
+- `skills/pi-coder/SKILL.md` tells an agent how to open a review, read the feedback, continue a discussion, and submit a review.
+
+Outside Pi, the grammar pass and the story agent use model commands from `pi-coder-settings.json`, or `pi -p` when Pi is installed. Read [The pi-coder command](docs/cli.md) and [Use pi-coder from other agents](docs/harnesses.md).
+
 ## Security and data access
 
 Read [SECURITY.md](SECURITY.md) for private vulnerability reporting and [docs/access.md](docs/access.md) for the exact subprocess, filesystem, and network access used by the package.
@@ -258,7 +298,7 @@ pnpm typecheck
 pnpm test
 ```
 
-Build the standalone Workbench with `pnpm workbench:build`.
+Run the command from a checkout with `node bin/pi-coder.mjs --help`. Build the standalone Workbench with `pnpm workbench:build`.
 
 ## Acknowledgments
 

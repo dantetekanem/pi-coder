@@ -2,7 +2,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { buildStructuredDiff } from "../diff.js";
 import type { DiffReviewComment, ReviewFile, ReviewState } from "../types.js";
-import { buildCommentPanelEmptyStateLines, buildCommentPanelTextLines, buildContextPanelLines, buildDiffActionHintLine, buildDisplayRows, buildEditorLaunchArgs, buildFooterLines, buildReviewHeaderLine, buildReviewHeaderText, buildHelpPanelLines, buildModifyPreviewLines, buildSelectionClipboardText, buildSideBySideDisplayRows, diffTextMatchesSearch, fitFooterLines, formatFocusStatus, formatPaneTitle, formatSelectedLineTargetLabel, getCancelAction, getChangedLineTargets, getDraftCommentCount, getEditorLineForTarget, getHalfPageStep, getMatchingDiffLineTargets, getMeasuredPageRange, getNavigatorGroup, getNavigatorMoveIndex, getNextSearchIndex, getPaneLayout, getPaneLayoutForVisibility, getPaneLayoutWithContext, getRelatedFileMarker, getRelatedFilePanelSections, getRelatedFilePaths, getReviewVerticalLayout, getSideBySideColumnTarget, getSideBySideLineTargets, getSideBySidePairedLineTarget, getSourceLineRangeText, getStableDiffScroll, getStackedPaneLayout, getStackedPaneLayoutForVisibility, getStackedPaneLayoutWithContext, getVirtualRowRange, groupNavigatorFiles, isUnchangedModify, parseMouseWheelInput, renderCenteredOverlay, setBoundedMapEntry, shouldStackPanes, shouldStackPanesWithContext } from "../ui/review-app.js";
+import { buildCommentPanelEmptyStateLines, buildCommentPanelTextLines, buildContextPanelLines, buildDisplayRows, buildEditorLaunchArgs, buildFooterLines, buildReviewHeaderLine, buildReviewHeaderText, buildHelpPanelLines, buildModifyPreviewLines, buildSelectionClipboardText, buildSideBySideDisplayRows, diffTextMatchesSearch, fitFooterLines, formatFocusStatus, formatPaneTitle, formatSelectedLineTargetLabel, getCancelAction, getChangedLineTargets, getDraftCommentCount, getEditorLineForTarget, getHalfPageStep, getMatchingDiffLineTargets, getMeasuredPageRange, getNavigatorGroup, getNavigatorMoveIndex, getNextSearchIndex, getPaneLayout, getPaneLayoutForVisibility, getPaneLayoutWithContext, getRelatedFileMarker, getRelatedFilePanelSections, getRelatedFilePaths, getReviewVerticalLayout, getSideBySideColumnTarget, getSideBySideLineTargets, getSideBySidePairedLineTarget, getSourceLineRangeText, getStableDiffScroll, getStackedPaneLayout, getStackedPaneLayoutForVisibility, getStackedPaneLayoutWithContext, getVirtualRowRange, groupNavigatorFiles, isUnchangedModify, parseMouseWheelInput, renderCenteredOverlay, setBoundedMapEntry, shouldStackPanes, shouldStackPanesWithContext } from "../ui/review-app.js";
 
 function makeFile(path: string, flags?: Partial<ReviewFile>): ReviewFile {
   return {
@@ -522,20 +522,28 @@ describe("persistent review header", () => {
 });
 
 describe("action and shortcut help rendering", () => {
-  it("wraps the persistent footer without hiding later shortcuts", () => {
-    const lines = buildFooterLines(plainTheme as any, "Tab focus • / search • ? help • 1/2/3 scopes • h hide comments • o open in $EDITOR • s submit • Esc exit", 80);
-    const text = lines.join(" ");
-
-    expect(lines.length).toBeGreaterThan(2);
-    expect(text).toContain("1/2/3/4/5 toggle Navigator/Diff/Comments/PR context/Replies");
-    expect(text).toContain("Esc / Ctrl+C exit");
-    expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+  it("shows the shortcuts on a single footer line", () => {
+    expect(buildFooterLines(plainTheme as any, null, 120)).toEqual(["Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)"]);
+    expect(buildFooterLines(plainTheme as any, "", 120, "story")).toEqual(["Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts) - i (Info)"]);
   });
 
-  it("uses an explicit help marker when the frame cannot fit every footer line", () => {
+  it("puts a wrapped status above the shortcuts and wraps the shortcuts at narrow widths", () => {
+    const status = "Copied 3 lines. ".repeat(8).trim();
+    const wide = buildFooterLines(plainTheme as any, status, 80);
+    const narrow = buildFooterLines(plainTheme as any, null, 30, "story");
+
+    expect(wide).toHaveLength(3);
+    expect(wide.slice(0, 2).join(" ")).toBe(status);
+    expect(wide[2]).toBe("Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)");
+    expect(narrow.length).toBeGreaterThan(2);
+    expect(narrow.join(" ")).toBe("Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts) - i (Info)");
+    expect(narrow.every((line) => visibleWidth(line) <= 30)).toBe(true);
+  });
+
+  it("uses an explicit shortcuts marker when the frame cannot fit every footer line", () => {
     const fitted = fitFooterLines(plainTheme as any, ["one", "two", "three", "four", "five"], 3, 40);
 
-    expect(fitted).toEqual(["one", "two", "+3 more • ? help"]);
+    expect(fitted).toEqual(["one", "two", "+3 more • Ctrl+? shortcuts"]);
   });
 
   it("keeps panes and footer within the vertical frame budget", () => {
@@ -571,6 +579,30 @@ describe("action and shortcut help rendering", () => {
     expect(lines).toContain("Diff actions");
     expect(lines.some((line) => line.includes("navigator: ↑↓/j/k files") && line.includes("diff:"))).toBe(false);
     expect(lines.every((line) => visibleWidth(line) <= 22)).toBe(true);
+  });
+
+  it("names the host's code command in the help panel", () => {
+    const help = (codeCommand?: string) => buildHelpPanelLines(plainTheme as any, 80, [], "/config/code-diff.json", codeCommand).join("\n");
+
+    expect(help()).toContain("o open current line in /code");
+    expect(help("pi-coder code")).toContain("o open current line in pi-coder code");
+  });
+
+  it("names every key that opens the list and the terminals that need an alias", () => {
+    const help = buildHelpPanelLines(plainTheme as any, 100, [], "/config/code-diff.json").join("\n");
+
+    expect(help).toContain("Ctrl+? / ? / Ctrl+/ toggle • Esc close");
+    expect(help).toContain("tmux without extended-keys");
+  });
+
+  it("lists the story keys and leaves out template shortcuts and the config path", () => {
+    const lines = buildHelpPanelLines(plainTheme as any, 88, [], "/config/code-diff.json", "pi-coder code", "story");
+
+    expect(lines).toEqual(expect.arrayContaining(["Story", "Panes", "Move", "Other pane", "Comments"]));
+    expect(lines).toContain("Option+↑↓ scroll the other pane one row; focus stays");
+    expect(lines).not.toContain("Template shortcuts");
+    expect(lines.join("\n")).not.toContain("/config/code-diff.json");
+    expect(lines.join("\n")).not.toContain("Diff actions");
   });
 
   it("wraps comments-panel guidance to the comments width", () => {
@@ -630,13 +662,6 @@ describe("action and shortcut help rendering", () => {
     expect(buildCommentPanelTextLines(plainTheme as any, 24, "first\u001b[31m\nsecond", "muted", "   ", 3)).toEqual(["   first\\x1b[31m", "   second"]);
   });
 
-  it("shows line action keys in the diff pane hint", () => {
-    const hint = buildDiffActionHintLine(plainTheme as any, 120);
-
-    for (const token of ["Enter/m", "modify", "c", "comment", "d", "discuss", "l", "file", "a", "all lines", "k/j", "context", "w", "wrap"]) {
-      expect(hint).toContain(token);
-    }
-  });
 });
 
 describe("review editing and clipboard helpers", () => {

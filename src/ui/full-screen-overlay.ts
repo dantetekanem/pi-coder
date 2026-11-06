@@ -28,6 +28,7 @@ interface HerdrPaneZoomOptions {
   environment?: Readonly<Record<string, string | undefined>>;
   run: (args: string[]) => Promise<HerdrCommandResult>;
   warn?: (message: string) => void;
+  command?: string;
 }
 
 function parseHerdrZoomState(stdout: string): boolean | null {
@@ -44,18 +45,21 @@ export async function withHerdrPaneZoom<T>(
   options: HerdrPaneZoomOptions,
 ): Promise<T> {
   if ((options.environment ?? process.env).HERDR_ENV !== "1") return action();
+  const command = options.command ?? "/diff";
+  const unavailable = `Could not enable Herdr full-screen mode; opening ${command} in the current pane.`;
+  const notRestored = `Could not restore the Herdr pane layout after ${command} closed.`;
 
   let layout: HerdrCommandResult;
   try {
     layout = await options.run(["pane", "layout", "--current"]);
   } catch {
-    options.warn?.("Could not enable Herdr full-screen mode; opening /diff in the current pane.");
+    options.warn?.(unavailable);
     return action();
   }
 
   const alreadyZoomed = layout.code === 0 ? parseHerdrZoomState(layout.stdout) : null;
   if (alreadyZoomed == null) {
-    options.warn?.("Could not enable Herdr full-screen mode; opening /diff in the current pane.");
+    options.warn?.(unavailable);
     return action();
   }
   if (alreadyZoomed) return action();
@@ -67,7 +71,7 @@ export async function withHerdrPaneZoom<T>(
     // Fall through to the normal in-pane review.
   }
   if (!zoomed) {
-    options.warn?.("Could not enable Herdr full-screen mode; opening /diff in the current pane.");
+    options.warn?.(unavailable);
     return action();
   }
 
@@ -76,9 +80,9 @@ export async function withHerdrPaneZoom<T>(
   } finally {
     try {
       const restored = await options.run(["pane", "zoom", "--current", "--off"]);
-      if (restored.code !== 0) options.warn?.("Could not restore the Herdr pane layout after /diff closed.");
+      if (restored.code !== 0) options.warn?.(notRestored);
     } catch {
-      options.warn?.("Could not restore the Herdr pane layout after /diff closed.");
+      options.warn?.(notRestored);
     }
   }
 }

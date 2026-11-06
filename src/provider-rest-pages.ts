@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner } from "./host/types.js";
 import { readConfiguredField, renderProviderOperation, type ProviderSettings } from "./provider-settings.js";
 
 export interface ProviderRestPage {
@@ -9,7 +9,7 @@ export interface ProviderRestPage {
 
 /** Callers admit each projected page before the next configured command is issued. */
 export async function fetchProviderRestPages(
-  pi: ExtensionAPI, provider: ProviderSettings, operation: string,
+  pi: CommandRunner, provider: ProviderSettings, operation: string,
   request: { repo: string; number: string; cwd: string }, previous?: ProviderRestPage, onPage?: (page: ProviderRestPage) => void,
 ): Promise<ProviderRestPage> {
   let accepted = previous;

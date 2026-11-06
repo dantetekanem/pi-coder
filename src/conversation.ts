@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner } from "./host/types.js";
 import type { PullRequestDetails } from "./pr-summary.js";
 import type { RemoteReviewTarget } from "./remote.js";
 import type { ReviewConversationMetadata, ReviewConversationLoadOptions, ReviewReplyItem } from "./types.js";
@@ -7,7 +7,7 @@ const DEFAULT_LIMITS = { maxRequests: 12, maxMs: 30_000, maxBytes: 2_000_000, ma
 export type ConversationReadLimits = Partial<typeof DEFAULT_LIMITS>;
 
 /** Limits accepted decoded output and serialized retained data, not exec's transport buffers. */
-export function createConversationRead(pi: ExtensionAPI, limits: ConversationReadLimits = {}, ledger = { bytes: 0 }) {
+export function createConversationRead(pi: CommandRunner, limits: ConversationReadLimits = {}, ledger = { bytes: 0 }) {
   const policy = { ...DEFAULT_LIMITS, ...limits };
   if (Object.values(policy).some((value) => !Number.isSafeInteger(value) || value < 0)) throw new Error("Invalid conversation read limits.");
   const deadline = Date.now() + policy.maxMs;
@@ -31,7 +31,7 @@ export function createConversationRead(pi: ExtensionAPI, limits: ConversationRea
     if (Date.now() >= deadline) throw stop("time limit reached");
   };
   const timer = setTimeout(() => stop("time limit reached"), policy.maxMs);
-  const exec: ExtensionAPI["exec"] = async (command, args, options) => {
+  const exec: CommandRunner["exec"] = async (command, args, options) => {
     check();
     if (++requests > policy.maxRequests) throw stop("request limit reached");
     const signal = options?.signal == null ? controller.signal : AbortSignal.any([controller.signal, options.signal]);
@@ -83,7 +83,7 @@ interface PendingRead extends ConversationLoad {
 }
 
 export function createConversationReader(
-  pi: ExtensionAPI, target: RemoteReviewTarget,
+  pi: CommandRunner, target: RemoteReviewTarget,
   acquire: (read: ReturnType<typeof createConversationRead>, onProgress: (data: Partial<ConversationData>) => void, previous?: ConversationData) => Promise<ConversationData>,
   supplied?: PullRequestDetails,
 ) {

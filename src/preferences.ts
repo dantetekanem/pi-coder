@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 import { getShortcutConfigPath } from "./shortcuts.js";
 import { DEFAULT_STORY_AGENT, type ReviewAgentSelection } from "./review-agent.js";
 import { DEFAULT_SHIKI_THEME } from "./workbench/node/shiki.js";
@@ -32,6 +32,8 @@ export interface ReviewPreferences {
   paneVisibility: ReviewPaneVisibility;
   lastReviewVerdict: PersistedReviewVerdict | null;
   storyAgent: ReviewAgentSelection;
+  /** Shows the story sidebar and asks the story agent for step notes. */
+  storySidebar: boolean;
 }
 
 export const DEFAULT_REVIEW_PANE_VISIBILITY: ReviewPaneVisibility = {
@@ -54,6 +56,7 @@ export const DEFAULT_REVIEW_PREFERENCES: ReviewPreferences = {
   paneVisibility: DEFAULT_REVIEW_PANE_VISIBILITY,
   lastReviewVerdict: null,
   storyAgent: DEFAULT_STORY_AGENT,
+  storySidebar: true,
 };
 
 function getPreferencesPath(): string {
@@ -123,6 +126,7 @@ export function loadReviewPreferences(): ReviewPreferences {
       showPullRequestThreads: typeof record.showPullRequestThreads === "boolean" ? record.showPullRequestThreads : DEFAULT_REVIEW_PREFERENCES.showPullRequestThreads,
       paneVisibility: loadPaneVisibility(record.paneVisibility),
       storyAgent: isReviewAgentSelection(record.storyAgent) ? record.storyAgent : { ...DEFAULT_STORY_AGENT },
+      storySidebar: typeof record.storySidebar === "boolean" ? record.storySidebar : DEFAULT_REVIEW_PREFERENCES.storySidebar,
     };
   } catch {
     return defaultReviewPreferences();

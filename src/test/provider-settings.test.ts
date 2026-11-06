@@ -192,6 +192,36 @@ describe("provider settings", () => {
     expect(() => parsePiCoderSettings(badFile)).toThrow("providers.primary.urls.file supports only {repo}, {revision}, {path}, {line}.");
   });
 
+  it("passes the terminal host sections through unvalidated", () => {
+    const models = { story: { command: ["story-model", "{provider}"] } };
+    const terminal = { command: ["open-pane", "{cwd}"] };
+    const parsed = parsePiCoderSettings({ ...neutralSettings(), models, terminal });
+    expect(parsed.models).toEqual(models);
+    expect(parsed.terminal).toEqual(terminal);
+    expect(parsePiCoderSettings({ ...neutralSettings(), models: "anything", terminal: 3 })).toMatchObject({ models: "anything", terminal: 3 });
+
+    const plain = parsePiCoderSettings(neutralSettings());
+    expect("models" in plain).toBe(false);
+    expect("terminal" in plain).toBe(false);
+  });
+
+  it("accepts a settings file that only configures the terminal host", () => {
+    const parsed = parsePiCoderSettings({ terminal: { command: ["open-pane"] } });
+    expect(parsed.terminal).toEqual({ command: ["open-pane"] });
+    expect(Object.keys(parsed.providers)).toEqual(["github"]);
+    expect(parsed.repositories).toEqual({});
+    expect(parsePiCoderSettings({}).providers.github).toBeDefined();
+
+    writeFileSync(settingsPath, JSON.stringify({ models: { story: { command: ["story-model"] } } }), "utf8");
+    expect(loadPiCoderSettings().models).toEqual({ story: { command: ["story-model"] } });
+  });
+
+  it("still rejects a malformed providers section", () => {
+    expect(() => parsePiCoderSettings({ providers: null })).toThrow("settings.providers must be an object.");
+    expect(() => parsePiCoderSettings({ providers: [] })).toThrow("settings.providers must be an object.");
+    expect(() => parsePiCoderSettings({ providers: "github" })).toThrow("settings.providers must be an object.");
+  });
+
   it("rejects unknown fields and malformed provider values", () => {
     expect(() => parsePiCoderSettings({ ...neutralSettings(), extra: true })).toThrow("settings has unsupported fields: extra.");
     expect(() => parsePiCoderSettings({ ...neutralSettings(), version: 2 })).toThrow("Settings version must be 1.");

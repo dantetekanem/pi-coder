@@ -3,20 +3,21 @@ import * as ai from "@earendil-works/pi-ai";
 import { createStoryAgentGenerator } from "../diff-story/agent.js";
 import { createStorySnapshot, uncoveredStoryChanges } from "../diff-story/plan.js";
 import { generateDiffStory } from "../diff-story/generate.js";
+import { createPiModelGateway } from "../pi/models.js";
 import { DEFAULT_STORY_AGENT } from "../review-agent.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
 
-const model = { id: "gpt-5.6-luna", provider: "openai-codex", thinkingLevelMap: { max: "max" } };
+const model = { id: "claude-opus-5-5", provider: "anthropic", thinkingLevelMap: { low: "low" } };
 const snapshot = createStorySnapshot([{
   fileId: "app", path: "app.ts", scope: "git-diff",
   contents: { originalContent: "return 1;\n", modifiedContent: "return 2;\n" },
 }]);
 function context(streamSimple: ReturnType<typeof vi.fn>) {
-  return { cwd: process.cwd(), modelRegistry: {
+  return createPiModelGateway({} as never, { modelRegistry: {
     find: () => model,
     getProvider: () => ({ streamSimple }),
     getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "test-secret", headers: { "x-test": "1" } })),
-  } };
+  } } as never);
 }
 async function* response(reason = "stop") {
   yield { type: "thinking_delta", delta: "private reasoning" };
@@ -31,7 +32,7 @@ describe("single-request story arrangement", () => {
       messages: Array<{ role: string; content: string; toolsAdded?: unknown[] }>;
     }, _options: Record<string, unknown>) => response());
     const activities: StoryAgentActivity[] = [];
-    const generate = createStoryAgentGenerator(context(provider) as never, DEFAULT_STORY_AGENT, (event) => activities.push(event));
+    const generate = createStoryAgentGenerator(context(provider), DEFAULT_STORY_AGENT, (event) => activities.push(event));
     const story = await generateDiffStory(snapshot, generate, new AbortController().signal, () => {});
     expect(provider).toHaveBeenCalledOnce();
     const request = provider.mock.calls[0]![1];
@@ -41,7 +42,7 @@ describe("single-request story arrangement", () => {
     const user = request.messages.find((message: { role: string }) => message.role === "user");
     expect(user?.content).toContain('"id":"u1"');
     expect(user?.content).toContain('"references":[]');
-    expect(provider.mock.calls[0]![2]).toMatchObject({ apiKey: "test-secret", reasoning: "max" });
+    expect(provider.mock.calls[0]![2]).toMatchObject({ apiKey: "test-secret", reasoning: "low" });
     expect(activities).toContainEqual({ kind: "text", id: "order", text: '{"order":[],"pairs":[]}' });
     expect(JSON.stringify(activities)).not.toMatch(/private reasoning|test-secret/);
     expect(uncoveredStoryChanges(story, snapshot)).toEqual([]);
@@ -49,7 +50,7 @@ describe("single-request story arrangement", () => {
 
   it.each(["toolUse", "length"])("rejects %s rather than starting another model turn or accepting a partial plan", async (reason) => {
     const provider = vi.fn(() => response(reason));
-    const generate = createStoryAgentGenerator(context(provider) as never, DEFAULT_STORY_AGENT, () => {});
+    const generate = createStoryAgentGenerator(context(provider), DEFAULT_STORY_AGENT, () => {});
     await expect(generate("system", "prompt", new AbortController().signal)).rejects.toThrow(/complete|limit/i);
     expect(provider).toHaveBeenCalledOnce();
   });
@@ -59,7 +60,7 @@ describe("single-request story arrangement", () => {
     const provider = vi.fn(() => pending);
     const controller = new AbortController();
     const activities: StoryAgentActivity[] = [];
-    const generate = createStoryAgentGenerator(context(provider) as never, DEFAULT_STORY_AGENT, (event) => activities.push(event));
+    const generate = createStoryAgentGenerator(context(provider), DEFAULT_STORY_AGENT, (event) => activities.push(event));
     const running = generate("system", "prompt", controller.signal);
     await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());
     controller.abort();

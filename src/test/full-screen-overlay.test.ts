@@ -63,4 +63,19 @@ describe("withHerdrPaneZoom", () => {
 
     expect(run).toHaveBeenLastCalledWith(["pane", "zoom", "--current", "--off"]);
   });
+
+  it.each([
+    [undefined, "/diff"],
+    ["pi-coder diff", "pi-coder diff"],
+  ])("names the review command %j in its warnings", async (command, name) => {
+    const warn = vi.fn();
+    const unavailable = vi.fn(async () => { throw new Error("herdr is not installed"); });
+    await withHerdrPaneZoom(async () => "reviewed", { environment: { HERDR_ENV: "1" }, run: unavailable, warn, command });
+    expect(warn).toHaveBeenCalledExactlyOnceWith(`Could not enable Herdr full-screen mode; opening ${name} in the current pane.`);
+
+    warn.mockClear();
+    const stuck = vi.fn(async (args: string[]) => args[1] === "layout" ? layoutResult(false) : { code: args.includes("--on") ? 0 : 1, stdout: "{}", stderr: "" });
+    await withHerdrPaneZoom(async () => "reviewed", { environment: { HERDR_ENV: "1" }, run: stuck, warn, command });
+    expect(warn).toHaveBeenCalledExactlyOnceWith(`Could not restore the Herdr pane layout after ${name} closed.`);
+  });
 });

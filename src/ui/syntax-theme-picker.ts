@@ -1,13 +1,24 @@
-import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, type Component, type SelectItem } from "@earendil-works/pi-tui";
+import type { HostUI } from "../host/types.js";
 import type { BundledShikiThemeChoice } from "../workbench/node/shiki.js";
 
-type SyntaxThemeUI = Pick<ExtensionContext["ui"], "custom">;
+type SyntaxThemeUI = Pick<HostUI, "custom">;
+
+class Border implements Component {
+  constructor(private readonly color: (text: string) => string) {}
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return [this.color("\u2500".repeat(Math.max(1, width)))];
+  }
+}
 
 export async function pickSyntaxTheme(
   ui: SyntaxThemeUI,
   themes: readonly BundledShikiThemeChoice[],
   currentTheme: string,
+  command = "/code",
 ): Promise<string | null> {
   const items: SelectItem[] = themes.map((theme) => ({
     value: theme.id,
@@ -29,11 +40,11 @@ export async function pickSyntaxTheme(
     list.onCancel = () => done(null);
 
     const container = new Container();
-    container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-    container.addChild(new Text(theme.fg("accent", theme.bold("Select /code syntax theme")), 1, 0));
+    container.addChild(new Border((text: string) => theme.fg("accent", text)));
+    container.addChild(new Text(theme.fg("accent", theme.bold(`Select ${command} syntax theme`)), 1, 0));
     container.addChild(list);
     container.addChild(new Text(theme.fg("dim", "↑↓ navigate · Enter select · Esc cancel"), 1, 0));
-    container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+    container.addChild(new Border((text: string) => theme.fg("accent", text)));
 
     return {
       render: (width: number) => container.render(width),

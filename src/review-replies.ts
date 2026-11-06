@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner, HostContext, ModelGateway } from "./host/types.js";
 import {
   getProviderCapability,
   readConfiguredField,
@@ -360,7 +360,7 @@ function providerRows(provider: ProviderSettings, value: unknown): unknown[] {
 }
 
 export async function getSelfLogin(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   repo: string,
@@ -397,7 +397,7 @@ function parseGraphqlThreadRead(payload: unknown, succeeded: boolean): ReviewThr
 }
 
 export async function fetchReviewThreads(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   repo: string,
@@ -505,19 +505,13 @@ async function fetchReviewRepliesForProvider(
   return read.retain({ ...prepareRepliesToSelf(threads.threads, selfLogin), previewLimit: MAX_REPLY_BODY_LENGTH, selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: threads.coverage });
 }
 
-function fetchBoundedReplies(pi: ExtensionAPI, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
+function fetchBoundedReplies(pi: CommandRunner, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
   const read = createConversationRead(pi);
   return fetchReviewRepliesForProvider(read, target, provider).finally(read.close);
 }
 
-export async function fetchReviewReplies(pi: ExtensionAPI, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {
+export async function fetchReviewReplies(pi: CommandRunner, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {
   return fetchBoundedReplies(pi, target, providerForTarget(target));
-}
-
-function modelArgs(ctx: ExtensionContext): string[] {
-  const model = (ctx as { model?: { provider?: string; id?: string } }).model;
-  if (model?.provider == null || model.id == null) return [];
-  return ["--model", `${model.provider}/${model.id}`];
 }
 
 /** The reply body is untrusted input, so it is fenced and the model is told to treat it as data. */
@@ -547,37 +541,20 @@ export function buildReplyAnalysisPrompt(reply: ReviewReplyItem, context: { titl
 }
 
 export async function analyzeReviewReply(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
+  models: Pick<ModelGateway, "complete">,
   target: RemoteReviewTarget,
   reply: ReviewReplyItem,
 ): Promise<string> {
   const prompt = buildReplyAnalysisPrompt(reply, { title: target.pullRequest?.title, url: target.handoff?.url });
-  const result = await pi.exec("pi", [
-    "--no-tools",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-context-files",
-    "--no-session",
-    ...modelArgs(ctx),
-    "--thinking",
-    "minimal",
-    "-p",
-    prompt,
-  ], { cwd: target.gitRoot, timeout: ANALYSIS_TIMEOUT_MS });
-
-  const output = result.stdout.trim();
-  if (result.code !== 0 || output.length === 0) {
-    throw new Error(result.stderr.trim() || "The analysis model returned nothing. Press a again to retry.");
-  }
+  const output = (await models.complete("analysis", { prompt, cwd: target.gitRoot, timeoutMs: ANALYSIS_TIMEOUT_MS })).trim();
+  if (output.length === 0) throw new Error("The analysis model returned nothing. Press a again to retry.");
   const clean = sanitizeTerminalMultilineText(output);
   return clean.length <= MAX_ANALYSIS_LENGTH ? clean : `${clean.slice(0, MAX_ANALYSIS_LENGTH - 1)}…`;
 }
 
 export function createRemoteReviewRepliesSource(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
+  pi: CommandRunner,
+  ctx: Pick<HostContext, "models">,
   target: RemoteReviewTarget | undefined,
   reader?: ReturnType<typeof createConversationReader>,
 ): ReviewRepliesPanelSource | undefined {
@@ -616,6 +593,6 @@ export function createRemoteReviewRepliesSource(
       if (threads == null || snapshot.replies == null) throw new Error("Review threads unavailable. Press r to refresh replies.");
       return project(snapshot)!;
     },
-    analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
+    analyze: (reply) => analyzeReviewReply(ctx.models, target, reply),
   };
 }

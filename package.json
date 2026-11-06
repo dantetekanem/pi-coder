@@ -1,9 +1,9 @@
 {
   "name": "pi-coder",
-  "version": "0.9.8",
+  "version": "1.0.0",
   "packageManager": "pnpm@10.28.0",
   "type": "module",
-  "description": "Interactive code workbench and diff review UI for Pi, with annotations, GitHub pull-request reviews, and agent handoffs.",
+  "description": "Interactive diff review, diff stories, and code workbench for Pi, any agent harness, or a plain terminal, with annotations, pull-request reviews, and agent handoffs.",
   "author": "Leonardo Pereira <contato@leonardopereira.com>",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,19 @@
   "publishConfig": {
     "access": "public"
   },
+  "bin": {
+    "pi-coder": "./bin/pi-coder.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "files": [
+    "bin",
+    "src/cli",
+    "src/host",
+    "src/pi",
+    "src/engine.ts",
+    "src/tool-definitions.ts",
     "src/conversation.ts",
     "src/diff.ts",
     "src/git.ts",
@@ -39,6 +51,7 @@
     "src/diff-story",
     "prompts",
     "skills/diff-story",
+    "skills/pi-coder",
     "src/review-order.ts",
     "src/review-receipts.ts",
     "src/review-replies.ts",
@@ -82,7 +95,12 @@
     "pull-request",
     "remote-diff",
     "ai-review",
-    "terminal"
+    "terminal",
+    "cli",
+    "mcp",
+    "agent",
+    "claude-code",
+    "codex"
   ],
   "pi": {
     "extensions": [
@@ -101,16 +119,28 @@
     "workbench:start": "node scripts/start-workbench.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": ">=0.79.10 <2",
     "@pierre/diffs": "1.2.7",
-    "shiki": "3.23.0"
+    "highlight.js": "11.12.0",
+    "jiti": "2.7.0",
+    "shiki": "3.23.0",
+    "typebox": "^1.1.38"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.79.10",
-    "@earendil-works/pi-coding-agent": ">=0.79.10",
-    "@earendil-works/pi-tui": ">=0.79.10",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": ">=0.79.10"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "0.79.10",
+    "@earendil-works/pi-coding-agent": "0.79.10",
     "@types/node": "24.12.4",
     "typescript": "5.9.3",
     "vite": "7.3.7",
