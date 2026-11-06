@@ -20,8 +20,8 @@ describe("execCommand", () => {
     expect(result.stdout).toBe("$HOME; echo hi");
   });
 
-  it("resolves code 1 when the command cannot start", async () => {
-    expect(await execCommand("pi-coder-no-such-binary", [])).toMatchObject({ code: 1, killed: false });
+  it("resolves code 1 with the reason when the command cannot start, like Pi's own exec", async () => {
+    expect(await execCommand("pi-coder-no-such-binary", [])).toMatchObject({ code: 1, killed: false, stderr: expect.stringContaining("ENOENT") });
   });
 
   it("kills on timeout and on abort", async () => {

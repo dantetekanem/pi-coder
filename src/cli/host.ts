@@ -56,7 +56,7 @@ export function execCommand(command: string, args: string[], options: HostExecOp
     child.stderr?.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", () => settle({ stdout, stderr, code: 1, killed }));
+    child.on("error", (error) => settle({ stdout, stderr: stderr || error.message, code: 1, killed }));
     child.on("close", (code) => settle({ stdout, stderr, code: code ?? 0, killed }));
   });
 }

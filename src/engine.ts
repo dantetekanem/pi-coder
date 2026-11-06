@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { createGitTestSource, findExistingStoryTests } from "./diff-story/existing-tests.js";
 import { getReviewWindowData, getReviewWindowDataForRevisionRange, loadReviewFileContents, type ReviewWindowData, type ReviewWindowOptions } from "./git.js";
 import type { ExternalEditorLauncher, ExternalEditorOutcome, PiCoderCommandNames, PiCoderCommandResult, PiCoderEngine, PiCoderEngineOptions, PiCoderToolName, PiCoderToolResult, ReviewRunStatus } from "./host/engine.js";
 import type { HostApi, HostContext, HostTheme } from "./host/types.js";
@@ -836,6 +837,7 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
     }
 
     activeReview = true;
+    const testSearch = new AbortController();
     try {
       const repoRoot = data.repoRoot;
       let files = data.files;
@@ -984,14 +986,22 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
       let story: PreparedDiffStory | undefined;
       if (sessionOptions?.story || initialSession?.story != null) {
         const scope = reviewScope;
+        const storyFiles = getScopedFiles(files, scope);
+        const testRevision = scope === "all-files" ? modifiedRevision ?? "HEAD" : scope === "git-diff" ? null : undefined;
+        const repositoryPaths = new Map(storyFiles.flatMap((file) => {
+          const comparison = scope === "git-diff" ? file.gitDiff : file.allFiles;
+          return file.pathPrefix == null && comparison?.newPath != null ? [[file.id, comparison.newPath] as const] : [];
+        }));
         const prepared = await prepareDiffStory(
           ctx,
-          getScopedFiles(files, scope),
+          storyFiles,
           scope,
           (file, selectedScope) => loadFileContentsForReview(repoRoot, file, selectedScope),
           initialSession?.story,
           undefined,
           reviewHeader == null ? undefined : { header: reviewHeader, brief: pullRequestSources.contextPanelSource?.brief },
+          testRevision === undefined ? undefined
+            : (snapshot) => findExistingStoryTests(snapshot, createGitTestSource(pi, repoRoot, testRevision), testSearch.signal, repositoryPaths),
         );
         if (prepared == null) return { started: false, message: "Story preparation cancelled; saved feedback was not changed." };
         if (prepared !== "diff") {
@@ -1272,6 +1282,7 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
       ctx.ui.notify(`Could not open review UI: ${message}`, "error");
       return { started: false, message };
     } finally {
+      testSearch.abort();
       activeReview = false;
     }
   }

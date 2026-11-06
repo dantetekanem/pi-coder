@@ -13,6 +13,11 @@ export interface StoryUnit {
 }
 
 const TEST_CASE = /^\s*(?:(?:test|it|specify)(?:\.(?:only|skip))?\s*(?:\(\s*)?["'`]|def\s+test_)/;
+const TEST_PATH = /(?:^|\/)(?:test|tests|spec|specs|__tests__)\/|(?:[._](?:test|spec)|_tests)\.[^.]+$/;
+
+export function isStoryTestPath(path: string): boolean {
+  return TEST_PATH.test(path);
+}
 
 function lines(text: string): string[] {
   if (!text) return [];
@@ -29,9 +34,14 @@ function declaration(line: string): string | undefined {
     ?? /^\s*(?:(?:private|public|protected|static|async|override|get|set)\s+)*([\w$]+)\s*\([^;]*\)\s*(?::[^=;]+)?\s*\{/.exec(line)?.[1];
 }
 
-function functionOwners(source: string[]): { owners: Array<string | undefined>; cases: Set<string> } {
+/**
+ * Assigns each line to the declaration that owns it, keyed `name\u001foccurrence`; `cases` holds the keys that are test
+ * cases, and `spans` the zero-based first and last line of each declaration, including the declarations nested in it.
+ */
+export function functionOwners(source: string[]): { owners: Array<string | undefined>; cases: Set<string>; spans: Map<string, [number, number]> } {
   const owners: Array<string | undefined> = new Array(source.length);
   const cases = new Set<string>();
+  const spans = new Map<string, [number, number]>();
   const occurrences = new Map<string, number>();
   for (let start = 0; start < source.length; start += 1) {
     const name = declaration(source[start]!);
@@ -56,11 +66,12 @@ function functionOwners(source: string[]): { owners: Array<string | undefined>; 
         end += 1;
       }
     }
+    spans.set(key, [start, end]);
     while (end + 1 < source.length && source[end + 1]!.trim() === "") end += 1;
     // Nested declarations take ownership of their own lines on the next pass.
     for (let line = start; line <= end; line += 1) owners[line] = key;
   }
-  return { owners, cases };
+  return { owners, cases, spans };
 }
 
 function foldLooseChanges(
@@ -160,7 +171,7 @@ export function prepareStoryUnits(snapshot: StorySnapshot): StoryUnit[] {
           const key = owner ?? `hunk:${changed.get(touched[0]!)}`;
           let unit = bySymbol.get(key);
           if (unit == null) {
-            const test = /(?:^|\/)(?:test|tests|spec|specs|__tests__)\/|(?:[._](?:test|spec)|_tests)\.[^.]+$/.test(file.path);
+            const test = isStoryTestPath(file.path);
             unit = {
               id: "",
               path: file.path,
@@ -199,7 +210,7 @@ function filenameScore(testStem: string, path: string): number {
 }
 
 /** Quoted strings (test names, URLs, hash keys) and `key:` labels are data, not references. */
-function codeIdentifiers(code: string): Set<string> {
+export function codeIdentifiers(code: string): Set<string> {
   return new Set(code
     .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\\n]|\\.)*`/g, " ")
     .replace(/\b[A-Za-z_]\w*[!?]?:(?!:)/g, " ")

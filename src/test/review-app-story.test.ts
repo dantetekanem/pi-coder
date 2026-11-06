@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExistingTestLookup, ExistingTestReport } from "../diff-story/existing-tests.js";
 import { generateDiffStory } from "../diff-story/generate.js";
 import { storyViewportKey, type StoryMember } from "../diff-story/navigation.js";
 import { createStorySnapshot, uncoveredStoryChanges, validateDiffStory } from "../diff-story/plan.js";
+import { prepareStoryUnits } from "../diff-story/units.js";
 import { configureRuntime, resetRuntime } from "../host/runtime.js";
 import { buildStorySidebarLines, getHalfPageStep, getStorySidebarWidth, ReviewApp } from "../ui/review-app.js";
 import type { ReviewFile } from "../types.js";
@@ -1384,5 +1386,192 @@ describe("paired diff story", () => {
       expect(getStorySidebarWidth(99)).toBe(0);
       expect([100, 138, 300].map(getStorySidebarWidth)).toEqual([28, 30, 48]);
     });
+  });
+});
+
+describe("test pane of a step without related changed tests", () => {
+  const order = (tax: number) => `class Order\n  def total\n    lines.sum + tax\n  end\n\n  def tax\n    ${tax}\n  end\nend\n`;
+  const changes = [
+    { path: "app/models/order.rb", before: order(0), after: order(1) },
+    { path: "app/models/legacy.rb", before: "def gone\n  1\nend\n", after: "" },
+    { path: "README.md", before: "Old\n", after: "New\n" },
+    { path: "test/integration/checkout_test.rb", before: "test \"checks out\" do\n  visit(1)\nend\n", after: "test \"checks out\" do\n  visit(2)\nend\n" },
+  ];
+  const storyFiles: ReviewFile[] = changes.map(({ path }) => ({
+    id: path, path, worktreeStatus: "modified", hasWorkingTreeFile: true, inGitDiff: true, inAllFiles: false,
+    gitDiff: { status: "modified", oldPath: path, newPath: path, displayPath: path, hasOriginal: true, hasModified: true },
+    allFiles: null,
+  }));
+  const captured = createStorySnapshot(changes.map(({ path, before, after }) => ({
+    fileId: path, path, scope: "git-diff" as const, contents: { originalContent: before, modifiedContent: after },
+  })));
+  const taxId = prepareStoryUnits(captured).find((unit) => unit.symbol === "tax")!.id;
+  const testLines = ["require \"test_helper\"", "", "class OrderTest < ActiveSupport::TestCase", "  test \"total adds tax\" do",
+    ...Array.from({ length: 60 }, (_, index) => `    assert_equal ${index}, Order.new.total`), "  end", "end"];
+  const lookup = (overrides: Partial<ExistingTestLookup>): ExistingTestReport => ({
+    units: new Map([[taxId, {
+      unitId: taxId, symbol: "tax", path: "app/models/order.rb", status: "found", root: "", names: ["tax"], callers: ["total"],
+      files: [{
+        path: "test/models/order_test.rb",
+        lines: testLines,
+        ranges: [{ name: "total adds tax", startLine: 4, endLine: 65, helper: false, changed: false }],
+        reasons: [{ name: "total", reaches: "tax", tests: 1 }],
+      }],
+      tests: 1, unread: 0, skipped: [], ...overrides,
+    }]]),
+  });
+
+  async function open(existingTests?: Promise<ExistingTestReport>) {
+    const plan = await generateDiffStory(captured, async () => '{"order":[],"pairs":[]}', new AbortController().signal, () => {});
+    const tui = { terminal: { rows: 40, columns: 400 }, requestRender: vi.fn() };
+    const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text };
+    const app = new ReviewApp(tui, theme as never, vi.fn(), {
+      repoRoot: "/repo", files: storyFiles, scope: "git-diff", commentShortcuts: [], notify: vi.fn(), allowEmptySubmit: true,
+      loadFileContents: async (_root, file) => captured.files.find((entry) => entry.fileId === file.id)!.contents,
+      story: { plan, snapshot: captured, ...(existingTests == null ? {} : { existingTests }) },
+    });
+    const story = () => (app as any).story;
+    return { app, tui, story, render: () => app.render(400).join("\n") };
+  }
+
+  it("shows existing tests with why they match, and scrolls them from either pane", async () => {
+    const { app, story, render } = await open(Promise.resolve(lookup({})));
+    try {
+      await vi.waitFor(() => expect(render()).toContain("Existing tests"));
+      expect(story().plan.steps.map((step: { title: string }) => step.title)).toEqual([
+        "app/models/order.rb \u00b7 tax", "app/models/legacy.rb \u00b7 gone", "README.md \u00b7 lines 1\u20131", "test/integration/checkout_test.rb \u00b7 checks out",
+      ]);
+      const first = render();
+      expect(first).toContain("test/models/order_test.rb");
+      expect(first).toContain("1 test mentions total, which reaches tax");
+      expect(first).toContain("   4       test \"total adds tax\" do");
+      expect(first).not.toContain("assert_equal 59, Order.new.total");
+
+      const key = storyViewportKey(story(), "tests");
+      app.handleInput("\x1b[D");
+      app.handleInput("\x1b[B");
+      render();
+      expect(story().viewports[key].scroll).toBe(1);
+      app.handleInput("G");
+      expect(render()).toContain("assert_equal 59, Order.new.total");
+      const bottom = story().viewports[key].scroll;
+      expect(bottom).toBeGreaterThan(1);
+      app.handleInput("g");
+      app.handleInput("g");
+      expect(story().viewports[key].scroll).toBe(0);
+
+      app.handleInput("\x1b[C");
+      app.handleInput("\x1b[1;3B");
+      app.handleInput("\x1b[1;3B");
+      render();
+      expect(story().member).toBe("implementation");
+      expect(story().viewports[key].scroll).toBe(2);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("says it is searching until the search settles", async () => {
+    let settle!: (report: ExistingTestReport) => void;
+    const { app, tui, render } = await open(new Promise((resolve) => { settle = resolve; }));
+    try {
+      expect(render()).toContain("Searching existing tests\u2026");
+      settle(lookup({}));
+      await vi.waitFor(() => expect(tui.requestRender).toHaveBeenCalled());
+      expect(render()).toContain("1 test mentions total, which reaches tax");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("marks code without any test as untested only when the search was complete, and a failed search as a pi-coder gap", async () => {
+    const none = await open(Promise.resolve(lookup({ status: "none", files: [], tests: 0 })));
+    try {
+      await vi.waitFor(() => expect(none.render()).toContain("No tests found for this code."));
+      expect(none.render()).toContain("No changed test pairs with this step, and no test in this repository names tax or the changed code that calls it (total).");
+      expect(none.render()).toContain("That marks untested code, unless a test reaches it through files this change does not touch.");
+    } finally {
+      none.app.dispose();
+    }
+
+    const unread = await open(Promise.resolve(lookup({ status: "none", files: [], tests: 0, unread: 3, root: "services/shop" })));
+    try {
+      await vi.waitFor(() => expect(unread.render()).toContain("No tests found for this code."));
+      expect(unread.render()).toContain("no test in services/shop names tax");
+      expect(unread.render()).toContain("3 more test files name this code but were not read.");
+      expect(unread.render()).not.toContain("That marks untested code");
+    } finally {
+      unread.app.dispose();
+    }
+
+    const skipped = await open(Promise.resolve(lookup({ status: "none", files: [], tests: 0, skipped: ["-order"] })));
+    try {
+      await vi.waitFor(() => expect(skipped.render()).toContain("pi-coder could not search for -order."));
+      expect(skipped.render()).not.toContain("That marks untested code");
+    } finally {
+      skipped.app.dispose();
+    }
+
+    const failed = await open(Promise.resolve(lookup({ status: "failed", files: [], tests: 0, reason: "The search timed out after 20 s." })));
+    try {
+      await vi.waitFor(() => expect(failed.render()).toContain("Could not search existing tests."));
+      expect(failed.render()).toContain("The search timed out after 20 s.");
+      expect(failed.render()).toContain("This is a gap in pi-coder, not a finding about the code.");
+    } finally {
+      failed.app.dispose();
+    }
+
+    const missing = await open(Promise.resolve({ units: new Map() }));
+    try {
+      await vi.waitFor(() => expect(missing.render()).toContain("pi-coder did not search this code."));
+    } finally {
+      missing.app.dispose();
+    }
+  });
+
+  it("explains removed code, prose, and test-only steps, and a review that did not search", async () => {
+    const { app, render } = await open(Promise.resolve(lookup({})));
+    try {
+      app.handleInput("\x1b[1;2C");
+      expect(render()).toContain("This step removes code, so it needs no test.");
+      app.handleInput("\x1b[1;2C");
+      expect(render()).toContain("This step changes no code that runs.");
+      app.handleInput("\x1b[1;2C");
+      expect(render()).toContain("This step changes tests.");
+    } finally {
+      app.dispose();
+    }
+
+    const unsearched = await open();
+    try {
+      expect(unsearched.render()).toContain("No related changed tests.");
+      expect(unsearched.render()).toContain("Existing tests were not searched for this review.");
+    } finally {
+      unsearched.app.dispose();
+    }
+  });
+
+  it("marks tests this review changes and counts tests past the display limit", async () => {
+    const report = lookup({
+      tests: 30,
+      files: [{
+        path: "test/models/order_test.rb",
+        lines: ["test \"keeps tax\" do", "  Order.new.total", "end", "", "test \"rounds tax\" do", "  Order.new.total.round", "end"],
+        ranges: [
+          { name: "keeps tax", startLine: 1, endLine: 3, helper: false, changed: false },
+          { name: "rounds tax", startLine: 5, endLine: 7, helper: false, changed: true },
+        ],
+        reasons: [{ name: "tax", tests: 2 }],
+      }],
+    });
+    const { app, render } = await open(Promise.resolve(report));
+    try {
+      await vi.waitFor(() => expect(render()).toContain("2 tests mention tax \u00b7 1 changed in this review"));
+      expect(render()).toContain("1 line not shown");
+      expect(render()).toContain("changed in this review");
+      expect(render()).toContain("Showing 2 of 30 matching tests.");
+    } finally {
+      app.dispose();
+    }
   });
 });

@@ -392,7 +392,7 @@ export async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper
   return results;
 }
 
-interface LoadedReviewContent {
+export interface LoadedReviewContent {
   content: string;
   available: boolean;
 }
@@ -414,7 +414,7 @@ async function getRevisionContent(pi: CommandRunner, repoRoot: string, revision:
   return (await getRevisionContentResult(pi, repoRoot, revision, path)).content;
 }
 
-async function getWorkingTreeContentResult(repoRoot: string, path: string): Promise<LoadedReviewContent> {
+export async function getWorkingTreeContentResult(repoRoot: string, path: string): Promise<LoadedReviewContent> {
   try {
     const realRepoRoot = await realpath(repoRoot);
     const candidatePath = resolve(realRepoRoot, path);

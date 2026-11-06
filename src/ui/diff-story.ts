@@ -2,6 +2,7 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/
 import { createStorySnapshot, validateSavedDiffStory, type DiffStory, type StoryFile, type StorySnapshot } from "../diff-story/plan.js";
 import { createStoryAgentGenerator } from "../diff-story/agent.js";
 import type { StoryAgentActivity } from "../diff-story/activity.js";
+import type { ExistingTestReport } from "../diff-story/existing-tests.js";
 import { generateDiffStory, type DiffStoryGenerate } from "../diff-story/generate.js";
 import type { StorySessionData } from "../diff-story/navigation.js";
 import type { HostContext } from "../host/types.js";
@@ -18,6 +19,8 @@ const RUNNING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 export interface PreparedDiffStory {
   plan: DiffStory;
   snapshot: StorySnapshot;
+  /** Tests at the reviewed revision for each changed unit; it settles after the story opens when the search is slow. */
+  existingTests?: Promise<ExistingTestReport>;
 }
 
 type StoryContext = Pick<HostContext, "ui" | "models">;
@@ -60,6 +63,7 @@ export function prepareDiffStory(
   saved?: StorySessionData,
   generate?: DiffStoryGenerate,
   orientation?: { header: ReviewHeaderInfo; brief?: string },
+  findTests?: (snapshot: StorySnapshot) => Promise<ExistingTestReport>,
 ): Promise<PreparedDiffStory | "diff" | undefined> {
   const { storyAgent: selection, storySidebar: notes } = loadReviewPreferences();
   const storyFiles = filterReviewFilesByLocale(files, false);
@@ -73,6 +77,7 @@ export function prepareDiffStory(
     let error: string | undefined;
     let stale = false;
     let snapshot: StorySnapshot | undefined;
+    let existingTests: Promise<ExistingTestReport> | undefined;
     let startedAt = Date.now();
     const carousel = new StoryOutputCarousel();
     let frame = 0;
@@ -113,7 +118,7 @@ export function prepareDiffStory(
           if (progress !== "Generating story") update(progress);
           else update(notes ? "Constructing storyline and writing step notes" : "Constructing storyline and connecting changed tests");
         }, { notes });
-        if (!settled) finish({ plan, snapshot: snapshot! });
+        if (!settled) finish({ plan, snapshot: snapshot!, ...(existingTests == null ? {} : { existingTests }) });
       } catch (failure) {
         if (settled) return;
         error = sanitizeTerminalText(failure instanceof Error ? failure.message : String(failure));
@@ -149,10 +154,11 @@ export function prepareDiffStory(
         }
         if (settled) return;
         snapshot = createStorySnapshot(captured);
+        existingTests = findTests?.(snapshot);
         counts = `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} lines changed${localeNote}`;
         if (saved != null) {
           try {
-            finish({ snapshot, plan: validateSavedDiffStory(saved.plan, snapshot) });
+            finish({ snapshot, plan: validateSavedDiffStory(saved.plan, snapshot), ...(existingTests == null ? {} : { existingTests }) });
             return;
           } catch {
             stale = true;

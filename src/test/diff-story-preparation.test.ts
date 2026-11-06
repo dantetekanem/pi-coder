@@ -265,6 +265,25 @@ describe("centered story preparation", () => {
     await expect(ready).resolves.toEqual({ plan, snapshot });
   });
 
+  it("starts the existing-test search once per capture, before the model answers, and returns it with the story", async () => {
+    const preparation = harness();
+    let finish!: (value: string) => void;
+    const generate = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const report = Promise.resolve({ units: new Map() });
+    const findTests = vi.fn(() => report);
+    const ready = prepareDiffStory(preparation.ctx as never, [file], "git-diff", async () => contents, undefined, generate, undefined, findTests);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+
+    expect(findTests).toHaveBeenCalledExactlyOnceWith(snapshot);
+    finish(orderOutput);
+    await expect(ready).resolves.toEqual({ plan, snapshot, existingTests: report });
+
+    const resumed = harness();
+    await expect(prepareDiffStory(resumed.ctx as never, [file], "git-diff", async () => contents, restoreStoryNavigation(plan), generate, undefined, findTests))
+      .resolves.toEqual({ plan, snapshot, existingTests: report });
+    expect(findTests).toHaveBeenCalledTimes(2);
+  });
+
   it("cancels promptly and never mounts a late answer", async () => {
     const preparation = harness();
     let finish!: (value: string) => void;

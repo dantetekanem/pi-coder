@@ -48,6 +48,8 @@ import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
 import { ExactTextEditor } from "./exact-text-editor.js";
 import { defaultStoryMember, restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
 import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
+import { classifyStoryStep, type ExistingTestFile, type ExistingTestLookup, type ExistingTestRange, type ExistingTestReport } from "../diff-story/existing-tests.js";
+import { prepareStoryUnits, type StoryUnit } from "../diff-story/units.js";
 import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
 import { layoutCodeLines, parseSgrMouseInput, stripTerminalSequences, type CodeRowText } from "./mouse-selection.js";
 import type { ReviewSourceLinks } from "../source-links.js";
@@ -139,7 +141,7 @@ interface ReviewAppOptions {
   seedComments?: ResolvedSeedComment[];
   contextPanelSource?: ReviewContextPanelSource;
   repliesSource?: ReviewRepliesPanelSource;
-  story?: { plan: DiffStory; snapshot: StorySnapshot };
+  story?: { plan: DiffStory; snapshot: StorySnapshot; existingTests?: Promise<ExistingTestReport> };
   orderSignals?: ReviewOrderSignals;
   reviewHeader?: ReviewHeaderInfo;
   sourceLinks?: ReviewSourceLinks;
@@ -1403,6 +1405,52 @@ export function buildStorySidebarLines(theme: Theme, width: number, height: numb
   return [...lines, ...before, ...block, ...after].slice(0, height);
 }
 
+/** "a", "a and b", "a, b and c". */
+function joinNames(names: readonly string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/** How the shown tests of one file reach the step's code, such as `2 tests mention total \u00b7 1 mentions pay, which reaches tax`. */
+export function describeExistingTests(file: ExistingTestFile): string {
+  const reasons = file.reasons.map((reason, index) => {
+    const count = index === 0 ? `${reason.tests} test${reason.tests === 1 ? "" : "s"}` : String(reason.tests);
+    return `${count} ${reason.tests === 1 ? "mentions" : "mention"} ${reason.name}${reason.reaches == null ? "" : `, which reaches ${reason.reaches}`}`;
+  });
+  const changed = file.ranges.filter((range) => range.changed && !range.helper).length;
+  return [...reasons, ...changed === 0 ? [] : [`${changed} changed in this review`]].join(" \u00b7 ");
+}
+
+/** A step with code from several units can reach one test file through each of them. */
+function mergeExistingTestFiles(lookups: readonly ExistingTestLookup[]): ExistingTestFile[] {
+  const files = new Map<string, ExistingTestFile>();
+  for (const file of lookups.flatMap((lookup) => lookup.files)) {
+    const merged = files.get(file.path);
+    if (merged == null) {
+      files.set(file.path, { ...file, ranges: [...file.ranges], reasons: file.reasons.map((reason) => ({ ...reason })) });
+      continue;
+    }
+    for (const range of file.ranges) {
+      if (!merged.ranges.some((other) => other.startLine === range.startLine && other.endLine === range.endLine)) merged.ranges.push(range);
+    }
+    for (const reason of file.reasons) {
+      const same = merged.reasons.find((other) => other.name === reason.name && other.reaches === reason.reaches);
+      if (same == null) merged.reasons.push({ ...reason });
+      else same.tests = Math.max(same.tests, reason.tests);
+    }
+  }
+  return [...files.values()];
+}
+
+function displayRanges(ranges: readonly ExistingTestRange[]): ExistingTestRange[] {
+  const merged: ExistingTestRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.startLine - b.startLine)) {
+    const last = merged.at(-1);
+    if (last != null && range.startLine <= last.endLine) merged[merged.length - 1] = { ...last, endLine: Math.max(last.endLine, range.endLine), changed: last.changed || range.changed };
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
 /** The scroll position after a popup key, or null for any other key. End is clamped when the popup renders. */
 function scrollPopup(data: string, scroll: number, pageSize: number): number | null {
   if (matchesKey(data, Key.down) || data === "j") return scroll + 1;
@@ -1826,6 +1874,8 @@ export class ReviewApp {
   private storyInventoryScroll = 0;
   private storyInfoPageSize = 1;
   private storyPaneMetrics: Partial<Record<StoryMember, { max: number; page: number }>> = {};
+  private storyUnits: StoryUnit[] = [];
+  private existingTests?: ExistingTestReport;
   private readonly storyFreeScroll = new Set<StoryMember>();
   private storySidebar: boolean;
   private storyContextReturnFocus?: ReviewState["focus"];
@@ -1916,6 +1966,11 @@ export class ReviewApp {
     if (options.story != null) {
       const completePlan = completeDiffStory(options.story.plan, options.story.snapshot);
       this.story = restoreStoryNavigation(completePlan, options.initialSession?.story);
+      this.storyUnits = prepareStoryUnits(options.story.snapshot);
+      void options.story.existingTests?.then(
+        (report) => { this.existingTests = report; },
+        () => { this.existingTests = { units: new Map() }; },
+      ).then(() => this.requestRender(false));
       this.diffViewMode = "unified";
       for (const file of options.story.snapshot.files) {
         const baseDiff = buildStructuredDiff(file.contents.originalContent, file.contents.modifiedContent, DEFAULT_CONTEXT_LINES);
@@ -4487,6 +4542,10 @@ export class ReviewApp {
   }
 
   private jumpToBoundary(direction: "start" | "end"): void {
+    if (this.story != null && !this.storyBrowsingDiff && this.state.focus === "diff" && this.storyTestEvidenceScrolls()) {
+      this.scrollStoryTestEvidence(direction === "start" ? -Infinity : Infinity);
+      return;
+    }
     if (this.state.focus === "navigator") {
       const files = this.getNavigatorFiles();
       if (files.length === 0) return;
@@ -5839,6 +5898,8 @@ export class ReviewApp {
     else if (this.storyInventory) {
       if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data === "i") this.storyInventory = false;
       else this.storyInventoryScroll = scrollPopup(data, this.storyInventoryScroll, this.storyInfoPageSize) ?? this.storyInventoryScroll;
+    } else if (this.state.focus === "diff" && this.storyTestEvidenceScrolls() && this.scrollStoryTestEvidenceByKey(data)) {
+      return true;
     } else if (this.state.focus === "diff" && this.scrollOtherStoryPane(data)) {
       return true;
     } else if (matchesKey(data, Key.shift("right")) || matchesKey(data, Key.shift("left"))) {
@@ -5897,7 +5958,7 @@ export class ReviewApp {
     ] as const;
     const scroll = scrolls.find(([chord]) => matchesKey(data, chord));
     if (scroll == null) return OTHER_PANE_CHORDS.some((key) => matchesKey(data, Key.alt(key)) || matchesKey(data, Key.altShift(key)));
-    if (metrics == null || storyAnchor(story, other) == null) return true;
+    if (metrics == null) return true;
     const key = storyViewportKey(story, other);
     const view = story.viewports[key] ?? { scroll: 0 };
     const max = Math.max(metrics.max, view.scroll);
@@ -5913,15 +5974,150 @@ export class ReviewApp {
     return target.kind === "all" || target.fileId !== storyAnchor(this.story)?.fileId;
   }
 
+  /** The test pane scrolls its own lines when it shows existing tests instead of a changed test page. */
+  private storyTestEvidenceScrolls(): boolean {
+    const story = this.story!;
+    return story.member === "tests" && storyAnchor(story, "tests") == null && this.storyPaneMetrics.tests != null;
+  }
+
+  private scrollStoryTestEvidenceByKey(data: string): boolean {
+    const metrics = this.storyPaneMetrics.tests!;
+    const page = Math.max(1, metrics.page - 1);
+    const half = getHalfPageStep(metrics.page);
+    const moves: Array<[boolean, number]> = [
+      [matchesKey(data, Key.up) || data === "k", -1],
+      [matchesKey(data, Key.down) || data === "j", 1],
+      [matchesKey(data, Key.pageUp) || matchesKey(data, Key.ctrl("b")), -page],
+      [matchesKey(data, Key.pageDown) || matchesKey(data, Key.ctrl("f")), page],
+      [matchesKey(data, Key.ctrl("u")), -half],
+      [matchesKey(data, Key.ctrl("d")), half],
+      [matchesKey(data, Key.home), -Infinity],
+      [matchesKey(data, Key.end) || data === "G", Infinity],
+    ];
+    const move = moves.find(([matched]) => matched);
+    if (move == null) return false;
+    this.scrollStoryTestEvidence(move[1]);
+    return true;
+  }
+
+  private scrollStoryTestEvidence(delta: number): void {
+    const story = this.story!;
+    const metrics = this.storyPaneMetrics.tests;
+    if (metrics == null) return;
+    const key = storyViewportKey(story, "tests");
+    const view = story.viewports[key] ?? { scroll: 0 };
+    story.viewports[key] = { ...view, scroll: Math.max(0, Math.min(metrics.max, view.scroll + delta)) };
+    this.requestRender();
+  }
+
+  /** The test pane of a step without related changed tests: the existing tests of its code, or why there are none. */
+  private renderStoryTestEvidence(width: number, height: number): string[] {
+    const story = this.story!;
+    const step = story.plan.steps[story.step];
+    const textWidth = Math.max(1, width - 2);
+    const text = (value: string, color: "muted" | "dim" | "warning") => wrapAnsiText(sanitizeTerminalText(value), textWidth, true).map((line) => this.theme.fg(color, line));
+    const note = (title: string, lines: string[]) => {
+      delete this.storyPaneMetrics.tests;
+      return renderBox(title, width, height, this.theme, lines, story.member === "tests");
+    };
+    const unpaired = "No related changed tests.";
+    const context = step == null ? { kind: "not-code" as const } : classifyStoryStep(step, this.storyUnits);
+    if (context.kind === "tests") return note("Related changed tests", text("This step changes tests.", "muted"));
+    if (context.kind === "removed") return note("Related changed tests", [...text(unpaired, "muted"), ...text("This step removes code, so it needs no test.", "dim")]);
+    if (context.kind === "not-code") return note("Related changed tests", [...text(unpaired, "muted"), ...text("This step changes no code that runs.", "dim")]);
+    if (context.kind === "unknown") return note("Related changed tests", [...text(unpaired, "muted"), ...text("pi-coder could not match this step's lines to its code.", "dim")]);
+    if (this.options.story?.existingTests == null) {
+      return note("Related changed tests", [...text(unpaired, "muted"), ...text("Existing tests were not searched for this review.", "dim")]);
+    }
+    const report = this.existingTests;
+    if (report == null) return note("Existing tests", text("Searching existing tests\u2026", "muted"));
+    const lookups = context.unitIds.map((id) => report.units.get(id));
+    const found = lookups.filter((lookup): lookup is ExistingTestLookup => lookup?.status === "found");
+    if (found.length > 0) return this.renderExistingTests(width, height, found, lookups);
+    const failed = lookups.findIndex((lookup) => lookup?.status !== "none");
+    if (failed >= 0) {
+      return note("Existing tests", [
+        ...text("Could not search existing tests.", "warning"),
+        ...text(lookups[failed]?.reason ?? "pi-coder did not search this code.", "muted"),
+        "",
+        ...text("This is a gap in pi-coder, not a finding about the code.", "dim"),
+      ]);
+    }
+    const searched = lookups as ExistingTestLookup[];
+    const names = [...new Set(searched.flatMap((lookup) => lookup.names))];
+    const callers = [...new Set(searched.flatMap((lookup) => lookup.callers))];
+    const roots = [...new Set(searched.map((lookup) => lookup.root || "this repository"))];
+    const calling = callers.length === 0 ? "" : ` or the changed code that calls it (${joinNames(callers)})`;
+    const limits = this.existingTestLimits(searched);
+    return note("Tests", [
+      ...text("No tests found for this code.", "warning"),
+      "",
+      ...text(`No changed test pairs with this step, and no test in ${joinNames(roots)} names ${joinNames(names)}${calling}.`, "muted"),
+      "",
+      ...(limits.length > 0 ? limits.flatMap((limit) => text(limit, "dim"))
+        : text("That marks untested code, unless a test reaches it through files this change does not touch.", "dim")),
+    ]);
+  }
+
+  /** Why a search may have missed tests: names it could not search, and test files it did not read. */
+  private existingTestLimits(lookups: readonly ExistingTestLookup[]): string[] {
+    const skipped = [...new Set(lookups.flatMap((lookup) => lookup.skipped))];
+    const unread = Math.max(0, ...lookups.map((lookup) => lookup.unread));
+    return [
+      ...skipped.length === 0 ? [] : [`pi-coder could not search for ${joinNames(skipped)}.`],
+      ...unread === 0 ? [] : [unread === 1 ? "1 more test file names this code but was not read." : `${unread} more test files name this code but were not read.`],
+    ];
+  }
+
+  private renderExistingTests(width: number, height: number, found: readonly ExistingTestLookup[], lookups: ReadonlyArray<ExistingTestLookup | undefined>): string[] {
+    const story = this.story!;
+    const textWidth = Math.max(1, width - 2);
+    const dim = (value: string) => wrapAnsiText(sanitizeTerminalText(value), textWidth, true).map((line) => this.theme.fg("dim", line));
+    const row = (line: number | null, codeText: string, language: string | undefined) => this.buildUnifiedRowLines(line == null
+      ? { kind: "gap", displayLineNumber: null, commentLineNumber: null, commentSide: null, sign: " ", codeText }
+      : { kind: "context", displayLineNumber: line, commentLineNumber: null, commentSide: null, sign: " ", codeText }, width, language, false, false, false, undefined);
+    const lines: string[] = [];
+    let shown = 0;
+    for (const [index, file] of mergeExistingTestFiles(found).entries()) {
+      if (index > 0) lines.push("");
+      lines.push(this.theme.fg("muted", truncateMiddle(sanitizeTerminalText(file.path), textWidth)), ...dim(describeExistingTests(file)));
+      const language = detectPiLanguage(file.path);
+      let previous: number | undefined;
+      for (const range of displayRanges(file.ranges)) {
+        const skipped = previous == null ? 0 : range.startLine - previous - 1;
+        if (skipped > 0) lines.push(...row(null, `${skipped} line${skipped === 1 ? "" : "s"} not shown`, language));
+        if (range.changed) lines.push(this.theme.fg("dim", "changed in this review"));
+        for (let line = range.startLine; line <= range.endLine; line += 1) lines.push(...row(line, file.lines[line - 1] ?? "", language));
+        previous = range.endLine;
+      }
+      shown += file.ranges.filter((range) => !range.helper).length;
+    }
+    const total = Math.max(shown, found.reduce((sum, lookup) => sum + lookup.tests, 0));
+    if (total > shown) lines.push("", ...dim(`Showing ${shown} of ${total} matching tests.`));
+    for (const limit of this.existingTestLimits(found)) lines.push("", ...dim(limit));
+    for (const lookup of lookups) {
+      if (lookup?.status === "none") lines.push("", ...dim(`No test names ${joinNames(lookup.names)}.`));
+      else if (lookup == null || lookup.status === "failed") lines.push("", ...dim(`Could not search for more tests: ${lookup?.reason ?? "pi-coder did not search this code."}`));
+    }
+    const page = Math.max(1, height - 2);
+    const key = storyViewportKey(story, "tests");
+    const view = story.viewports[key];
+    const max = Math.max(0, lines.length - page);
+    const scroll = Math.max(0, Math.min(max, Number.isFinite(view?.scroll) ? view!.scroll : 0));
+    story.viewports[key] = { ...view, scroll, initialized: true };
+    this.storyPaneMetrics.tests = { max, page };
+    return renderBox("Existing tests", width, height, this.theme, lines.slice(scroll, scroll + page), story.member === "tests");
+  }
+
   private renderStoryMember(member: StoryMember, width: number, height: number, origin: DiffPaneOrigin): string[] {
     const story = this.story!;
     const page = storyPage(story, member);
     const anchor = page?.anchor;
     const title = member === "implementation" ? "Implementation" : "Related changed tests";
+    if (anchor == null && member === "tests") return this.renderStoryTestEvidence(width, height);
     if (anchor == null) {
       delete this.storyPaneMetrics[member];
-      const message = member === "tests" ? "No related changed tests" : "No implementation anchor";
-      return renderBox(title, width, height, this.theme, [this.theme.fg("muted", message)], story.member === member);
+      return renderBox(title, width, height, this.theme, [this.theme.fg("muted", "No implementation anchor")], story.member === member);
     }
     const previous = {
       state: this.state,
@@ -5980,6 +6176,7 @@ export class ReviewApp {
     const frameBox = { top: 0, bottom: height - 1, left: 0, right: width - 1 };
     const frame = { box: frameBox, inner: innerRect(frameBox) };
     if (width < 40 || height < 27) {
+      this.storyPaneMetrics = {};
       let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
       if (this.storyContextReturnFocus != null) compact = this.renderContextPanel(width, height);
       if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
