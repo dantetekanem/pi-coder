@@ -124,6 +124,24 @@ function testPairingKey(pathPrefix: string | undefined, directories: string[], n
   return `${pathPrefix ?? ""}\u0000${[...kept, name].join("/")}`;
 }
 
+function pathParts(path: string): { directories: string[]; name: string } {
+  const directories = path.split("/").filter((part) => part.length > 0);
+  return { directories, name: directories.pop() ?? path };
+}
+
+/** The key a file pairs under: its path without test and source root folders. */
+export function testPairingPathKey(path: string): string {
+  const { directories, name } = pathParts(path);
+  return testPairingKey(undefined, directories, name);
+}
+
+/** For a test file, the pairing key of the file it tests; null for other files. */
+export function testedPathKey(path: string): string | null {
+  const { directories, name } = pathParts(path);
+  const subject = testSubjectName(name);
+  return subject == null ? null : testPairingKey(undefined, directories, subject);
+}
+
 /**
  * Maps each changed test file to the changed file it tests, when their paths match after dropping
  * test and source root folders: `test/models/user_test.rb` tests `app/models/user.rb`, and

@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { isAbsolute, join, posix, resolve, sep } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getDefaultBranchRef } from "./git.js";
+import { getAgentDir } from "./host/runtime.js";
+import type { CommandRunner } from "./host/types.js";
 import {
   isSafeRepositoryName,
   parseConfiguredPullRequestUrl,
@@ -182,7 +182,7 @@ function repoMatchesRemoteUrl(repo: string, remoteUrl: string): boolean {
   return normalizedRemote.endsWith(`/${normalizedRepo}`) || normalizedRemote.endsWith(`:${normalizedRepo}`);
 }
 
-async function getMatchingLocalRepoRoot(pi: ExtensionAPI, cwd: string, repo: string): Promise<string | undefined> {
+async function getMatchingLocalRepoRoot(pi: CommandRunner, cwd: string, repo: string): Promise<string | undefined> {
   const rootResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 10000 });
   if (rootResult.code !== 0) return undefined;
   const gitRoot = rootResult.stdout.trim();
@@ -196,13 +196,13 @@ export function getRemoteCacheRoot(repo: string): string {
   if (!isSafeRepositoryName(repo)) throw new Error(`Invalid repository name: ${repo}.`);
   const safeParts = repo.split("/").map((part) => part.replace(/[^\w.-]/g, "_")).filter(Boolean);
   if (safeParts.some((part) => part === "." || part === "..")) throw new Error(`Invalid repository name: ${repo}.`);
-  const root = resolve(process.env.PI_CODER_REMOTE_CACHE_ROOT ?? join(homedir(), ".pi", "agent", "cache", "pi-coder", "remotes"));
+  const root = resolve(process.env.PI_CODER_REMOTE_CACHE_ROOT ?? join(getAgentDir(), "cache", "pi-coder", "remotes"));
   const candidate = resolve(root, ...safeParts);
   if (!candidate.startsWith(`${root}${sep}`)) throw new Error(`Invalid repository cache path for ${repo}.`);
   return candidate;
 }
 
-async function ensureRemoteCacheRepo(pi: ExtensionAPI, repo: string, onProgress?: RemoteProgress): Promise<string> {
+async function ensureRemoteCacheRepo(pi: CommandRunner, repo: string, onProgress?: RemoteProgress): Promise<string> {
   const gitRoot = getRemoteCacheRoot(repo);
   onProgress?.(`Preparing remote review cache for ${repo}…`);
   await mkdir(gitRoot, { recursive: true });
@@ -215,14 +215,14 @@ async function ensureRemoteCacheRepo(pi: ExtensionAPI, repo: string, onProgress?
   return ok.stdout.trim() || gitRoot;
 }
 
-async function validateConfiguredRepoRoot(pi: ExtensionAPI, repo: string, gitRoot: string): Promise<void> {
+async function validateConfiguredRepoRoot(pi: CommandRunner, repo: string, gitRoot: string): Promise<void> {
   const remoteResult = await pi.exec("git", ["remote", "get-url", "--all", "origin"], { cwd: gitRoot, timeout: 10000 });
   const matches = remoteResult.code === 0 && remoteResult.stdout.split(/\r?\n/).some((url) => repoMatchesRemoteUrl(repo, url));
   if (!matches) throw new Error(`Configured checkout ${gitRoot} does not match ${repo}.`);
 }
 
 async function resolveRepoRoot(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   fallbackCwd: string,
   repo: string | undefined,
   explicitCwd: string | undefined,
@@ -294,7 +294,7 @@ function configuredPrNumber(provider: ProviderSettings, value: unknown, label: s
 }
 
 async function executeProviderOperation(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   provider: ProviderSettings,
   operation: string,
@@ -316,7 +316,7 @@ function parseReview(provider: ProviderSettings, value: unknown, index: number):
 }
 
 async function getProviderReviews(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   provider: ProviderSettings,
   repo: string,
@@ -330,7 +330,7 @@ async function getProviderReviews(
 }
 
 async function getConfiguredPullRequestMetadata(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   prNumber: string,
   repo: string,
@@ -371,7 +371,7 @@ async function getConfiguredPullRequestMetadata(
 }
 
 async function getStackParentMetadataForHead(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   headRefName: string,
   repo: string,
@@ -410,7 +410,7 @@ async function getStackParentMetadataForHead(
 }
 
 export async function getPullRequestMetadata(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   prNumber: string,
   repo?: string,
@@ -440,7 +440,7 @@ function isRetryableFetchFailure(failure: string, retry: ProviderFetchRetrySetti
 }
 
 async function fetchRemoteRefs(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   refspecs: string[],
   remote = "origin",
@@ -467,7 +467,7 @@ async function fetchRemoteRefs(
   }
 }
 
-async function getMergeBase(pi: ExtensionAPI, gitRoot: string, baseRef: string, headRef: string): Promise<string> {
+async function getMergeBase(pi: CommandRunner, gitRoot: string, baseRef: string, headRef: string): Promise<string> {
   const result = await pi.exec("git", ["merge-base", baseRef, headRef], { cwd: gitRoot, timeout: 10000 });
   const mergeBase = result.code === 0 ? result.stdout.trim().split("\n").pop()?.trim() : undefined;
   return mergeBase != null && mergeBase.length > 0 ? mergeBase : baseRef;
@@ -485,7 +485,7 @@ function configuredTrackingBranch(provider: ProviderSettings, key: string, value
 }
 
 async function fetchBranchBasedPullRequestRefs(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   metadata: PullRequestMetadata,
   provider: ProviderSettings,
@@ -522,13 +522,13 @@ async function fetchBranchBasedPullRequestRefs(
   }
 }
 
-async function fetchedRevision(pi: ExtensionAPI, gitRoot: string, branch: string): Promise<string> {
+async function fetchedRevision(pi: CommandRunner, gitRoot: string, branch: string): Promise<string> {
   const result = await pi.exec("git", ["rev-parse", originRef(branch)], { cwd: gitRoot, timeout: 10000 });
   return result.code === 0 ? result.stdout.trim().toLowerCase() : "";
 }
 
 async function hasPinnedRevisions(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   metadata: PullRequestMetadata,
   baseBranch: string,
@@ -540,9 +540,9 @@ async function hasPinnedRevisions(
   return base.code === 0;
 }
 
-async function canSkipCloneFetch(pi: ExtensionAPI, gitRoot: string, remote: string, url: string): Promise<boolean> {
+async function canSkipCloneFetch(pi: CommandRunner, gitRoot: string, remote: string, url: string): Promise<boolean> {
   const result = await pi.exec("git", ["remote", "get-url", remote], { cwd: gitRoot, timeout: 10000 });
-  const normalize = (value: string) => {
+  const normalize = (value: string): string => {
     try {
       const parsed = new URL(value.trim());
       parsed.hostname = parsed.hostname.toLowerCase();
@@ -560,12 +560,12 @@ async function canSkipCloneFetch(pi: ExtensionAPI, gitRoot: string, remote: stri
 
   // Extra named-remote settings may change transport even when the URLs match.
   const prefix = `remote.${remote}.`;
-  const keys = config.stdout.split(/\r?\n/).filter((key) => key.startsWith(prefix));
+  const keys = config.stdout.split(/\r?\n/).filter((key: string) => key.startsWith(prefix));
   return keys.every((key) => key === `${prefix}url` || key === `${prefix}fetch`);
 }
 
 async function fetchRevisionPinnedPullRequestRefs(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   metadata: PullRequestMetadata,
   provider: ProviderSettings,
@@ -602,7 +602,7 @@ async function fetchRevisionPinnedPullRequestRefs(
 }
 
 async function fetchPullRequestRefs(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   gitRoot: string,
   metadata: PullRequestMetadata,
   provider: ProviderSettings,
@@ -614,7 +614,7 @@ async function fetchPullRequestRefs(
     : fetchBranchBasedPullRequestRefs(pi, gitRoot, metadata, provider, remote, onProgress);
 }
 
-async function fetchPlainRemoteBranch(pi: ExtensionAPI, gitRoot: string, branch: string, onProgress?: RemoteProgress): Promise<{ baseRef: string; headRef: string }> {
+async function fetchPlainRemoteBranch(pi: CommandRunner, gitRoot: string, branch: string, onProgress?: RemoteProgress): Promise<{ baseRef: string; headRef: string }> {
   const defaultBranchRef = await getDefaultBranchRef(pi, gitRoot);
   const baseBranch = stripOriginPrefix(defaultBranchRef ?? "origin/main");
   await fetchRemoteRefs(pi, gitRoot, [
@@ -638,7 +638,7 @@ function assertHandoffMatchesTarget(handoff: PullRequestHandoff, parsed: RemoteP
   if (parsed.provider !== handoff.provider) throw new Error(`Supplied pull request metadata is for ${handoff.provider}, but the review target is ${parsed.provider}.`);
 }
 
-async function verifySuppliedHeadRevision(pi: ExtensionAPI, gitRoot: string, headRef: string, metadata: PullRequestMetadata): Promise<void> {
+async function verifySuppliedHeadRevision(pi: CommandRunner, gitRoot: string, headRef: string, metadata: PullRequestMetadata): Promise<void> {
   const result = await pi.exec("git", ["rev-parse", headRef], { cwd: gitRoot, timeout: 10000 });
   const fetched = result.code === 0 ? result.stdout.trim().toLowerCase() : "";
   if (fetched !== metadata.headRefOid.toLowerCase()) {
@@ -647,7 +647,7 @@ async function verifySuppliedHeadRevision(pi: ExtensionAPI, gitRoot: string, hea
 }
 
 export async function resolveRemoteReviewTarget(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   fallbackCwd: string,
   remote: string,
   explicitCwd?: string,

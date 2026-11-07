@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner } from "./host/types.js";
 import { readConfiguredField, renderProviderOperation, renderProviderTemplate, type ProviderSettings } from "./provider-settings.js";
 import type { ReviewInlineComment, ReviewSubmissionStep, SubmitReviewInput } from "./review-submit.js";
 import type { SubmissionActor } from "./review-submission-journal.js";
@@ -75,7 +75,7 @@ function commentMatches(provider: ProviderSettings, remote: unknown, planned: Re
 
 /** Buffered read evidence only: never searches for attribution and never authorizes a retry. */
 export async function reconcileSubmissionStep(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   input: SubmitReviewInput,
   provider: ProviderSettings,
   step: ReviewSubmissionStep,

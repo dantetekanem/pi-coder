@@ -1,5 +1,4 @@
-import { complete, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ModelGateway } from "./host/types.js";
 
 export interface ReviewTextSet {
   body?: string;
@@ -130,50 +129,21 @@ export function classifyGrammarReview(original: ReviewTextSet, correctionText: s
   }
 }
 
-function responseText(response: Awaited<ReturnType<typeof complete>>): string {
-  if (response.stopReason === "aborted") throw new Error("Grammar review was cancelled.");
-  const text = response.content
-    .filter((content): content is { type: "text"; text: string } => content.type === "text")
-    .map((content) => content.text)
-    .join("\n")
-    .trim();
-  if (text.length === 0) throw new Error("Grammar model returned no text.");
-  return text;
-}
-
-async function modelText(
-  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
-  systemPrompt: string,
-  input: unknown,
-  signal?: AbortSignal,
-): Promise<string> {
-  if (ctx.model == null) throw new Error("No Pi model is selected for grammar review.");
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? `No API key for ${ctx.model.provider}.` : auth.error);
-  const message: UserMessage = {
-    role: "user",
-    content: [{ type: "text", text: JSON.stringify(input) }],
-    timestamp: Date.now(),
-  };
-  const response = await complete(
-    ctx.model,
-    { systemPrompt, messages: [message] },
-    { apiKey: auth.apiKey, headers: auth.headers, signal },
-  );
-  return responseText(response);
+function modelText(models: Pick<ModelGateway, "complete">, system: string, input: unknown, signal?: AbortSignal): Promise<string> {
+  return models.complete("grammar", { system, prompt: JSON.stringify(input), signal });
 }
 
 export async function reviewGrammar(
-  ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
+  models: Pick<ModelGateway, "complete">,
   original: ReviewTextSet,
   signal?: AbortSignal,
 ): Promise<GrammarReviewResult> {
   try {
-    const correctionText = await modelText(ctx, CORRECTION_SYSTEM_PROMPT, original, signal);
+    const correctionText = await modelText(models, CORRECTION_SYSTEM_PROMPT, original, signal);
     const corrected = parseCorrectionResponse(original, correctionText);
     const changes = getTextChanges(original, corrected);
     if (changes.length === 0) return { status: "safe", corrected, changes: [] };
-    const validationText = await modelText(ctx, VALIDATION_SYSTEM_PROMPT, {
+    const validationText = await modelText(models, VALIDATION_SYSTEM_PROMPT, {
       changes: changes.map(({ key, original: originalText, corrected: correctedText }) => ({ key, original: originalText, corrected: correctedText })),
     }, signal);
     return classifyGrammarReview(original, correctionText, validationText);

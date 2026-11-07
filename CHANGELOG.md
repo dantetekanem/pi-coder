@@ -10,6 +10,42 @@
 
 - Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL and `origin` has no extra remote-specific settings. Keep direct clone fallback for distinct paths and transport overrides such as `remote.origin.proxy`.
 
+## 1.0.0 - 2026-11-04
+
+### Added
+
+- Run pi-coder without Pi. The `pi-coder` command opens the same review, diff story, and code workbench in any terminal: `pi-coder diff`, `pi-coder story`, and `pi-coder code` take the same targets as `/diff`, `/diff-story`, and `/code`. It shares settings, drafts, and submissions with the Pi extension, so a review parked in one resumes in the other.
+- Hand feedback to any agent. When a review ends, the command prints the text Pi gives its agent: review feedback, DISCUSS notes, or a code discussion. `--json` prints one result object with the prompt, the tool details, follow-up messages, and notices.
+- `pi-coder tool <name>` runs `open_code`, `open_code_diff`, `open_code_diff_story`, and `submit_pr_review` with the same JSON input and result as the Pi tools, so agents in other harnesses can reopen a discussed review and submit a confirmed one.
+- Open the screen from an agent's shell. Without a terminal, pi-coder opens a new Herdr or tmux pane (or a configured terminal command), waits for the user, closes the pane, and prints the result. `--detach` returns a launch id, and `pi-coder wait <id>` collects the result later.
+- `pi-coder mcp` serves the four tools over MCP, plus `pi_coder_wait`, for Claude Code, Codex, and other MCP clients.
+- Configure model commands for the grammar pass, the story agent, and reply analysis outside Pi with `models` in `pi-coder-settings.json`. Without one, pi-coder runs `pi -p` when Pi is installed.
+- A `pi-coder` skill tells agents in other harnesses how to open reviews, read feedback, continue a discussion, and submit a review.
+- `Ctrl+?` opens a popup with every shortcut, in the review and in the diff story. `?` and `Ctrl+/` also open it, for terminals that send `Ctrl+?` as Backspace.
+- In a diff story, `Option+Up/Down` scrolls the other pane without moving focus, `Option+PgUp/PgDn` pages it, and `Option+Shift+Up/Down` or `Option+Home/End` jump it to its top or bottom. `Home`/`End` jump the focused pane, in the review too.
+- In a diff story, `i` opens the story info in a popup: the step, the pull request, totals, captured files, and every step.
+- A diff story step without a changed test shows the existing tests of its code. pi-coder searches the reviewed revision, inside the code's package, for tests that name the changed code or changed code that calls it, in test files that mirror, sit beside, import, or name that code. Each file says why its tests match, and tests that this review changes are marked. When no test reaches the code, the pane says **No tests found for this code** and names what it searched, which marks the code as untested unless a test reaches it through files the change does not touch. A failed or timed-out search says it is a pi-coder gap. Steps that change only tests, remove code, or change files that do not run say so too.
+- A diff story shows a **Steps** sidebar on the left. It lists every step, highlights the current one with a short note from the story agent, and points down to the steps that follow. It moves with `Shift+Left/Right`. For the notes, the story agent receives each unit's changed lines and writes a summary plus a title and note for each step. The sidebar is on by default. `1` hides it and saves the choice; while it is hidden, new stories skip the notes.
+
+### Changed
+
+- The diff story is task-first: each step puts the changed tests on the left and the code they exercise on the right, and the code pane has focus when the story opens, when it resumes, and on every new step. When a step's tests in one file pass 30 changed lines, they split across steps that repeat the same code. Saved stories keep their steps.
+- The story header shows only the step title and its number. The review and the story footers are one line: `Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)`, plus `i (Info)` in the story. The hint line inside the diff pane is gone.
+- In a diff story, `Option` no longer moves the cursor onto unchanged lines; `C` still lets the arrows reach them. `Shift+Tab` now cycles the story panes backward, and `t` templates open only in the full diff.
+- The story agent starts as `anthropic/claude-opus-5-5` with `low` thinking, instead of `openai-codex/gpt-5.6-luna` with `max`. A saved selection is kept.
+- The Pi coding agent and Pi AI packages are optional peers. pi-coder uses them only inside Pi; Pi TUI is now a regular dependency.
+
+### Fixed
+
+- A diff story no longer pairs a helper method from a test file, such as a private method the tests call, with code as if it were a test. A helper follows the first test that calls it, and a split never leaves a helper on its own. A test pairs through the helpers it calls, quoted strings such as test names no longer count as code references, and a changed file named like the test file wins over name matches in other files.
+
+## 0.9.8 - 2026-11-04
+
+### Added
+
+- Mark open PR threads on the diff lines they belong to. A remote review reads the threads in the background when it opens, even with PR context and Replies hidden. A `○` marks each line whose thread anchor matches the reviewed code, and the Navigator shows each file's count. Press `I` to show or hide the thread text under its line. The threads are read-only: they never join your draft, the Comments pane, the submission, or the agent prompt.
+- A REST provider can map `commentDiffHunk` to each comment's diff hunk (`diff_hunk` in GitHub-shaped APIs), so a thread written on an older push still finds its line after the code moves. GitHub reviews read it through GraphQL without extra settings.
+
 ## 0.9.7 - 2026-11-03
 
 ### Changed

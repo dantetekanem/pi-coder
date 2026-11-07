@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureRuntime, resetRuntime } from "../host/runtime.js";
 import { parsePullRequestHandoff } from "../pr-handoff.js";
 import { clearRemoteReviewTargetCache, extractBranchFromRemote, formatPullRequestContext, getRemoteCacheRoot, resolveRemoteReviewTarget } from "../remote.js";
 
@@ -154,6 +155,7 @@ afterEach(() => {
   else process.env.PI_CODER_REMOTE_CACHE_ROOT = originalCacheRoot;
   rmSync(directory, { recursive: true, force: true });
   vi.useRealTimers();
+  resetRuntime();
 });
 
 describe("remote review helpers", () => {
@@ -198,6 +200,16 @@ describe("remote review helpers", () => {
     expect(getRemoteCacheRoot("example/widgets")).toBe(join(root, "example", "widgets"));
     expect(() => getRemoteCacheRoot("../..")).toThrow("Invalid repository name");
     expect(() => getRemoteCacheRoot("../sessions")).toThrow("Invalid repository name");
+  });
+
+  it("keeps the remote cache under the host's agent directory unless overridden", () => {
+    delete process.env.PI_CODER_REMOTE_CACHE_ROOT;
+    configureRuntime({ agentDir: () => join(directory, "agent") });
+
+    expect(getRemoteCacheRoot("example/widgets")).toBe(join(directory, "agent", "cache", "pi-coder", "remotes", "example", "widgets"));
+
+    process.env.PI_CODER_REMOTE_CACHE_ROOT = join(directory, "override");
+    expect(getRemoteCacheRoot("example/widgets")).toBe(join(directory, "override", "example", "widgets"));
   });
 
   it("renders provider operations as executable plus argv and fetches branch refs", async () => {

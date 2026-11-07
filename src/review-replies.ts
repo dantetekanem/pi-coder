@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner, HostContext, ModelGateway } from "./host/types.js";
 import {
   getProviderCapability,
   readConfiguredField,
@@ -12,6 +12,7 @@ import { createConversationRead, type createConversationReader } from "./convers
 import { hasHandoffContext } from "./pr-handoff.js";
 import { fetchProviderRestPages, type ProviderRestPage } from "./provider-rest-pages.js";
 import type { ReviewReplyItem, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewThreadCoverage } from "./types.js";
+import { anchorTextFromDiffHunk } from "./review-threads.js";
 
 const MAX_REPLY_BODY_LENGTH = 1200;
 const MAX_REPLIES = 100;
@@ -43,6 +44,11 @@ export interface ReplyThread {
   baseRevision?: string;
   path?: string;
   line?: number | null;
+  startLine?: number | null;
+  /** Line on the commit the thread was written on; used when the provider has no current line. */
+  originalLine?: number | null;
+  /** Last diff-hunk lines on the thread's side, ending with the commented line. */
+  anchorText?: string[];
   comments: ReplyThreadComment[];
 }
 
@@ -69,6 +75,9 @@ const REPLY_THREAD_FIELDS = `
           pullRequest { headRefOid baseRefOid }
           path
           line
+          startLine
+          originalLine
+          firstComment: comments(first: 1) { nodes { diffHunk } }
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes {
@@ -222,6 +231,7 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
     const resolved = typeof reportedResolution === "boolean" ? reportedResolution : null;
     const path = providerString(provider, "commentPath", row);
     const line = providerNumber(provider, "commentLine", row) ?? null;
+    const side = readSide(readConfiguredField(provider, "commentSide", row));
 
     const existing = threads.get(threadId);
     const comment: ReplyThreadComment = {
@@ -235,9 +245,17 @@ export function groupFlatReviewComments(rows: unknown[], provider: ProviderSetti
       line,
     };
     if (existing == null) {
+      const outdated = readConfiguredField(provider, "commentOutdated", row);
+      const startLine = providerNumber(provider, "commentStartLine", row);
+      const originalLine = providerNumber(provider, "commentOriginalLine", row);
+      const anchorText = anchorTextFromDiffHunk(readConfiguredField(provider, "commentDiffHunk", row), side);
       threads.set(threadId, { id: threadId, resolved, ...(path == null ? {} : { path }), line, comments: [comment],
-        side: readSide(readConfiguredField(provider, "commentSide", row)),
-        headRevision: providerString(provider, "commentCommitId", row) });
+        side,
+        headRevision: providerString(provider, "commentCommitId", row),
+        ...(typeof outdated === "boolean" ? { outdated } : {}),
+        ...(startLine == null ? {} : { startLine }),
+        ...(originalLine == null ? {} : { originalLine }),
+        ...(anchorText == null ? {} : { anchorText }) });
       continue;
     }
     existing.comments.push(comment);
@@ -286,11 +304,17 @@ export function parseGraphqlReplyThreads(payload: unknown): ReplyThread[] {
         line: typeof raw.line === "number" ? raw.line : null,
       });
     }
+    const side = readSide(node.diffSide);
+    const firstComment = isRecord(node.firstComment) && Array.isArray(node.firstComment.nodes) ? node.firstComment.nodes[0] : undefined;
+    const anchorText = anchorTextFromDiffHunk(isRecord(firstComment) ? firstComment.diffHunk : undefined, side);
     threads.push({
       id: threadId,
       resolved: typeof node.isResolved === "boolean" ? node.isResolved : null,
       outdated: typeof node.isOutdated === "boolean" ? node.isOutdated : undefined,
-      side: readSide(node.diffSide),
+      side,
+      ...(typeof node.startLine === "number" ? { startLine: node.startLine } : {}),
+      ...(typeof node.originalLine === "number" ? { originalLine: node.originalLine } : {}),
+      ...(anchorText == null ? {} : { anchorText }),
       headRevision: isRecord(node.pullRequest) ? readString(node.pullRequest.headRefOid) : undefined,
       baseRevision: isRecord(node.pullRequest) ? readString(node.pullRequest.baseRefOid) : undefined,
       ...(readString(node.path) == null ? {} : { path: readString(node.path)! }),
@@ -336,7 +360,7 @@ function providerRows(provider: ProviderSettings, value: unknown): unknown[] {
 }
 
 export async function getSelfLogin(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   repo: string,
@@ -373,7 +397,7 @@ function parseGraphqlThreadRead(payload: unknown, succeeded: boolean): ReviewThr
 }
 
 export async function fetchReviewThreads(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   repo: string,
@@ -481,19 +505,13 @@ async function fetchReviewRepliesForProvider(
   return read.retain({ ...prepareRepliesToSelf(threads.threads, selfLogin), previewLimit: MAX_REPLY_BODY_LENGTH, selfLogin, fetchedAt: new Date().toISOString(), threadCoverage: threads.coverage });
 }
 
-function fetchBoundedReplies(pi: ExtensionAPI, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
+function fetchBoundedReplies(pi: CommandRunner, target: RemoteReviewTarget, provider: ProviderSettings): Promise<ReviewRepliesSnapshot> {
   const read = createConversationRead(pi);
   return fetchReviewRepliesForProvider(read, target, provider).finally(read.close);
 }
 
-export async function fetchReviewReplies(pi: ExtensionAPI, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {
+export async function fetchReviewReplies(pi: CommandRunner, target: RemoteReviewTarget): Promise<ReviewRepliesSnapshot> {
   return fetchBoundedReplies(pi, target, providerForTarget(target));
-}
-
-function modelArgs(ctx: ExtensionContext): string[] {
-  const model = (ctx as { model?: { provider?: string; id?: string } }).model;
-  if (model?.provider == null || model.id == null) return [];
-  return ["--model", `${model.provider}/${model.id}`];
 }
 
 /** The reply body is untrusted input, so it is fenced and the model is told to treat it as data. */
@@ -523,37 +541,20 @@ export function buildReplyAnalysisPrompt(reply: ReviewReplyItem, context: { titl
 }
 
 export async function analyzeReviewReply(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
+  models: Pick<ModelGateway, "complete">,
   target: RemoteReviewTarget,
   reply: ReviewReplyItem,
 ): Promise<string> {
   const prompt = buildReplyAnalysisPrompt(reply, { title: target.pullRequest?.title, url: target.handoff?.url });
-  const result = await pi.exec("pi", [
-    "--no-tools",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-context-files",
-    "--no-session",
-    ...modelArgs(ctx),
-    "--thinking",
-    "minimal",
-    "-p",
-    prompt,
-  ], { cwd: target.gitRoot, timeout: ANALYSIS_TIMEOUT_MS });
-
-  const output = result.stdout.trim();
-  if (result.code !== 0 || output.length === 0) {
-    throw new Error(result.stderr.trim() || "The analysis model returned nothing. Press a again to retry.");
-  }
+  const output = (await models.complete("analysis", { prompt, cwd: target.gitRoot, timeoutMs: ANALYSIS_TIMEOUT_MS })).trim();
+  if (output.length === 0) throw new Error("The analysis model returned nothing. Press a again to retry.");
   const clean = sanitizeTerminalMultilineText(output);
   return clean.length <= MAX_ANALYSIS_LENGTH ? clean : `${clean.slice(0, MAX_ANALYSIS_LENGTH - 1)}…`;
 }
 
 export function createRemoteReviewRepliesSource(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
+  pi: CommandRunner,
+  ctx: Pick<HostContext, "models">,
   target: RemoteReviewTarget | undefined,
   reader?: ReturnType<typeof createConversationReader>,
 ): ReviewRepliesPanelSource | undefined {
@@ -592,6 +593,6 @@ export function createRemoteReviewRepliesSource(
       if (threads == null || snapshot.replies == null) throw new Error("Review threads unavailable. Press r to refresh replies.");
       return project(snapshot)!;
     },
-    analyze: (reply) => analyzeReviewReply(pi, ctx, target, reply),
+    analyze: (reply) => analyzeReviewReply(ctx.models, target, reply),
   };
 }

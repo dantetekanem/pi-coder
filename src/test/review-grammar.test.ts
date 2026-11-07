@@ -8,6 +8,7 @@ vi.mock("@earendil-works/pi-ai", async (importOriginal) => ({
 }));
 
 const { classifyGrammarReview, reviewGrammar } = await import("../review-grammar.js");
+const { createPiModelGateway } = await import("../pi/models.js");
 
 const original = {
   body: undefined,
@@ -94,7 +95,7 @@ describe("grammar review classification", () => {
       modelRegistry: { getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "test-key" })) },
     };
 
-    const result = await reviewGrammar(ctx as never, original);
+    const result = await reviewGrammar(createPiModelGateway({} as never, ctx as never), original);
 
     expect(result.status).toBe("safe");
     expect(mocks.complete).toHaveBeenCalledTimes(2);

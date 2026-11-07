@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 
 export const PI_CODER_SETTINGS_VERSION = 1;
 
@@ -63,6 +63,9 @@ export interface PiCoderSettings {
   search?: string;
   providers: Record<string, ProviderSettings>;
   repositories: Record<string, RepositoryProfileSettings>;
+  /** Raw sections the terminal host validates. */
+  models?: unknown;
+  terminal?: unknown;
 }
 
 const BUILT_IN_GITHUB_PROVIDER: ProviderSettings = {
@@ -363,12 +366,13 @@ function readCodeSettings(value: unknown): CodeCommandSettings | undefined {
 
 export function parsePiCoderSettings(value: unknown): PiCoderSettings {
   if (!isRecord(value)) throw new Error("Settings must be an object.");
-  rejectUnknownKeys(value, ["version", "code", "search", "providers", "repositories"], "settings");
+  rejectUnknownKeys(value, ["version", "code", "search", "providers", "repositories", "models", "terminal"], "settings");
   if (value.version !== undefined && value.version !== PI_CODER_SETTINGS_VERSION) throw new Error(`Settings version must be ${PI_CODER_SETTINGS_VERSION}.`);
   const code = readCodeSettings(value.code);
   const search = value.search == null ? undefined : readUrlTemplate(value.search, "settings.search", ["query"]);
-  if (!isRecord(value.providers)) throw new Error("settings.providers must be an object.");
-  const providers = Object.fromEntries(Object.entries(value.providers).map(([id, entry]) => [id, readProvider(id, entry)]));
+  const providersValue = value.providers === undefined ? {} : value.providers;
+  if (!isRecord(providersValue)) throw new Error("settings.providers must be an object.");
+  const providers = Object.fromEntries(Object.entries(providersValue).map(([id, entry]) => [id, readProvider(id, entry)]));
   const repositoriesValue = value.repositories ?? {};
   if (!isRecord(repositoriesValue)) throw new Error("settings.repositories must be an object.");
   const repositories = Object.fromEntries(Object.entries(repositoriesValue).map(([repo, entry]) => [repo.toLowerCase(), readRepository(entry, `repositories.${repo}`)]));
@@ -378,6 +382,8 @@ export function parsePiCoderSettings(value: unknown): PiCoderSettings {
     ...(search == null ? {} : { search }),
     providers,
     repositories,
+    ...(value.models === undefined ? {} : { models: value.models }),
+    ...(value.terminal === undefined ? {} : { terminal: value.terminal }),
   });
 }
 

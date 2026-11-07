@@ -1,7 +1,8 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { copyToClipboard, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, Editor, type EditorTheme, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { adjustStructuredDiffContext, buildStructuredDiff, getContextExpansionRowIndexes, revealStructuredDiffRows, type ContextExpansionDirection, type StructuredDiff } from "../diff.js";
+import { copyText as writeClipboard } from "../host/runtime.js";
+import type { HostContext, HostTheme, HostUI } from "../host/types.js";
 import { filterReviewFilesByLocale } from "../locale-files.js";
 import {
   clampSelectedLineTarget,
@@ -38,14 +39,17 @@ import { getShortcutConfigPath, getShortcutsForSide, type CommentShortcut } from
 import { filterFilesBySearch } from "../search.js";
 import { sanitizeTerminalMultilineText, sanitizeTerminalText } from "../sanitize.js";
 import type { ReplyThread } from "../review-replies.js";
+import { isOpenReviewThread, placeReviewThread, type PlacedReviewThread, type ReviewThreadSide } from "../review-threads.js";
 import { highlightJsonLine, highlightMarkdownLine } from "../theme-highlight.js";
 import type { ChangeStatus, CommentIntent, DiffReviewComment, FileCommentTarget, ReviewComposition, ReviewCompositionTarget, ReviewContextPanelSource, ReviewConversationLoadOptions, ReviewConversationMetadata, ReviewExitDisposition, ReviewFile, ReviewFileContents, ReviewFocus, ReviewLineTarget, ReviewRepliesPanelSource, ReviewRepliesSnapshot, ReviewReplyItem, ReviewResult, ReviewResumeReference, ReviewScope, ReviewState, ReviewSubmoduleInfo } from "../types.js";
 import { formatIntentLabel, formatScopeLabel, getReviewFileDisplayPath, getSubmoduleInfo, hasExactSubmoduleRange, joinReviewPath } from "../types.js";
-import { getReviewFooterHint, getReviewHelpSections, matchesReviewAction } from "./actions.js";
+import { getFooterShortcuts, getReviewHelpSections, getStoryHelpSections, isShortcutsKey, matchesReviewAction, type ShortcutsMode } from "./actions.js";
 import { openExternalUrl, type UrlOpenResult } from "./open-url.js";
 import { ExactTextEditor } from "./exact-text-editor.js";
-import { restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
+import { defaultStoryMember, restoreStoryNavigation, storyAnchor, storyPage, storyPageDiff, storyPages, storyViewportKey, type StoryMember, type StoryPage, type StorySessionData } from "../diff-story/navigation.js";
 import { completeDiffStory, type DiffStory, type StoryAnchor, type StorySnapshot } from "../diff-story/plan.js";
+import { classifyStoryStep, type ExistingTestFile, type ExistingTestLookup, type ExistingTestRange, type ExistingTestReport } from "../diff-story/existing-tests.js";
+import { prepareStoryUnits, type StoryUnit } from "../diff-story/units.js";
 import { edgeToEdgeOverlayOptions } from "./full-screen-overlay.js";
 import { layoutCodeLines, parseSgrMouseInput, stripTerminalSequences, type CodeRowText } from "./mouse-selection.js";
 import type { ReviewSourceLinks } from "../source-links.js";
@@ -126,6 +130,7 @@ type CommentPanelItem =
   | { kind: "comment"; comment: DiffReviewComment };
 
 interface ReviewAppOptions {
+  codeCommand?: string;
   files: ReviewFile[];
   repoRoot: string;
   loadFileContents: (repoRoot: string, file: ReviewFile, scope: ReviewScope) => Promise<ReviewFileContents>;
@@ -136,7 +141,7 @@ interface ReviewAppOptions {
   seedComments?: ResolvedSeedComment[];
   contextPanelSource?: ReviewContextPanelSource;
   repliesSource?: ReviewRepliesPanelSource;
-  story?: { plan: DiffStory; snapshot: StorySnapshot };
+  story?: { plan: DiffStory; snapshot: StorySnapshot; existingTests?: Promise<ExistingTestReport> };
   orderSignals?: ReviewOrderSignals;
   reviewHeader?: ReviewHeaderInfo;
   sourceLinks?: ReviewSourceLinks;
@@ -150,7 +155,7 @@ interface ReviewAppOptions {
   reviewScopeFingerprint?: string;
   initialBanner?: string;
   openUrl?: (url: string) => Promise<UrlOpenResult>;
-  notify: ExtensionContext["ui"]["notify"];
+  notify: HostUI["notify"];
 }
 
 interface ReviewFrame {
@@ -190,9 +195,27 @@ interface ReviewDiffSurface extends DiffSurface {
   paneWidth: number;
   language: string | undefined;
   lineComments: Map<string, DiffReviewComment>;
+  threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>;
+}
+
+/** Open PR threads placed on one file's reviewed lines. Keys are `side:line`. */
+interface FileThreadPlacement {
+  data: NonNullable<ReviewRepliesPanelSource["threadData"]>;
+  contents: ReviewFileContents;
+  version: number;
+  total: number;
+  placed: number;
+  marks: Map<string, PlacedReviewThread[]>;
+  anchors: Map<string, PlacedReviewThread[]>;
+  /** Unified context rows carry one side's number, so unchanged lines are also keyed by their other side. */
+  unifiedMarks: Map<string, PlacedReviewThread[]>;
+  unifiedAnchors: Map<string, PlacedReviewThread[]>;
 }
 
 const COMMIT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+const THREAD_MARKER = "\u25cb";
+const THREAD_BLOCK_INDENT = 7;
+const THREAD_COMMENT_MAX_LINES = 8;
 const DEFAULT_CONTEXT_LINES = 3;
 const CONTEXT_EXPANSION_LINES = 10;
 const STACKED_LAYOUT_MAX_WIDTH = 99;
@@ -210,6 +233,12 @@ const MAX_DIFF_LAYOUT_ENTRIES = 100;
 const MAX_SYNTAX_LINE_ENTRIES = 5000;
 const STATUS_TEXT_MAX_CELLS = 96;
 const STATUS_TEXT_MAX_BYTES = 256;
+const OTHER_PANE_CHORDS = ["up", "down", "pageUp", "pageDown", "home", "end", "u", "d", "b", "f"] as const;
+const STORY_SIDEBAR_MIN_INNER_WIDTH = 100;
+const STORY_SIDEBAR_WIDTH_SHARE = 0.22;
+const STORY_SIDEBAR_MIN_WIDTH = 28;
+const STORY_SIDEBAR_MAX_WIDTH = 48;
+const STORY_SIDEBAR_TITLE_LINES = 3;
 const REVIEW_PANE_ORDER = ["navigator", "diff", "comments", "context", "replies"] as const;
 type ReviewPaneName = typeof REVIEW_PANE_ORDER[number];
 
@@ -572,7 +601,7 @@ export function getRelatedFileMarker(file: ReviewFile, activeFile: ReviewFile | 
   return null;
 }
 
-export type ReviewAppTheme = Parameters<ExtensionContext["ui"]["custom"]>[0] extends (tui: any, theme: infer T, kb: any, done: any) => any ? T : never;
+export type ReviewAppTheme = HostTheme;
 type Theme = ReviewAppTheme;
 
 function repeat(char: string, count: number): string {
@@ -756,6 +785,20 @@ function getLineCommentIndex(state: ReviewState, fileId: string, scope: ReviewSc
   return index;
 }
 
+function pushThreadEntry(map: Map<string, PlacedReviewThread[]>, key: string, placed: PlacedReviewThread): void {
+  const list = map.get(key);
+  if (list == null) map.set(key, [placed]);
+  else if (!list.includes(placed)) list.push(placed);
+}
+
+function getThreadPaths(file: ReviewFile, scope: ReviewScope): Record<ReviewThreadSide, string | undefined> {
+  const comparison = getScopeComparison(file, scope);
+  return {
+    added: comparison?.newPath == null ? undefined : joinReviewPath(file.pathPrefix, comparison.newPath),
+    deleted: comparison?.oldPath == null ? undefined : joinReviewPath(file.pathPrefix, comparison.oldPath),
+  };
+}
+
 function getCommentPanelItems(state: ReviewState, fileId: string | null, scope: ReviewScope, global = false): CommentPanelItem[] {
   const items: CommentPanelItem[] = [];
   if (state.draft.allComment.trim().length > 0) {
@@ -783,6 +826,16 @@ function getCommentIndicator(theme: Theme, intent: CommentIntent): string {
   if (intent === "modify") return theme.fg("accent", "\u25cf");
   if (intent === "comment") return theme.fg("success", "\u25a0");
   return theme.fg("warning", "\u25c6");
+}
+
+/** The reviewer's own feedback keeps the gutter; an open PR thread shows only on lines without it. */
+function getLineIndicator(theme: Theme, lineComment: DiffReviewComment | undefined, threaded: boolean): string {
+  if (lineComment != null) return getCommentIndicator(theme, lineComment.intent);
+  return threaded ? theme.fg("mdLink", THREAD_MARKER) : " ";
+}
+
+function getLineIndicatorKey(lineComment: DiffReviewComment | undefined, threaded: boolean): string {
+  return lineComment?.intent ?? (threaded ? "thread" : "-");
 }
 
 function formatLineSideLabel(side: ReviewLineTarget["side"]): string {
@@ -1014,6 +1067,18 @@ function truncateMiddle(text: string, maxWidth: number): string {
   return `${head}…${tail}`;
 }
 
+/** Plain-text end truncation; pi-tui's truncateToWidth inserts a color reset before its ellipsis. */
+function truncateEnd(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  let head = "";
+  for (const character of text) {
+    if (visibleWidth(`${head}${character}`) > maxWidth - 1) break;
+    head += character;
+  }
+  return `${head.trimEnd()}…`;
+}
+
 export function formatPaneTitle(title: string, focused: boolean): string {
   return focused ? `▶ ${title}` : title;
 }
@@ -1049,9 +1114,6 @@ function renderBox(title: string, width: number, height: number, theme: Theme, l
 
   return [top, ...body, bottom];
 }
-
-const FOOTER_ACTION_HINT = getReviewFooterHint();
-const HELP_KEY_SECTIONS = getReviewHelpSections();
 
 function pushWrappedAnsiText(lines: string[], text: string, width: number, prefix = ""): void {
   const availableWidth = Math.max(1, width - visibleWidth(prefix));
@@ -1110,23 +1172,6 @@ export function buildContextPanelLines(theme: Theme, width: number, text: string
   return lines;
 }
 
-export function buildDiffActionHintLine(theme: Theme, width: number): string {
-  const sep = theme.fg("dim", " • ");
-  const part = (key: string, label: string, color: "accent" | "success" | "warning" | "muted") =>
-    `${theme.fg(color, key)} ${theme.fg("dim", label)}`;
-  const hint = [
-    part("Enter/m", "modify", "accent"),
-    part("c", "comment", "success"),
-    part("d", "discuss", "warning"),
-    part("l", "file", "muted"),
-    part("a", "all lines", "muted"),
-    part("k/j", "context", "muted"),
-    part("y", "copy", "muted"),
-    part("w", "wrap", "muted"),
-  ].join(sep);
-  return truncateToWidth(hint, Math.max(1, width - 2), "…", false);
-}
-
 export function buildRelatedFilePanelLines(theme: Theme, width: number, file: ReviewFile | null, scope: ReviewScope, maxPathsPerSection = 6): string[] {
   const sections = getRelatedFilePanelSections(file, scope);
   if (sections.length === 0) return [];
@@ -1152,11 +1197,16 @@ export function buildRelatedFilePanelLines(theme: Theme, width: number, file: Re
   return lines;
 }
 
-export function buildFooterLines(theme: Theme, promptStatus: string, frameInnerWidth: number): string[] {
+function buildShortcutsFooterLine(theme: Theme, mode: ShortcutsMode): string {
+  const hints = getFooterShortcuts(mode).map(({ key, label, color }) => `${theme.fg(color, key)} ${theme.fg("dim", `(${label})`)}`);
+  return `${theme.fg("dim", "Shortcuts:")} ${hints.join(theme.fg("dim", " - "))}`;
+}
+
+export function buildFooterLines(theme: Theme, status: string | null, frameInnerWidth: number, mode: ShortcutsMode = "review"): string[] {
   const width = Math.max(1, frameInnerWidth);
   return [
-    ...wrapAnsiText(theme.fg("dim", promptStatus), width, true),
-    ...wrapAnsiText(theme.fg("dim", FOOTER_ACTION_HINT), width, true),
+    ...(status ? wrapAnsiText(theme.fg("dim", status), width, true) : []),
+    ...wrapAnsiText(buildShortcutsFooterLine(theme, mode), width, true),
   ];
 }
 
@@ -1167,7 +1217,7 @@ export function fitFooterLines(theme: Theme, lines: string[], maxLines: number, 
 
   const visibleLineCount = budget - 1;
   const hiddenLineCount = lines.length - visibleLineCount;
-  const marker = truncateToWidth(theme.fg("warning", `+${hiddenLineCount} more • ? help`), Math.max(1, width), "", false);
+  const marker = truncateToWidth(theme.fg("warning", `+${hiddenLineCount} more • Ctrl+? shortcuts`), Math.max(1, width), "", false);
   return [...lines.slice(0, visibleLineCount), marker];
 }
 
@@ -1196,19 +1246,21 @@ export function getReviewVerticalLayout(
   return { bodyHeight, footerLines: fittedFooterLines, stackedPaneMinimumHeight };
 }
 
-export function buildHelpPanelLines(theme: Theme, width: number, activeShortcuts: CommentShortcut[], configPath: string): string[] {
+export function buildHelpPanelLines(theme: Theme, width: number, activeShortcuts: CommentShortcut[], configPath: string, codeCommand?: string, mode: ShortcutsMode = "review"): string[] {
   const lines: string[] = [];
   const contentWidth = Math.max(1, width - 2);
 
-  pushWrappedText(lines, theme, "? toggle help • Esc close", contentWidth, "muted");
+  pushWrappedText(lines, theme, "Ctrl+? / ? / Ctrl+/ toggle • Esc close", contentWidth, "muted");
+  pushWrappedText(lines, theme, "Some terminals send Ctrl+? as Backspace (tmux without extended-keys); ? and Ctrl+/ still work.", contentWidth, "dim");
 
-  for (const section of HELP_KEY_SECTIONS) {
+  for (const section of mode === "story" ? getStoryHelpSections() : getReviewHelpSections(codeCommand)) {
     lines.push("");
     lines.push(truncateToWidth(theme.fg("warning", section.title), contentWidth, "", false));
     for (const line of section.lines) {
       pushWrappedText(lines, theme, line, contentWidth, "muted");
     }
   }
+  if (mode === "story") return lines;
 
   lines.push("");
   lines.push(truncateToWidth(theme.fg("warning", "Template shortcuts"), contentWidth, "", false));
@@ -1226,6 +1278,188 @@ export function buildHelpPanelLines(theme: Theme, width: number, activeShortcuts
   pushWrappedText(lines, theme, configPath, contentWidth, "muted");
 
   return lines;
+}
+
+export interface StoryInfo {
+  story: Pick<StorySessionData, "plan" | "step" | "viewedStepIds">;
+  snapshot: StorySnapshot;
+  header?: ReviewHeaderInfo;
+  brief?: string;
+  reviewed: number;
+  comments: number;
+  hasContext: boolean;
+  hasThreads: boolean;
+}
+
+export function buildStoryInfoLines(theme: Theme, width: number, info: StoryInfo): string[] {
+  const { story, snapshot } = info;
+  const contentWidth = Math.max(1, width - 2);
+  const total = story.plan.steps.length;
+  const step = story.plan.steps[story.step];
+  const seen = (id: string) => story.viewedStepIds.includes(id);
+  const place = (anchor: StoryAnchor) => {
+    const path = snapshot.files.find((file) => file.fileId === anchor.fileId)?.path ?? anchor.fileId;
+    return `${path}:${formatLineRangeLabel(anchor.startLine, anchor.endLine)}${anchor.side === "deleted" ? " (deleted)" : ""}`;
+  };
+  const lines: string[] = [];
+  const heading = (text: string) => {
+    if (lines.length > 0) lines.push("");
+    lines.push(truncateToWidth(theme.fg("warning", text), contentWidth, "", false));
+  };
+  const list = (label: string, anchors: readonly StoryAnchor[]) => {
+    pushWrappedText(lines, theme, anchors.length === 0 ? `${label}: none` : `${label}:`, contentWidth, "dim");
+    for (const anchor of anchors) pushWrappedText(lines, theme, place(anchor), contentWidth, "muted", "  ");
+  };
+
+  if (step != null) {
+    heading(`Step ${story.step + 1}/${total}${seen(step.id) ? " · seen" : ""}`);
+    pushWrappedAnsiText(lines, theme.fg("accent", sanitizeTerminalText(step.title)), contentWidth);
+    if (step.explanation) pushWrappedText(lines, theme, step.explanation, contentWidth, "muted");
+    list("Tests", step.tests);
+    list("Implementation", step.implementation);
+  }
+
+  if (info.header != null) {
+    heading("Review");
+    lines.push(...buildReviewOrientationLines(theme, contentWidth, { ...info.header, openThreads: undefined }, {
+      files: snapshot.files.length,
+      reviewed: info.reviewed,
+      comments: info.comments,
+    }, info.brief));
+  }
+
+  heading("Totals");
+  pushWrappedText(lines, theme, `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} · ${story.viewedStepIds.length}/${total} steps seen · ${info.comments} comment${info.comments === 1 ? "" : "s"}`, contentWidth, "muted");
+
+  heading("Captured files");
+  for (const file of snapshot.files) pushWrappedText(lines, theme, file.path, contentWidth, "muted");
+
+  heading("Story");
+  if (story.plan.summary) pushWrappedText(lines, theme, story.plan.summary, contentWidth, "muted");
+  story.plan.steps.forEach((entry, index) => {
+    const current = index === story.step;
+    pushWrappedAnsiText(lines, theme.fg(current ? "accent" : "muted", sanitizeTerminalText(`${current ? "›" : " "} ${index + 1}. ${entry.title}${seen(entry.id) ? " · seen" : ""}`)), contentWidth);
+    if (entry.explanation) pushWrappedText(lines, theme, entry.explanation, contentWidth, "dim", "     ");
+  });
+
+  lines.push("");
+  pushWrappedText(lines, theme, [info.hasContext ? "4 PR context" : null, info.hasThreads ? "I PR threads" : null, "F full diff"].filter(Boolean).join(" · "), contentWidth, "dim");
+  return lines;
+}
+
+/** The sidebar width beside the story panes; 0 when the panes need the whole row. */
+export function getStorySidebarWidth(innerWidth: number): number {
+  if (innerWidth < STORY_SIDEBAR_MIN_INNER_WIDTH) return 0;
+  return Math.max(STORY_SIDEBAR_MIN_WIDTH, Math.min(STORY_SIDEBAR_MAX_WIDTH, Math.round(innerWidth * STORY_SIDEBAR_WIDTH_SHARE)));
+}
+
+function wrapStoryText(text: string, width: number, maxLines: number): string[] {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const wrapped = wrapAnsiText(sanitizeTerminalText(clean), width, true);
+  const shown = wrapped.slice(0, Math.max(0, maxLines));
+  if (shown.length > 0 && shown.length < wrapped.length) shown[shown.length - 1] = truncateEnd(`${shown.at(-1)}\u2026`, width);
+  return shown;
+}
+
+/** The steps around the current one: its title and note, an arrow to what follows, and folded ranges for steps that do not fit. */
+export function buildStorySidebarLines(theme: Theme, width: number, height: number, story: Pick<StorySessionData, "plan" | "step" | "viewedStepIds">): string[] {
+  const { steps, summary } = story.plan;
+  const textWidth = Math.max(1, width - 2);
+  const lines = summary ? [...wrapStoryText(summary, textWidth, Math.max(1, Math.floor(height / 5))).map((line) => ` ${theme.fg("muted", line)}`), ""] : [];
+  if (steps.length === 0) return lines.slice(0, height);
+
+  const current = Math.max(0, Math.min(steps.length - 1, story.step));
+  const digits = String(steps.length).length;
+  const indent = " ".repeat(digits + 3);
+  const titleWidth = Math.max(1, textWidth - indent.length);
+  const number = (index: number) => String(index + 1).padStart(digits);
+  const row = (index: number) => {
+    const mark = story.viewedStepIds.includes(steps[index]!.id) ? theme.fg("success", "\u2713") : " ";
+    return ` ${mark} ${theme.fg("dim", number(index))} ${theme.fg("muted", wrapStoryText(steps[index]!.title, titleWidth, 1)[0] ?? "")}`;
+  };
+  const folded = (first: number, last: number, noun: string) => first === last
+    ? row(first)
+    : `   ${theme.fg("dim", truncateEnd(`${first + 1}\u2013${last + 1} \u00b7 ${last - first + 1} ${noun}`, Math.max(1, textWidth - 2)))}`;
+
+  const earlier = current;
+  const later = steps.length - current - 1;
+  const room = Math.max(0, height - lines.length);
+  const block = wrapStoryText(steps[current]!.title, titleWidth, STORY_SIDEBAR_TITLE_LINES).map((line, index) => index === 0
+    ? ` ${theme.fg("accent", "\u25b8")} ${theme.fg("accent", number(current))} ${theme.fg("accent", line)}`
+    : ` ${indent}${theme.fg("accent", line)}`);
+  const flow = later > 0 ? 2 : 0;
+  const noteRoom = Math.max(1, room - block.length - flow - Math.min(earlier, 1) - Math.min(later, 1));
+  block.push(...wrapStoryText(steps[current]!.explanation, titleWidth, noteRoom).map((line) => ` ${indent}${theme.fg("text", line)}`));
+  if (later > 0) block.push("", ` ${" ".repeat(digits + 1)}${theme.fg("accent", "\u2193")}`);
+
+  const rest = Math.max(0, room - block.length);
+  const earlierShare = Math.min(earlier, Math.floor(rest / 3), Math.max(0, rest - Math.min(later, 1)));
+  const laterRoom = Math.min(later, rest - earlierShare);
+  const earlierRoom = Math.min(earlier, rest - laterRoom);
+  const indices = (first: number, last: number) => Array.from({ length: Math.max(0, last - first + 1) }, (_, offset) => first + offset);
+  const before = earlierRoom >= earlier ? indices(0, current - 1).map(row)
+    : earlierRoom === 0 ? [] : [folded(0, current - earlierRoom, "earlier"), ...indices(current - earlierRoom + 1, current - 1).map(row)];
+  const after = laterRoom >= later ? indices(current + 1, steps.length - 1).map(row)
+    : laterRoom === 0 ? [] : [...indices(current + 1, current + laterRoom - 1).map(row), folded(current + laterRoom, steps.length - 1, "more")];
+  return [...lines, ...before, ...block, ...after].slice(0, height);
+}
+
+/** "a", "a and b", "a, b and c". */
+function joinNames(names: readonly string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/** How the shown tests of one file reach the step's code, such as `2 tests mention total \u00b7 1 mentions pay, which reaches tax`. */
+export function describeExistingTests(file: ExistingTestFile): string {
+  const reasons = file.reasons.map((reason, index) => {
+    const count = index === 0 ? `${reason.tests} test${reason.tests === 1 ? "" : "s"}` : String(reason.tests);
+    return `${count} ${reason.tests === 1 ? "mentions" : "mention"} ${reason.name}${reason.reaches == null ? "" : `, which reaches ${reason.reaches}`}`;
+  });
+  const changed = file.ranges.filter((range) => range.changed && !range.helper).length;
+  return [...reasons, ...changed === 0 ? [] : [`${changed} changed in this review`]].join(" \u00b7 ");
+}
+
+/** A step with code from several units can reach one test file through each of them. */
+function mergeExistingTestFiles(lookups: readonly ExistingTestLookup[]): ExistingTestFile[] {
+  const files = new Map<string, ExistingTestFile>();
+  for (const file of lookups.flatMap((lookup) => lookup.files)) {
+    const merged = files.get(file.path);
+    if (merged == null) {
+      files.set(file.path, { ...file, ranges: [...file.ranges], reasons: file.reasons.map((reason) => ({ ...reason })) });
+      continue;
+    }
+    for (const range of file.ranges) {
+      if (!merged.ranges.some((other) => other.startLine === range.startLine && other.endLine === range.endLine)) merged.ranges.push(range);
+    }
+    for (const reason of file.reasons) {
+      const same = merged.reasons.find((other) => other.name === reason.name && other.reaches === reason.reaches);
+      if (same == null) merged.reasons.push({ ...reason });
+      else same.tests = Math.max(same.tests, reason.tests);
+    }
+  }
+  return [...files.values()];
+}
+
+function displayRanges(ranges: readonly ExistingTestRange[]): ExistingTestRange[] {
+  const merged: ExistingTestRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.startLine - b.startLine)) {
+    const last = merged.at(-1);
+    if (last != null && range.startLine <= last.endLine) merged[merged.length - 1] = { ...last, endLine: Math.max(last.endLine, range.endLine), changed: last.changed || range.changed };
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+/** The scroll position after a popup key, or null for any other key. End is clamped when the popup renders. */
+function scrollPopup(data: string, scroll: number, pageSize: number): number | null {
+  if (matchesKey(data, Key.down) || data === "j") return scroll + 1;
+  if (matchesKey(data, Key.up) || data === "k") return Math.max(0, scroll - 1);
+  if (matchesKey(data, Key.pageDown)) return scroll + pageSize;
+  if (matchesKey(data, Key.pageUp)) return Math.max(0, scroll - pageSize);
+  if (matchesKey(data, Key.home) || data === "g") return 0;
+  if (matchesKey(data, Key.end) || data === "G") return Number.MAX_SAFE_INTEGER;
+  return null;
 }
 
 function sliceAnsiByColumn(line: string, startCol: number, length: number): string {
@@ -1583,6 +1817,8 @@ export class ReviewApp {
   private commentSearchQuery = "";
   private shortcutMode = false;
   private helpMode = false;
+  private helpScroll = 0;
+  private helpPageSize = 1;
   private diffViewMode: DiffViewMode;
   private contextLineNavigation: boolean;
   private navigatorTreeMode: boolean;
@@ -1618,6 +1854,11 @@ export class ReviewApp {
   private repliesPageSize = 1;
   private selectedReplyIndex = 0;
   private threadData: ReviewRepliesPanelSource["threadData"];
+  private showPullRequestThreads: boolean;
+  private readonly threadPlacements = new Map<string, FileThreadPlacement>();
+  private threadPlacementVersion = 0;
+  private threadBlockCache = new WeakMap<readonly PlacedReviewThread[], Map<number, string[]>>();
+  private threadCounts?: { data: NonNullable<ReviewRepliesPanelSource["threadData"]>; counts: Map<string, number> };
   private threadRows?: ReviewReplyItem[];
   private openedThread?: ReplyThread;
   private threadScroll = 0;
@@ -1631,6 +1872,12 @@ export class ReviewApp {
   private storyInventory = false;
   private storyBrowsingDiff = false;
   private storyInventoryScroll = 0;
+  private storyInfoPageSize = 1;
+  private storyPaneMetrics: Partial<Record<StoryMember, { max: number; page: number }>> = {};
+  private storyUnits: StoryUnit[] = [];
+  private existingTests?: ExistingTestReport;
+  private readonly storyFreeScroll = new Set<StoryMember>();
+  private storySidebar: boolean;
   private storyContextReturnFocus?: ReviewState["focus"];
   private threadBodyCache?: { thread: ReplyThread; width: number; lines: string[] };
   private contextScroll = 0;
@@ -1661,7 +1908,6 @@ export class ReviewApp {
   private lastSelectedText: string | null = null;
   private codeRowModels = new WeakMap<object, Map<string, CodeRowModel | null>>();
   private lastWidth = 120;
-  private diffActionHintCache: { width: number; line: string } | null = null;
   private pendingVimSequence: "g" | null = null;
   private readonly previousHardwareCursor: boolean;
   private sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1693,7 +1939,9 @@ export class ReviewApp {
     this.navigatorTreeMode = options.initialSession?.navigatorTreeMode ?? preferences.navigatorTreeMode;
     this.navigatorFileOrder = preferences.navigatorFileOrder;
     this.commentsGlobal = options.initialSession?.commentsGlobal ?? preferences.commentsGlobal;
+    this.showPullRequestThreads = preferences.showPullRequestThreads;
     this.paneVisibility = { ...preferences.paneVisibility };
+    this.storySidebar = preferences.storySidebar;
     this.showAllLocales = options.initialSession?.showAllLocales ?? false;
     this.message = options.initialBanner ?? null;
     this.state = createInitialReviewState(options.files, options.scope);
@@ -1718,6 +1966,11 @@ export class ReviewApp {
     if (options.story != null) {
       const completePlan = completeDiffStory(options.story.plan, options.story.snapshot);
       this.story = restoreStoryNavigation(completePlan, options.initialSession?.story);
+      this.storyUnits = prepareStoryUnits(options.story.snapshot);
+      void options.story.existingTests?.then(
+        (report) => { this.existingTests = report; },
+        () => { this.existingTests = { units: new Map() }; },
+      ).then(() => this.requestRender(false));
       this.diffViewMode = "unified";
       for (const file of options.story.snapshot.files) {
         const baseDiff = buildStructuredDiff(file.contents.originalContent, file.contents.modifiedContent, DEFAULT_CONTEXT_LINES);
@@ -1754,6 +2007,7 @@ export class ReviewApp {
       if (options.initialComposition != null) void this.recoverComposition(options.initialComposition);
       else this.ensureActiveEntry();
       this.ensureContextPanel();
+      this.ensureRepliesPanel(true);
       this.requestRender();
     });
     if (this.tui.mode !== "fullscreen" && typeof this.tui.terminal?.write === "function") {
@@ -1783,8 +2037,8 @@ export class ReviewApp {
   invalidate(): void {
     this.syntaxLineCache.clear();
     this.diffLayoutCache.clear();
-    this.diffActionHintCache = null;
     this.codeRowModels = new WeakMap();
+    this.threadBlockCache = new WeakMap();
   }
 
   private syncCursorMode(): void {
@@ -1880,8 +2134,9 @@ export class ReviewApp {
     });
   }
 
-  private ensureRepliesPanel(): void {
-    if (this.options.repliesSource == null || !this.paneVisibility.replies) return;
+  /** In the background, the shared read also fetches the threads marked on diff lines while Replies is hidden. */
+  private ensureRepliesPanel(background = false): void {
+    if (this.options.repliesSource == null || (!background && !this.paneVisibility.replies)) return;
     if (this.repliesPanelState.status !== "idle") return;
     const current = this.options.repliesSource.current;
     if (current != null) this.applyReplies(current);
@@ -2159,6 +2414,120 @@ export class ReviewApp {
     });
   }
 
+  private getThreadPlacement(file: ReviewFile, scope: ReviewScope, entry: LoadedEntryReady): FileThreadPlacement | null {
+    const data = this.threadData;
+    if (data == null || data.threads.length === 0) return null;
+    const key = this.cacheKey(file.id, scope);
+    const cached = this.threadPlacements.get(key);
+    if (cached?.data === data && cached.contents === entry.contents) return cached;
+    const comparison = getScopeComparison(file, scope);
+    const paths = getThreadPaths(file, scope);
+    const sideLines: Partial<Record<ReviewThreadSide, string[]>> = {};
+    const linesFor = (side: ReviewThreadSide) => sideLines[side] ??= (side === "added"
+      ? entry.contents.modifiedAvailable === false ? "" : entry.contents.modifiedContent
+      : entry.contents.originalAvailable === false ? "" : entry.contents.originalContent).split(/\r\n|\n|\r/);
+    let unchangedPairs: Map<string, string> | undefined;
+    const pairedKey = (key: string) => {
+      unchangedPairs ??= new Map(entry.baseDiff.rows.flatMap((row) => row.kind !== "equal" || row.oldLineNumber == null || row.newLineNumber == null ? []
+        : [[`deleted:${row.oldLineNumber}`, `added:${row.newLineNumber}`], [`added:${row.newLineNumber}`, `deleted:${row.oldLineNumber}`]] as Array<[string, string]>));
+      return unchangedPairs.get(key);
+    };
+    const placement: FileThreadPlacement = { data, contents: entry.contents, version: ++this.threadPlacementVersion, total: 0, placed: 0,
+      marks: new Map(), anchors: new Map(), unifiedMarks: new Map(), unifiedAnchors: new Map() };
+    const place = (map: Map<string, PlacedReviewThread[]>, unified: Map<string, PlacedReviewThread[]>, key: string, placed: PlacedReviewThread) => {
+      pushThreadEntry(map, key, placed);
+      pushThreadEntry(unified, key, placed);
+      const paired = pairedKey(key);
+      if (paired != null) pushThreadEntry(unified, paired, placed);
+    };
+    for (const thread of data.threads) {
+      const side = thread.side ?? "added";
+      if (!isOpenReviewThread(thread) || paths[side] == null || thread.path !== paths[side]) continue;
+      placement.total += 1;
+      const revision = side === "added" ? comparison?.modifiedRevision : comparison?.originalRevision;
+      const threadRevision = side === "added" ? thread.headRevision : thread.baseRevision;
+      const placed = placeReviewThread(thread, { side, lines: linesFor(side),
+        sameRevision: revision != null && COMMIT_ID_PATTERN.test(revision) && threadRevision === revision });
+      if (placed == null) continue;
+      placement.placed += 1;
+      for (let line = placed.startLine; line <= placed.endLine; line += 1) place(placement.marks, placement.unifiedMarks, `${side}:${line}`, placed);
+      place(placement.anchors, placement.unifiedAnchors, `${side}:${placed.endLine}`, placed);
+    }
+    setBoundedMapEntry(this.threadPlacements, key, placement, MAX_LOADED_FILE_ENTRIES);
+    return placement;
+  }
+
+  private getOpenThreadCount(file: ReviewFile, scope: ReviewScope): number {
+    const data = this.threadData;
+    if (data == null) return 0;
+    if (this.threadCounts?.data !== data) {
+      const counts = new Map<string, number>();
+      for (const thread of data.threads) {
+        if (!isOpenReviewThread(thread) || thread.path == null) continue;
+        const key = `${thread.side ?? "added"}:${thread.path}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      this.threadCounts = { data, counts };
+    }
+    const paths = getThreadPaths(file, scope);
+    return (paths.added == null ? 0 : this.threadCounts.counts.get(`added:${paths.added}`) ?? 0)
+      + (paths.deleted == null ? 0 : this.threadCounts.counts.get(`deleted:${paths.deleted}`) ?? 0);
+  }
+
+  /** Read-only PR thread text under its anchored line; it never joins the review draft. */
+  private buildThreadBlockLines(threads: readonly PlacedReviewThread[], width: number): string[] {
+    let byWidth = this.threadBlockCache.get(threads);
+    if (byWidth == null) {
+      byWidth = new Map();
+      this.threadBlockCache.set(threads, byWidth);
+    }
+    const cached = byWidth.get(width);
+    if (cached != null) return cached;
+    const prefix = `${" ".repeat(Math.max(0, Math.min(THREAD_BLOCK_INDENT, width - 12)))}${this.theme.fg("mdLink", "\u2506")} `;
+    const textWidth = Math.max(1, width - visibleWidth(prefix));
+    const lines: string[] = [];
+    const push = (text: string, color: "text" | "dim") => {
+      for (const line of wrapTextWithAnsi(text, textWidth)) lines.push(`${prefix}${this.theme.fg(color, line)}`);
+    };
+    for (const placed of threads) {
+      const { thread } = placed;
+      const facts = [
+        thread.resolved == null ? "resolution unknown" : "unresolved",
+        ...(thread.outdated === true ? ["outdated"] : []),
+        ...(placed.startLine === placed.endLine ? [] : [`lines ${placed.startLine}-${placed.endLine}`]),
+        ...(placed.movedFrom == null ? [] : [`was line ${placed.movedFrom}`]),
+      ];
+      push(`${THREAD_MARKER} PR thread \u00b7 ${facts.join(" \u00b7 ")}`, "dim");
+      for (const comment of thread.comments) {
+        const date = comment.createdAt?.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+        push(sanitizeTerminalText(date == null ? comment.author : `${comment.author} \u00b7 ${date}`), "text");
+        const body = sanitizeTerminalMultilineText(comment.body.replace(/\r\n?/g, "\n").trim()).split("\n")
+          .flatMap((line) => wrapTextWithAnsi(line, Math.max(1, textWidth - 2)));
+        const shown = body.slice(0, THREAD_COMMENT_MAX_LINES);
+        if (body.length > shown.length) shown[shown.length - 1] = `${truncateToWidth(shown[shown.length - 1]!, Math.max(1, textWidth - 3), "", false)}\u2026`;
+        for (const line of shown) lines.push(`${prefix}  ${this.theme.fg("muted", line)}`);
+      }
+    }
+    byWidth.set(width, lines);
+    return lines;
+  }
+
+  private togglePullRequestThreads(): void {
+    if (this.options.repliesSource == null) {
+      this.setMessage("PR threads show only in pull request reviews.");
+      this.requestRender();
+      return;
+    }
+    this.showPullRequestThreads = !this.showPullRequestThreads;
+    saveReviewPreference({ showPullRequestThreads: this.showPullRequestThreads });
+    this.setMessage(!this.showPullRequestThreads
+      ? `PR threads hidden; ${THREAD_MARKER} still marks their lines.`
+      : this.threadData == null
+        ? "PR threads will show under their lines when the read finishes."
+        : "PR threads shown under their lines.");
+    this.requestRender();
+  }
+
   private effectivePaneVisibility(): ReviewPaneVisibility {
     return {
       ...this.paneVisibility,
@@ -2200,7 +2569,7 @@ export class ReviewApp {
     return highlighted;
   }
 
-  private buildUnifiedRowContent(row: DisplayRow, language: string | undefined, isCurrent: boolean, lineComment: DiffReviewComment | undefined): { contentText: string; code: string; tone: DiffTone } {
+  private buildUnifiedRowContent(row: DisplayRow, language: string | undefined, isCurrent: boolean, lineComment: DiffReviewComment | undefined, threaded = false): { contentText: string; code: string; tone: DiffTone } {
     if (row.kind === "gap") {
       return { contentText: this.theme.fg("muted", centerText(row.codeText, Math.max(row.codeText.length + 2, 10))), code: "", tone: "context" };
     }
@@ -2212,7 +2581,7 @@ export class ReviewApp {
       : row.sign === "-"
         ? this.theme.fg("error", row.sign)
         : this.theme.fg("toolDiffContext", row.sign);
-    const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
+    const commentIndicator = getLineIndicator(this.theme, lineComment, threaded);
     const code = this.getCachedHighlightedCode(tone, row.codeText, language);
     return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code, tone };
   }
@@ -2226,8 +2595,9 @@ export class ReviewApp {
     isSearchMatch: boolean,
     lineComment: DiffReviewComment | undefined,
     measureOnly = false,
+    threaded = false,
   ): string[] {
-    const { contentText, tone } = this.buildUnifiedRowContent(row, language, isCurrent, lineComment);
+    const { contentText, tone } = this.buildUnifiedRowContent(row, language, isCurrent, lineComment, threaded);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width - 2), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -2243,7 +2613,7 @@ export class ReviewApp {
   }
 
   private copyText(text: string, label: string): void {
-    void copyToClipboard(text).then(() => {
+    void writeClipboard(text).then(() => {
       this.setMessage(`Copied ${label}.`);
       this.requestRender();
     }).catch((error) => {
@@ -3147,10 +3517,14 @@ export class ReviewApp {
     this.editLineComment();
   }
 
+  private get codeCommand(): string {
+    return this.options.codeCommand ?? "/code";
+  }
+
   private openSelectedLineInCode(): void {
     const file = this.activeFile();
     if (this.state.activeScope !== "git-diff") {
-      this.setMessage("Open in /code is available only for the local working-tree review.");
+      this.setMessage(`Open in ${this.codeCommand} is available only for the local working-tree review.`);
       this.requestRender();
       return;
     }
@@ -3166,7 +3540,7 @@ export class ReviewApp {
       return;
     }
     if (target.side !== "added") {
-      this.setMessage("Deleted/old-side lines have no writable current-side /code target.");
+      this.setMessage(`Deleted/old-side lines have no writable current-side ${this.codeCommand} target.`);
       this.requestRender();
       return;
     }
@@ -3186,7 +3560,7 @@ export class ReviewApp {
       .filter((row) => (row.kind === "insert" || row.kind === "replace") && row.newLineNumber != null)
       .map((row) => row.newLineNumber!));
     if (Array.from({ length: range.endLine - range.startLine + 1 }, (_, index) => range.startLine + index).some((line) => !changedCurrentLines.has(line))) {
-      this.setMessage("Open in /code requires a current-side changed diff range.");
+      this.setMessage(`Open in ${this.codeCommand} requires a current-side changed diff range.`);
       this.requestRender();
       return;
     }
@@ -3204,7 +3578,7 @@ export class ReviewApp {
     };
     const path = joinReviewPath(file.pathPrefix, file.gitDiff?.newPath ?? file.path);
     if (!this.persistSession()) {
-      this.setMessage("Could not save the full review draft. The review remains open; retry before opening /code.");
+      this.setMessage(`Could not save the full review draft. The review remains open; retry before opening ${this.codeCommand}.`);
       this.requestRender();
       return;
     }
@@ -3720,8 +4094,21 @@ export class ReviewApp {
 
   private toggleHelpMode(): void {
     this.helpMode = !this.helpMode;
-    if (this.helpMode) this.paneVisibility = { ...this.paneVisibility, comments: true };
+    this.helpScroll = 0;
+    this.pendingVimSequence = null;
+    this.storyInventory = false;
     this.requestRender();
+  }
+
+  private handleShortcutsPopupInput(data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || isShortcutsKey(data)) {
+      this.toggleHelpMode();
+      return;
+    }
+    const scroll = scrollPopup(data, this.helpScroll, this.helpPageSize);
+    if (scroll == null) return;
+    this.helpScroll = scroll;
+    this.requestRender(false);
   }
 
   private toggleDiffViewMode(): void {
@@ -3778,10 +4165,7 @@ export class ReviewApp {
 
     const visible = !this.paneVisibility[pane];
     this.paneVisibility = { ...this.paneVisibility, [pane]: visible };
-    if (pane === "comments" && !visible) {
-      this.helpMode = false;
-      this.shortcutMode = false;
-    }
+    if (pane === "comments" && !visible) this.shortcutMode = false;
     if (pane === "context" && visible) this.ensureContextPanel();
     if (pane === "replies" && visible) this.ensureRepliesPanel();
     this.ensureVisibleFocus();
@@ -3935,16 +4319,6 @@ export class ReviewApp {
     const total = current.side === "deleted" ? entry.baseDiff.totalOldLines : entry.baseDiff.totalNewLines;
     if (total === 0) return;
     const endLine = extend ? current.endLine ?? current.line : undefined;
-    if (this.storyPageFor(file.id) != null) {
-      const lines = this.getVisibleLineTargets(file.id, scope).filter((target) => target.side === current.side).map((target) => target.line);
-      const next = delta > 0
-        ? lines.filter((line) => line > current.line).slice(0, delta).at(-1)
-        : lines.filter((line) => line < current.line).slice(delta).at(0);
-      if (next == null) return;
-      this.state = setSelectedLineTarget(this.state, file.id, scope, { side: current.side, line: next, ...(endLine == null ? {} : { endLine }) });
-      this.requestRender();
-      return;
-    }
     const line = Math.max(1, Math.min(total, current.line + delta));
     const key = this.cacheKey(file.id, scope);
     const expanded = new Set(this.expandedContextRows.get(key) ?? []);
@@ -4007,7 +4381,7 @@ export class ReviewApp {
         this.requestRender();
         return;
       }
-      void copyToClipboard(result.url).then(() => {
+      void writeClipboard(result.url).then(() => {
         this.setMessage(`Could not open a browser (${result.error}); copied ${result.url} to the clipboard.`);
         this.requestRender();
       }).catch(() => {
@@ -4168,6 +4542,10 @@ export class ReviewApp {
   }
 
   private jumpToBoundary(direction: "start" | "end"): void {
+    if (this.story != null && !this.storyBrowsingDiff && this.state.focus === "diff" && this.storyTestEvidenceScrolls()) {
+      this.scrollStoryTestEvidence(direction === "start" ? -Infinity : Infinity);
+      return;
+    }
     if (this.state.focus === "navigator") {
       const files = this.getNavigatorFiles();
       if (files.length === 0) return;
@@ -4185,6 +4563,7 @@ export class ReviewApp {
       if (visibleTargets.length === 0) return;
       const target = direction === "start" ? visibleTargets[0]! : visibleTargets[visibleTargets.length - 1]!;
       this.state = setSelectedLineTarget(this.state, file.id, this.state.activeScope, target);
+      if (this.story != null && !this.storyBrowsingDiff) this.diffScroll = direction === "start" ? 0 : this.diffMaxScroll;
       this.requestRender();
       return;
     }
@@ -4358,22 +4737,23 @@ export class ReviewApp {
     if (surface.mode === "unified") {
       const row = (surface.rows as readonly DisplayRow[])[rowIndex];
       if (row == null || row.kind === "gap") return null;
-      const lineComment = row.commentLineNumber == null || row.commentSide == null
-        ? undefined
-        : surface.lineComments.get(`${row.commentSide}:${row.commentLineNumber}`);
-      return this.cachedCodeRowModel(row, `${surface.paneWidth}:${wrap}:${lineComment?.intent ?? "-"}`, row.codeText, () => ({
-        content: this.buildUnifiedRowContent(row, surface.language, false, lineComment),
-        visual: this.buildUnifiedRowLines(row, surface.paneWidth, surface.language, false, false, false, lineComment, true),
+      const lineKey = row.commentLineNumber == null || row.commentSide == null ? undefined : `${row.commentSide}:${row.commentLineNumber}`;
+      const lineComment = lineKey == null ? undefined : surface.lineComments.get(lineKey);
+      const threaded = lineKey != null && surface.threadMarks?.has(lineKey) === true;
+      return this.cachedCodeRowModel(row, `${surface.paneWidth}:${wrap}:${getLineIndicatorKey(lineComment, threaded)}`, row.codeText, () => ({
+        content: this.buildUnifiedRowContent(row, surface.language, false, lineComment, threaded),
+        visual: this.buildUnifiedRowLines(row, surface.paneWidth, surface.language, false, false, false, lineComment, true, threaded),
       }));
     }
     const row = (surface.rows as readonly SideBySideDisplayRow[])[rowIndex];
     const cell = side === "deleted" ? row?.oldCell : row?.newCell;
     if (cell == null) return null;
     const width = side === "deleted" ? surface.oldWidth : surface.newWidth;
-    const intent = surface.lineComments.get(`${cell.side}:${cell.lineNumber}`)?.intent ?? "-";
+    const cellKey = `${cell.side}:${cell.lineNumber}`;
+    const intent = getLineIndicatorKey(surface.lineComments.get(cellKey), surface.threadMarks?.has(cellKey) === true);
     return this.cachedCodeRowModel(cell, `${width}:${wrap}:${intent}`, cell.text, () => ({
-      content: this.buildSideBySideCellContent(cell, surface.language, surface.lineComments),
-      visual: this.renderSideBySideCellLines(cell, width, surface.language, false, false, false, surface.lineComments, true),
+      content: this.buildSideBySideCellContent(cell, surface.language, surface.lineComments, surface.threadMarks),
+      visual: this.renderSideBySideCellLines(cell, width, surface.language, false, false, false, surface.lineComments, true, surface.threadMarks),
     }));
   }
 
@@ -4571,6 +4951,9 @@ export class ReviewApp {
       }
     }
 
+    if (this.helpMode) { this.handleShortcutsPopupInput(data); return; }
+    if (isShortcutsKey(data)) { this.toggleHelpMode(); return; }
+
     if (this.story != null && this.handleStoryInput(data)) return;
     if (this.state.focus === "context" && data === "D" && this.options.contextPanelSource?.description != null) {
       this.showingDescription = !this.showingDescription;
@@ -4592,9 +4975,6 @@ export class ReviewApp {
         }
       }
     }
-    if (matchesReviewAction("help", data)) { this.toggleHelpMode(); return; }
-    if (this.helpMode && matchesKey(data, Key.escape)) { this.helpMode = false; this.requestRender(); return; }
-
     if (matchesReviewAction("parent", data) && this.navigateBackFromSubmodule()) return;
     if ((this.state.focus === "navigator" || this.state.focus === "diff")
       && this.activeSubmodule() != null
@@ -4613,6 +4993,8 @@ export class ReviewApp {
     if (matchesKey(data, Key.right)) { this.moveFocusHorizontally(1); return; }
     if (data === "g") { this.pendingVimSequence = "g"; return; }
     if (data === "G") { this.jumpToBoundary("end"); return; }
+    if (matchesKey(data, Key.home)) { this.jumpToBoundary("start"); return; }
+    if (matchesKey(data, Key.end)) { this.jumpToBoundary("end"); return; }
     if (data === "/") { this.openSearch(); return; }
     if (matchesKey(data, Key.ctrl("f"))) { this.moveFocusedSelection(this.focusedPageSize()); return; }
     if (matchesKey(data, Key.ctrl("b"))) { this.moveFocusedSelection(-this.focusedPageSize()); return; }
@@ -4622,6 +5004,7 @@ export class ReviewApp {
       return;
     }
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.requestCancel(); return; }
+    if (matchesReviewAction("prThreads", data)) { this.togglePullRequestThreads(); return; }
 
     if ((this.state.focus === "context" || this.state.focus === "replies") && (data === "r" || data === "m")) {
       if (data === "r") this.refreshConversation({ refresh: true });
@@ -4981,7 +5364,9 @@ export class ReviewApp {
       const commentMarker = count > 0 ? this.theme.fg("success", ` ${count}●`) : this.theme.fg("dim", "  ·");
       const submoduleMarker = getSubmoduleInfo(file, this.state.activeScope) == null ? "" : this.theme.fg(active ? "accent" : "muted", " ↗");
       const reviewedMarker = this.reviewedFileIds.has(file.id) ? this.theme.fg("success", " done") : "";
-      const pathMarkers = `${submoduleMarker}${reviewedMarker}`;
+      const threadCount = this.getOpenThreadCount(file, this.state.activeScope);
+      const threadMarker = threadCount === 0 ? "" : this.theme.fg("mdLink", ` ${threadCount}${THREAD_MARKER}`);
+      const pathMarkers = `${threadMarker}${submoduleMarker}${reviewedMarker}`;
       const trailing = `${formatNavigatorChangeCounts(palette, file, this.state.activeScope, countWidths)}${commentMarker}${NAVIGATOR_PADDING}`;
       const fixedWidth = visibleWidth(prefixText) + visibleWidth(pathMarkers) + visibleWidth(trailing);
       const displayPath = getReviewFileDisplayPath(file, this.state.activeScope);
@@ -5002,8 +5387,9 @@ export class ReviewApp {
     return renderBox("Navigator", width, height, this.theme, lines, this.state.focus === "navigator");
   }
 
-  private buildSideBySideCellContent(cell: SideBySideCell, language: string | undefined, lineComments: Map<string, DiffReviewComment>): { contentText: string; code: string } {
+  private buildSideBySideCellContent(cell: SideBySideCell, language: string | undefined, lineComments: Map<string, DiffReviewComment>, threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>): { contentText: string; code: string } {
     const lineComment = lineComments.get(`${cell.side}:${cell.lineNumber}`);
+    const threaded = threadMarks?.has(`${cell.side}:${cell.lineNumber}`) === true;
     const lineLabel = String(cell.lineNumber).padStart(4, " ");
     const gutterLine = this.theme.fg("borderMuted", lineLabel);
     const gutterSign = cell.sign === "+"
@@ -5011,15 +5397,15 @@ export class ReviewApp {
       : cell.sign === "-"
         ? this.theme.fg("error", cell.sign)
         : this.theme.fg("toolDiffContext", cell.sign);
-    const commentIndicator = lineComment == null ? " " : getCommentIndicator(this.theme, lineComment.intent);
+    const commentIndicator = getLineIndicator(this.theme, lineComment, threaded);
     const code = this.getCachedHighlightedCode(cell.tone, cell.text, language);
     return { contentText: `${gutterLine} ${gutterSign} ${commentIndicator} ${code}`, code };
   }
 
-  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false): string[] {
+  private renderSideBySideCellLines(cell: SideBySideCell | null, width: number, language: string | undefined, selected: boolean, current: boolean, searchMatched: boolean, lineComments: Map<string, DiffReviewComment>, measureOnly = false, threadMarks?: ReadonlyMap<string, readonly PlacedReviewThread[]>): string[] {
     if (cell == null) return [" ".repeat(Math.max(1, width))];
 
-    const { contentText } = this.buildSideBySideCellContent(cell, language, lineComments);
+    const { contentText } = this.buildSideBySideCellContent(cell, language, lineComments, threadMarks);
     const wrapped = wrapAnsiText(contentText, Math.max(1, width), this.state.wrapLines);
     if (measureOnly) return wrapped;
     return wrapped.map((line) => {
@@ -5031,7 +5417,7 @@ export class ReviewApp {
     });
   }
 
-  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number): { lines: string[]; meta: Array<DiffSurfaceLine | null>; rows: readonly SideBySideDisplayRow[]; oldWidth: number; newWidth: number; newLeft: number; selectedIndex: number; selectedEndIndex: number; renderedStartOffset: number } {
+  private renderSideBySideDiff(diff: StructuredDiff, width: number, fileId: string, language: string | undefined, selectedTarget: ReviewLineTarget | null, lineComments: Map<string, DiffReviewComment>, viewportHeight: number, threadPlacement: FileThreadPlacement | null = null): { lines: string[]; meta: Array<DiffSurfaceLine | null>; rows: readonly SideBySideDisplayRow[]; oldWidth: number; newWidth: number; newLeft: number; selectedIndex: number; selectedEndIndex: number; selectedBlockHeight: number; renderedStartOffset: number } {
     const innerWidth = Math.max(1, width - 2);
     const separator = this.theme.fg("borderMuted", " │ ");
     const separatorWidth = visibleWidth(separator);
@@ -5040,14 +5426,26 @@ export class ReviewApp {
     const selectedRange = selectedTarget == null ? null : getLineTargetRange(selectedTarget);
     const layout = this.getDiffLayout(fileId, this.state.activeScope);
     const rows = layout?.sideBySideRows ?? buildSideBySideDisplayRows(diff);
-    const heightKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}`;
+    const threadMarks = threadPlacement?.marks;
+    const showThreads = this.showPullRequestThreads && threadPlacement != null && threadPlacement.placed > 0;
+    const threadBlock = (row: SideBySideDisplayRow | undefined): { left: string[]; right: string[]; height: number } | null => {
+      if (!showThreads || row == null || row.kind === "gap") return null;
+      const left = row.oldCell == null ? undefined : threadPlacement.anchors.get(`deleted:${row.oldCell.lineNumber}`);
+      const right = row.newCell == null ? undefined : threadPlacement.anchors.get(`added:${row.newCell.lineNumber}`);
+      if (left == null && right == null) return null;
+      const leftLines = left == null ? [] : this.buildThreadBlockLines(left, oldWidth);
+      const rightLines = right == null ? [] : this.buildThreadBlockLines(right, newWidth);
+      return { left: leftLines, right: rightLines, height: Math.max(leftLines.length, rightLines.length) };
+    };
+    const heightKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}:${showThreads ? threadPlacement.version : "-"}`;
     let rowHeights = layout?.sideBySideRowHeights.get(heightKey);
     if (rowHeights == null) {
-      rowHeights = !this.state.wrapLines ? new Array<number>(rows.length + 1).fill(1) : [1, ...rows.map((row) => {
-        if (row.kind === "gap") return 1;
+      rowHeights = [1, ...rows.map((row) => {
+        const block = threadBlock(row)?.height ?? 0;
+        if (row.kind === "gap" || !this.state.wrapLines) return 1 + block;
         const oldLines = this.renderSideBySideCellLines(row.oldCell, oldWidth, language, false, false, false, lineComments, true);
         const newLines = this.renderSideBySideCellLines(row.newCell, newWidth, language, false, false, false, lineComments, true);
-        return Math.max(oldLines.length, newLines.length);
+        return Math.max(oldLines.length, newLines.length) + block;
       })];
       layout?.sideBySideRowHeights.set(heightKey, rowHeights);
     }
@@ -5065,8 +5463,9 @@ export class ReviewApp {
       : layout?.sideBySideTargetRowIndexes.get(`${selectedTarget.side}:${selectedTarget.line}`) ?? -1;
     let selectedIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 1] ?? 0;
     let selectedEndIndex = selectedRowIndex < 0 ? 0 : initialRange.offsets[selectedRowIndex + 2] ?? selectedIndex + 1;
+    const selectedBlockHeight = selectedRowIndex < 0 ? 0 : threadBlock(rows[selectedRowIndex])?.height ?? 0;
     if (selectedRowIndex >= 0 && !this.diffWheelScrolling) {
-      this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex);
+      this.diffScroll = getStableDiffScroll(this.diffScroll, viewportHeight, selectedIndex, selectedEndIndex - selectedBlockHeight);
     }
     const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, viewportHeight, 20, rowOffsets);
     const lines: string[] = [];
@@ -5102,8 +5501,10 @@ export class ReviewApp {
       const newCurrent = row.newCell != null && selectedTarget?.side === row.newCell.side && selectedTarget.line === row.newCell.lineNumber;
       const oldSearchMatched = row.oldCell != null && diffTextMatchesSearch(row.oldCell.text, this.diffSearchQuery);
       const newSearchMatched = row.newCell != null && diffTextMatchesSearch(row.newCell.text, this.diffSearchQuery);
-      const oldIntent = row.oldCell == null ? "-" : lineComments.get(`${row.oldCell.side}:${row.oldCell.lineNumber}`)?.intent ?? "-";
-      const newIntent = row.newCell == null ? "-" : lineComments.get(`${row.newCell.side}:${row.newCell.lineNumber}`)?.intent ?? "-";
+      const oldKey = row.oldCell == null ? "" : `${row.oldCell.side}:${row.oldCell.lineNumber}`;
+      const newKey = row.newCell == null ? "" : `${row.newCell.side}:${row.newCell.lineNumber}`;
+      const oldIntent = row.oldCell == null ? "-" : getLineIndicatorKey(lineComments.get(oldKey), threadMarks?.has(oldKey) === true);
+      const newIntent = row.newCell == null ? "-" : getLineIndicatorKey(lineComments.get(newKey), threadMarks?.has(newKey) === true);
       const cacheKey = `${oldWidth}:${newWidth}:${this.state.wrapLines ? 1 : 0}:${oldSelected ? 1 : 0}:${newSelected ? 1 : 0}:${oldCurrent ? 1 : 0}:${newCurrent ? 1 : 0}:${oldSearchMatched ? 1 : 0}:${newSearchMatched ? 1 : 0}:${oldIntent}:${newIntent}`;
       let rowCache = layout?.sideBySideRowRenderCache.get(row);
       if (rowCache == null) {
@@ -5113,8 +5514,8 @@ export class ReviewApp {
       let cachedLines = rowCache.get(cacheKey);
       if (cachedLines == null) {
         cachedLines = {
-          oldLines: this.renderSideBySideCellLines(row.oldCell, oldWidth, language, oldSelected, oldCurrent, oldSearchMatched, lineComments),
-          newLines: this.renderSideBySideCellLines(row.newCell, newWidth, language, newSelected, newCurrent, newSearchMatched, lineComments),
+          oldLines: this.renderSideBySideCellLines(row.oldCell, oldWidth, language, oldSelected, oldCurrent, oldSearchMatched, lineComments, false, threadMarks),
+          newLines: this.renderSideBySideCellLines(row.newCell, newWidth, language, newSelected, newCurrent, newSearchMatched, lineComments, false, threadMarks),
         };
         rowCache.set(cacheKey, cachedLines);
       }
@@ -5123,13 +5524,18 @@ export class ReviewApp {
         lines.push(`${cachedLines.oldLines[index] ?? " ".repeat(oldWidth)}${separator}${cachedLines.newLines[index] ?? " ".repeat(newWidth)}`);
         meta.push({ rowIndex, visual: index });
       }
+      const block = threadBlock(row);
+      for (let index = 0; index < (block?.height ?? 0); index += 1) {
+        lines.push(`${padLine(block!.left[index] ?? "", oldWidth)}${separator}${padLine(block!.right[index] ?? "", newWidth)}`);
+        meta.push(null);
+      }
       if (oldCurrent || newCurrent) {
         selectedIndex = virtualRange.offsets[itemIndex] ?? selectedIndex;
         selectedEndIndex = virtualRange.offsets[itemIndex + 1] ?? selectedIndex + rowHeight;
       }
     }
 
-    return { lines, meta, rows, oldWidth, newWidth, newLeft: oldWidth + separatorWidth, selectedIndex, selectedEndIndex, renderedStartOffset: virtualRange.startOffset };
+    return { lines, meta, rows, oldWidth, newWidth, newLeft: oldWidth + separatorWidth, selectedIndex, selectedEndIndex, selectedBlockHeight, renderedStartOffset: virtualRange.startOffset };
   }
 
   private renderExactEditor(width: number, height?: number): string[] {
@@ -5207,10 +5613,6 @@ export class ReviewApp {
         : "";
     lines.push(this.theme.fg("muted", getScopeDisplayPath(file, this.state.activeScope)));
     lines.push(this.theme.fg("dim", `${formatScopeLabel(this.state.activeScope)} • view ${formatDiffViewModeLabel(this.diffViewMode)} • wrap ${this.state.wrapLines ? "on" : "off"}${this.state.activeScope === "all-files" ? "" : ` • unchanged ${this.state.hideUnchanged ? "hidden" : "shown"}`}${diffSearchLabel}`));
-    if (this.diffActionHintCache?.width !== width) {
-      this.diffActionHintCache = { width, line: buildDiffActionHintLine(this.theme, width) };
-    }
-    lines.push(storyTitle == null ? this.diffActionHintCache.line : "");
 
     const submodule = getSubmoduleInfo(file, this.state.activeScope);
     if (submodule != null) {
@@ -5252,10 +5654,20 @@ export class ReviewApp {
       selectedTarget.side === "deleted" ? row.oldLineNumber === selectedTarget.line : row.newLineNumber === selectedTarget.line
     ));
     const hunk = diff.hunks.find((candidate) => candidate.displayStartRow <= selectedRow && selectedRow <= candidate.displayEndRow);
+    const threadPlacement = this.getThreadPlacement(file, this.state.activeScope, entry);
+    if (threadPlacement != null && threadPlacement.total > 0) {
+      const others = threadPlacement.total - threadPlacement.placed;
+      const count = (value: number) => `${value} PR thread${value === 1 ? "" : "s"}`;
+      const summary = threadPlacement.placed === 0
+        ? `${count(others)} in Replies`
+        : `${THREAD_MARKER} ${count(threadPlacement.placed)}${others > 0 ? `, ${others} more in Replies` : ""} (I ${this.showPullRequestThreads ? "hide" : "show"})`;
+      lines[1] = `${this.theme.fg("mdLink", summary)} · ${lines[1]}`;
+    }
     if (hunk != null) {
       const counts = `${this.theme.fg("success", `+${hunk.additions}`)} ${this.theme.fg("error", `−${hunk.deletions}`)}`;
       lines[1] = `Hunk ${hunk.index + 1}/${diff.hunks.length} · ${counts} · ${lines[1]}`;
     }
+    const showThreads = this.showPullRequestThreads && threadPlacement != null && threadPlacement.placed > 0;
     const maxBody = Math.max(1, height - lines.length - 2);
     let rendered: string[];
     let renderedMeta: Array<DiffSurfaceLine | null>;
@@ -5266,8 +5678,9 @@ export class ReviewApp {
     let renderedStartOffset = 0;
     let selectedIndex = 0;
     let selectedEndIndex = 0;
+    let selectedBlockHeight = 0;
     if (this.diffViewMode === "side-by-side") {
-      const sideBySide = this.renderSideBySideDiff(diff, width, file.id, language, selectedTarget, lineComments, maxBody);
+      const sideBySide = this.renderSideBySideDiff(diff, width, file.id, language, selectedTarget, lineComments, maxBody, threadPlacement);
       rendered = sideBySide.lines;
       renderedMeta = sideBySide.meta;
       surfaceRows = sideBySide.rows;
@@ -5277,6 +5690,7 @@ export class ReviewApp {
       renderedStartOffset = sideBySide.renderedStartOffset;
       selectedIndex = sideBySide.selectedIndex;
       selectedEndIndex = sideBySide.selectedEndIndex;
+      selectedBlockHeight = sideBySide.selectedBlockHeight;
     } else {
       const displayRows = layout.unifiedRows;
       const rowRenderCache = layout.rowRenderCache;
@@ -5286,11 +5700,17 @@ export class ReviewApp {
       const selectedRange = selectedTarget == null ? null : getLineTargetRange(selectedTarget);
       const selectedSide = selectedTarget?.side ?? null;
       const wrapFlag = this.state.wrapLines ? 1 : 0;
-      const heightKey = `${width}:${wrapFlag}`;
+      const threadMarks = threadPlacement?.unifiedMarks;
+      const threadBlock = (row: DisplayRow | undefined): string[] => {
+        if (!showThreads || row?.commentLineNumber == null || row.commentSide == null) return [];
+        const threads = threadPlacement.unifiedAnchors.get(`${row.commentSide}:${row.commentLineNumber}`);
+        return threads == null ? [] : this.buildThreadBlockLines(threads, Math.max(1, width - 2));
+      };
+      const heightKey = `${width}:${wrapFlag}:${showThreads ? threadPlacement.version : "-"}`;
       let rowHeights = layout.unifiedRowHeights.get(heightKey);
       if (rowHeights == null) {
-        rowHeights = !this.state.wrapLines ? new Array<number>(displayRows.length).fill(1)
-          : displayRows.map((row) => this.buildUnifiedRowLines(row, width, language, false, false, false, undefined, true).length);
+        rowHeights = displayRows.map((row) => (this.state.wrapLines
+          ? this.buildUnifiedRowLines(row, width, language, false, false, false, undefined, true).length : 1) + threadBlock(row).length);
         layout.unifiedRowHeights.set(heightKey, rowHeights);
       }
       let rowOffsets = layout.unifiedRowOffsets.get(heightKey);
@@ -5307,8 +5727,9 @@ export class ReviewApp {
       if (selectedRowIndex >= 0) {
         selectedIndex = initialRange.offsets[selectedRowIndex] ?? 0;
         selectedEndIndex = initialRange.offsets[selectedRowIndex + 1] ?? selectedIndex + 1;
+        selectedBlockHeight = threadBlock(displayRows[selectedRowIndex]).length;
         if (this.alignStoryAnchor) this.diffScroll = Math.max(0, selectedIndex - 2);
-        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+        if (!this.diffWheelScrolling) this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex - selectedBlockHeight);
       }
       const virtualRange = getVirtualRowRange(rowHeights, this.diffScroll, maxBody, 20, rowOffsets);
       renderedStartOffset = virtualRange.startOffset;
@@ -5326,13 +5747,13 @@ export class ReviewApp {
           && selectedSide === row.commentSide
           && selectedRange.startLine <= row.commentLineNumber
           && row.commentLineNumber <= selectedRange.endLine;
-        const lineComment = row.commentLineNumber != null && row.commentSide != null
-          ? lineComments.get(`${row.commentSide}:${row.commentLineNumber}`)
-          : undefined;
+        const lineKey = row.commentLineNumber != null && row.commentSide != null ? `${row.commentSide}:${row.commentLineNumber}` : undefined;
+        const lineComment = lineKey == null ? undefined : lineComments.get(lineKey);
+        const threaded = lineKey != null && threadMarks?.has(lineKey) === true;
         const isSearchMatch = diffTextMatchesSearch(row.codeText, this.diffSearchQuery);
 
         const renderMode = this.renderingStoryAnchor == null ? "diff" : "story";
-        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${lineComment?.intent ?? "-"}\u001f${renderMode}`;
+        const memoKey = `${width}\u001f${wrapFlag}\u001f${isSelected ? 1 : 0}\u001f${isCurrentTarget ? 1 : 0}\u001f${isSearchMatch ? 1 : 0}\u001f${getLineIndicatorKey(lineComment, threaded)}\u001f${renderMode}`;
         let memo = rowRenderCache.get(row);
         if (memo == null) {
           memo = new Map();
@@ -5340,14 +5761,17 @@ export class ReviewApp {
         }
         let renderedLines = memo.get(memoKey);
         if (renderedLines == null) {
-          renderedLines = this.buildUnifiedRowLines(row, width, language, isSelected, isCurrentTarget, isSearchMatch, lineComment);
+          renderedLines = this.buildUnifiedRowLines(row, width, language, isSelected, isCurrentTarget, isSearchMatch, lineComment, false, threaded);
           memo.set(memoKey, renderedLines);
         }
 
         if (isCurrentTarget) selectedIndex = virtualRange.offsets[rowIndex] ?? selectedIndex;
         rendered.push(...renderedLines);
         for (let visual = 0; visual < renderedLines.length; visual += 1) renderedMeta.push(row.kind === "gap" ? null : { rowIndex, visual });
-        if (isCurrentTarget) selectedEndIndex = virtualRange.offsets[rowIndex + 1] ?? selectedIndex + renderedLines.length;
+        const block = threadBlock(row);
+        rendered.push(...block.map((line) => padLine(line, Math.max(1, width - 2))));
+        renderedMeta.push(...block.map(() => null));
+        if (isCurrentTarget) selectedEndIndex = virtualRange.offsets[rowIndex + 1] ?? selectedIndex + renderedLines.length + block.length;
       }
     }
 
@@ -5374,7 +5798,7 @@ export class ReviewApp {
       if (editorEnd >= this.diffScroll + maxBody) this.diffScroll = editorEnd - maxBody + 1;
       if (anchorTop < this.diffScroll && editorEnd - anchorTop < maxBody) this.diffScroll = anchorTop;
     } else if (!this.diffWheelScrolling) {
-      this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex);
+      this.diffScroll = getStableDiffScroll(this.diffScroll, maxBody, selectedIndex, selectedEndIndex - selectedBlockHeight);
     }
     this.diffScroll = Math.max(0, this.diffScroll);
     const visibleStart = Math.max(0, this.diffScroll - renderedStartOffset);
@@ -5395,6 +5819,7 @@ export class ReviewApp {
         newLeft,
         language,
         lineComments,
+        threadMarks: this.diffViewMode === "side-by-side" ? threadPlacement?.marks : threadPlacement?.unifiedMarks,
         lines: renderedMeta.slice(visibleStart, visibleStart + maxBody),
         scrollable: this.renderingStoryAnchor == null,
       }, visibleLines);
@@ -5420,6 +5845,7 @@ export class ReviewApp {
   private activateStoryMember(member: StoryMember): void {
     const story = this.story!;
     story.member = member;
+    this.storyFreeScroll.delete(member);
     const anchor = storyAnchor(story);
     const file = this.options.story?.snapshot.files.find((file) => file.fileId === anchor?.fileId);
     this.state = {
@@ -5446,7 +5872,7 @@ export class ReviewApp {
         return true;
       }
       if (["D", "r", "m", "j", "k", "g", "G"].includes(data)) return false;
-      return ![Key.up, Key.down, Key.pageUp, Key.pageDown, Key.enter, Key.ctrl("u"), Key.ctrl("d"),
+      return ![Key.up, Key.down, Key.pageUp, Key.pageDown, Key.home, Key.end, Key.enter, Key.ctrl("u"), Key.ctrl("d"),
         Key.ctrl("b"), Key.ctrl("f"), Key.ctrl("c")].some((key) => matchesKey(data, key));
     }
     if (!this.storyBrowsingDiff && data === "4" && this.options.contextPanelSource != null) {
@@ -5456,6 +5882,7 @@ export class ReviewApp {
       this.ensureContextPanel();
     } else if (data === "F") {
       this.captureStorySession();
+      this.storyInventory = false;
       this.storyBrowsingDiff = !this.storyBrowsingDiff;
       if (this.storyBrowsingDiff) {
         this.ensureActiveNavigatorFile();
@@ -5466,30 +5893,37 @@ export class ReviewApp {
       }
       this.setMessage(this.storyBrowsingDiff ? "Full diff · F returns to the story; comments stay in this review." : "Returned to the story.");
     } else if (data === "o" || data === "e" && this.state.focus !== "comments" || this.activeSubmodule() != null && matchesKey(data, Key.enter)) {
-      this.setMessage("Captured story bytes are read-only. Open a separate /code session to edit files.");
+      this.setMessage(`Captured story bytes are read-only. Open a separate ${this.codeCommand} session to edit files.`);
     } else if (this.storyBrowsingDiff) return false;
     else if (this.storyInventory) {
-      if (matchesKey(data, Key.escape) || data === "i") this.storyInventory = false;
-      else if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) this.storyInventoryScroll += matchesKey(data, Key.pageDown) ? 10 : 1;
-      else if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) this.storyInventoryScroll = Math.max(0, this.storyInventoryScroll - (matchesKey(data, Key.pageUp) ? 10 : 1));
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data === "i") this.storyInventory = false;
+      else this.storyInventoryScroll = scrollPopup(data, this.storyInventoryScroll, this.storyInfoPageSize) ?? this.storyInventoryScroll;
+    } else if (this.state.focus === "diff" && this.storyTestEvidenceScrolls() && this.scrollStoryTestEvidenceByKey(data)) {
+      return true;
+    } else if (this.state.focus === "diff" && this.scrollOtherStoryPane(data)) {
+      return true;
     } else if (matchesKey(data, Key.shift("right")) || matchesKey(data, Key.shift("left"))) {
       const next = Math.max(0, Math.min(story.plan.steps.length - 1, story.step + (matchesKey(data, Key.shift("right")) ? 1 : -1)));
       if (next === story.step) return true;
       this.captureStorySession();
       story.step = next;
       story.related = { implementation: 0, tests: 0 };
-      this.activateStoryMember(storyAnchor(story, story.member) == null ? "implementation" : story.member);
+      this.storyFreeScroll.clear();
+      this.activateStoryMember(defaultStoryMember(story));
     } else if (matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
       this.captureStorySession();
-      this.activateStoryMember(matchesKey(data, Key.left) ? "implementation" : "tests");
+      this.activateStoryMember(matchesKey(data, Key.left) ? "tests" : "implementation");
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || data === "h") {
       this.captureStorySession();
-      if (this.state.focus === "comments") this.activateStoryMember("implementation");
-      else if (story.member === "implementation" && data !== "h") this.activateStoryMember("tests");
-      else {
+      const cycle = ["tests", "implementation", "comments"] as const;
+      const current = this.state.focus === "comments" ? "comments" : story.member;
+      const next = data === "h"
+        ? current === "comments" ? "implementation" : "comments"
+        : cycle[(cycle.indexOf(current) + (matchesKey(data, Key.tab) ? 1 : cycle.length - 1)) % cycle.length]!;
+      if (next === "comments") {
         this.commentsGlobal = true;
         this.state = setFocus(this.state, "comments");
-      }
+      } else this.activateStoryMember(next);
     } else if (data === "R") {
       const id = story.plan.steps[story.step]?.id;
       if (id != null) story.viewedStepIds = story.viewedStepIds.includes(id) ? story.viewedStepIds.filter((entry) => entry !== id) : [...story.viewedStepIds, id];
@@ -5501,9 +5935,35 @@ export class ReviewApp {
     } else if (data === "i") {
       this.storyInventory = true;
       this.storyInventoryScroll = 0;
-    } else if (data === "v" || /^[1-5]$/.test(data) || ["T", "O", "L"].includes(data)) {
+    } else if (data === "1") {
+      this.storySidebar = !this.storySidebar;
+      saveReviewPreference({ storySidebar: this.storySidebar });
+      this.setMessage(this.storySidebar ? "Step sidebar shown. New stories ask the agent for step notes." : "Step sidebar hidden. New stories skip the agent's step notes; 1 shows it again.");
+    } else if (data === "v" || /^[2-5]$/.test(data) || ["T", "O", "L", "t"].includes(data)) {
       this.setMessage("Story uses paired read-only diffs. F opens the full diff; Shift+←/→ moves steps.");
     } else return false;
+    this.requestRender();
+    return true;
+  }
+
+  /** Option moves the pane that is not focused. Chords it does not scroll are swallowed, not applied to the focused pane. */
+  private scrollOtherStoryPane(data: string): boolean {
+    const story = this.story!;
+    const other = story.member === "implementation" ? "tests" : "implementation";
+    const metrics = this.storyPaneMetrics[other];
+    const page = Math.max(1, (metrics?.page ?? 1) - 1);
+    const scrolls = [
+      [Key.alt("up"), -1], [Key.alt("down"), 1], [Key.alt("pageUp"), -page], [Key.alt("pageDown"), page],
+      [Key.altShift("up"), -Infinity], [Key.altShift("down"), Infinity], [Key.alt("home"), -Infinity], [Key.alt("end"), Infinity],
+    ] as const;
+    const scroll = scrolls.find(([chord]) => matchesKey(data, chord));
+    if (scroll == null) return OTHER_PANE_CHORDS.some((key) => matchesKey(data, Key.alt(key)) || matchesKey(data, Key.altShift(key)));
+    if (metrics == null) return true;
+    const key = storyViewportKey(story, other);
+    const view = story.viewports[key] ?? { scroll: 0 };
+    const max = Math.max(metrics.max, view.scroll);
+    story.viewports[key] = { ...view, scroll: Math.max(0, Math.min(max, view.scroll + scroll[1])) };
+    this.storyFreeScroll.add(other);
     this.requestRender();
     return true;
   }
@@ -5514,14 +5974,150 @@ export class ReviewApp {
     return target.kind === "all" || target.fileId !== storyAnchor(this.story)?.fileId;
   }
 
+  /** The test pane scrolls its own lines when it shows existing tests instead of a changed test page. */
+  private storyTestEvidenceScrolls(): boolean {
+    const story = this.story!;
+    return story.member === "tests" && storyAnchor(story, "tests") == null && this.storyPaneMetrics.tests != null;
+  }
+
+  private scrollStoryTestEvidenceByKey(data: string): boolean {
+    const metrics = this.storyPaneMetrics.tests!;
+    const page = Math.max(1, metrics.page - 1);
+    const half = getHalfPageStep(metrics.page);
+    const moves: Array<[boolean, number]> = [
+      [matchesKey(data, Key.up) || data === "k", -1],
+      [matchesKey(data, Key.down) || data === "j", 1],
+      [matchesKey(data, Key.pageUp) || matchesKey(data, Key.ctrl("b")), -page],
+      [matchesKey(data, Key.pageDown) || matchesKey(data, Key.ctrl("f")), page],
+      [matchesKey(data, Key.ctrl("u")), -half],
+      [matchesKey(data, Key.ctrl("d")), half],
+      [matchesKey(data, Key.home), -Infinity],
+      [matchesKey(data, Key.end) || data === "G", Infinity],
+    ];
+    const move = moves.find(([matched]) => matched);
+    if (move == null) return false;
+    this.scrollStoryTestEvidence(move[1]);
+    return true;
+  }
+
+  private scrollStoryTestEvidence(delta: number): void {
+    const story = this.story!;
+    const metrics = this.storyPaneMetrics.tests;
+    if (metrics == null) return;
+    const key = storyViewportKey(story, "tests");
+    const view = story.viewports[key] ?? { scroll: 0 };
+    story.viewports[key] = { ...view, scroll: Math.max(0, Math.min(metrics.max, view.scroll + delta)) };
+    this.requestRender();
+  }
+
+  /** The test pane of a step without related changed tests: the existing tests of its code, or why there are none. */
+  private renderStoryTestEvidence(width: number, height: number): string[] {
+    const story = this.story!;
+    const step = story.plan.steps[story.step];
+    const textWidth = Math.max(1, width - 2);
+    const text = (value: string, color: "muted" | "dim" | "warning") => wrapAnsiText(sanitizeTerminalText(value), textWidth, true).map((line) => this.theme.fg(color, line));
+    const note = (title: string, lines: string[]) => {
+      delete this.storyPaneMetrics.tests;
+      return renderBox(title, width, height, this.theme, lines, story.member === "tests");
+    };
+    const unpaired = "No related changed tests.";
+    const context = step == null ? { kind: "not-code" as const } : classifyStoryStep(step, this.storyUnits);
+    if (context.kind === "tests") return note("Related changed tests", text("This step changes tests.", "muted"));
+    if (context.kind === "removed") return note("Related changed tests", [...text(unpaired, "muted"), ...text("This step removes code, so it needs no test.", "dim")]);
+    if (context.kind === "not-code") return note("Related changed tests", [...text(unpaired, "muted"), ...text("This step changes no code that runs.", "dim")]);
+    if (context.kind === "unknown") return note("Related changed tests", [...text(unpaired, "muted"), ...text("pi-coder could not match this step's lines to its code.", "dim")]);
+    if (this.options.story?.existingTests == null) {
+      return note("Related changed tests", [...text(unpaired, "muted"), ...text("Existing tests were not searched for this review.", "dim")]);
+    }
+    const report = this.existingTests;
+    if (report == null) return note("Existing tests", text("Searching existing tests\u2026", "muted"));
+    const lookups = context.unitIds.map((id) => report.units.get(id));
+    const found = lookups.filter((lookup): lookup is ExistingTestLookup => lookup?.status === "found");
+    if (found.length > 0) return this.renderExistingTests(width, height, found, lookups);
+    const failed = lookups.findIndex((lookup) => lookup?.status !== "none");
+    if (failed >= 0) {
+      return note("Existing tests", [
+        ...text("Could not search existing tests.", "warning"),
+        ...text(lookups[failed]?.reason ?? "pi-coder did not search this code.", "muted"),
+        "",
+        ...text("This is a gap in pi-coder, not a finding about the code.", "dim"),
+      ]);
+    }
+    const searched = lookups as ExistingTestLookup[];
+    const names = [...new Set(searched.flatMap((lookup) => lookup.names))];
+    const callers = [...new Set(searched.flatMap((lookup) => lookup.callers))];
+    const roots = [...new Set(searched.map((lookup) => lookup.root || "this repository"))];
+    const calling = callers.length === 0 ? "" : ` or the changed code that calls it (${joinNames(callers)})`;
+    const limits = this.existingTestLimits(searched);
+    return note("Tests", [
+      ...text("No tests found for this code.", "warning"),
+      "",
+      ...text(`No changed test pairs with this step, and no test in ${joinNames(roots)} names ${joinNames(names)}${calling}.`, "muted"),
+      "",
+      ...(limits.length > 0 ? limits.flatMap((limit) => text(limit, "dim"))
+        : text("That marks untested code, unless a test reaches it through files this change does not touch.", "dim")),
+    ]);
+  }
+
+  /** Why a search may have missed tests: names it could not search, and test files it did not read. */
+  private existingTestLimits(lookups: readonly ExistingTestLookup[]): string[] {
+    const skipped = [...new Set(lookups.flatMap((lookup) => lookup.skipped))];
+    const unread = Math.max(0, ...lookups.map((lookup) => lookup.unread));
+    return [
+      ...skipped.length === 0 ? [] : [`pi-coder could not search for ${joinNames(skipped)}.`],
+      ...unread === 0 ? [] : [unread === 1 ? "1 more test file names this code but was not read." : `${unread} more test files name this code but were not read.`],
+    ];
+  }
+
+  private renderExistingTests(width: number, height: number, found: readonly ExistingTestLookup[], lookups: ReadonlyArray<ExistingTestLookup | undefined>): string[] {
+    const story = this.story!;
+    const textWidth = Math.max(1, width - 2);
+    const dim = (value: string) => wrapAnsiText(sanitizeTerminalText(value), textWidth, true).map((line) => this.theme.fg("dim", line));
+    const row = (line: number | null, codeText: string, language: string | undefined) => this.buildUnifiedRowLines(line == null
+      ? { kind: "gap", displayLineNumber: null, commentLineNumber: null, commentSide: null, sign: " ", codeText }
+      : { kind: "context", displayLineNumber: line, commentLineNumber: null, commentSide: null, sign: " ", codeText }, width, language, false, false, false, undefined);
+    const lines: string[] = [];
+    let shown = 0;
+    for (const [index, file] of mergeExistingTestFiles(found).entries()) {
+      if (index > 0) lines.push("");
+      lines.push(this.theme.fg("muted", truncateMiddle(sanitizeTerminalText(file.path), textWidth)), ...dim(describeExistingTests(file)));
+      const language = detectPiLanguage(file.path);
+      let previous: number | undefined;
+      for (const range of displayRanges(file.ranges)) {
+        const skipped = previous == null ? 0 : range.startLine - previous - 1;
+        if (skipped > 0) lines.push(...row(null, `${skipped} line${skipped === 1 ? "" : "s"} not shown`, language));
+        if (range.changed) lines.push(this.theme.fg("dim", "changed in this review"));
+        for (let line = range.startLine; line <= range.endLine; line += 1) lines.push(...row(line, file.lines[line - 1] ?? "", language));
+        previous = range.endLine;
+      }
+      shown += file.ranges.filter((range) => !range.helper).length;
+    }
+    const total = Math.max(shown, found.reduce((sum, lookup) => sum + lookup.tests, 0));
+    if (total > shown) lines.push("", ...dim(`Showing ${shown} of ${total} matching tests.`));
+    for (const limit of this.existingTestLimits(found)) lines.push("", ...dim(limit));
+    for (const lookup of lookups) {
+      if (lookup?.status === "none") lines.push("", ...dim(`No test names ${joinNames(lookup.names)}.`));
+      else if (lookup == null || lookup.status === "failed") lines.push("", ...dim(`Could not search for more tests: ${lookup?.reason ?? "pi-coder did not search this code."}`));
+    }
+    const page = Math.max(1, height - 2);
+    const key = storyViewportKey(story, "tests");
+    const view = story.viewports[key];
+    const max = Math.max(0, lines.length - page);
+    const scroll = Math.max(0, Math.min(max, Number.isFinite(view?.scroll) ? view!.scroll : 0));
+    story.viewports[key] = { ...view, scroll, initialized: true };
+    this.storyPaneMetrics.tests = { max, page };
+    return renderBox("Existing tests", width, height, this.theme, lines.slice(scroll, scroll + page), story.member === "tests");
+  }
+
   private renderStoryMember(member: StoryMember, width: number, height: number, origin: DiffPaneOrigin): string[] {
     const story = this.story!;
     const page = storyPage(story, member);
     const anchor = page?.anchor;
     const title = member === "implementation" ? "Implementation" : "Related changed tests";
+    if (anchor == null && member === "tests") return this.renderStoryTestEvidence(width, height);
     if (anchor == null) {
-      const message = member === "tests" ? "No related changed tests" : "No implementation anchor";
-      return renderBox(title, width, height, this.theme, [this.theme.fg("muted", message)], story.member === member);
+      delete this.storyPaneMetrics[member];
+      return renderBox(title, width, height, this.theme, [this.theme.fg("muted", "No implementation anchor")], story.member === member);
     }
     const previous = {
       state: this.state,
@@ -5529,6 +6125,7 @@ export class ReviewApp {
       scroll: this.diffScroll,
       max: this.diffMaxScroll,
       page: this.diffPageSize,
+      wheel: this.diffWheelScrolling,
     };
     const active = story.member === member && this.state.focus === "diff" && !this.needsStoryEditorOverlay();
     const view = story.viewports[storyViewportKey(story, member)];
@@ -5539,9 +6136,12 @@ export class ReviewApp {
       this.state = { ...this.state, activeFileId: anchor.fileId, focus: active ? "diff" : "navigator" };
       this.state = setSelectedLineTarget(this.state, anchor.fileId, this.state.activeScope, view?.selection ?? { side: anchor.side, line: anchor.startLine });
       this.diffScroll = Number.isFinite(view?.scroll) ? Math.max(0, view!.scroll) : 0;
+      this.diffMaxScroll = 0;
+      this.diffWheelScrolling = active ? previous.wheel : this.storyFreeScroll.has(member);
       if (!active) this.editTarget = null;
       const count = storyPages(story, member).length;
       const lines = this.renderDiff(width, height, `${title}${count > 1 ? ` ${story.related[member] + 1}/${count}` : ""}`, origin);
+      this.storyPaneMetrics[member] = { max: this.diffMaxScroll, page: this.diffPageSize };
       story.viewports[storyViewportKey(story, member)] = {
         scroll: this.diffScroll,
         initialized: true,
@@ -5563,6 +6163,7 @@ export class ReviewApp {
       this.diffScroll = previous.scroll;
       this.diffMaxScroll = previous.max;
       this.diffPageSize = previous.page;
+      this.diffWheelScrolling = previous.wheel;
     }
   }
 
@@ -5575,67 +6176,52 @@ export class ReviewApp {
     const frameBox = { top: 0, bottom: height - 1, left: 0, right: width - 1 };
     const frame = { box: frameBox, inner: innerRect(frameBox) };
     if (width < 40 || height < 27) {
+      this.storyPaneMetrics = {};
       let compact = renderBox("diff-story", width, height, this.theme, ["Resize to 40 columns × 27 rows.", "Code and tests stay paired.", "F full diff · Esc park/discard"], true);
       if (this.storyContextReturnFocus != null) compact = this.renderContextPanel(width, height);
       if (this.editTarget != null) compact = renderBox("Comment · original target", width, height, this.theme, this.buildInlineEditorBlock(width, height - 2), true);
+      if (this.helpMode) compact = renderCenteredOverlay(compact, this.renderShortcutsPopup(width, height), width, height);
       if (this.confirmCancel) compact = renderCenteredOverlay(compact, this.renderCancelConfirmation(), width, height);
       return this.mouseSelection.finishFrame(compact, frame, [], true);
     }
     const story = this.captureStorySession();
     const snapshot = this.options.story!.snapshot;
     const step = story.plan.steps[story.step];
+    const counter = `${story.step + 1}/${story.plan.steps.length}${step != null && story.viewedStepIds.includes(step.id) ? " · seen" : ""}`;
+    const title = truncateToWidth(`◆ ${sanitizeTerminalText(step?.title ?? "Overview")}`, Math.max(1, inner - visibleWidth(counter) - 1), "…", false);
     const header = [
-      ...(this.options.reviewHeader == null ? [] : buildReviewOrientationLines(this.theme, inner, { ...this.options.reviewHeader, openThreads: undefined }, {
-        files: snapshot.files.length,
-        reviewed: this.reviewedFileIds.size,
-        comments: getDraftCommentCount(this.state),
-      }, this.options.contextPanelSource?.brief)),
-      `${snapshot.files.length} files · +${snapshot.additions} −${snapshot.deletions} · ${story.viewedStepIds.length}/${story.plan.steps.length} steps seen`,
-      ...(this.options.reviewHeader == null ? [""] : []),
-      centerText(`${story.step > 0 ? "‹ Previous" : "Start"}  ·  ${story.step + 1}/${story.plan.steps.length}  ·  ${story.step + 1 < story.plan.steps.length ? `Next: ${sanitizeTerminalText(story.plan.steps[story.step + 1]!.title)} ›` : "End"}`, inner),
-      "",
-      this.theme.fg("accent", `◆ ${sanitizeTerminalText(step?.title ?? "Overview")}${step != null && story.viewedStepIds.includes(step.id) ? " · seen" : ""}`),
+      `${this.theme.fg("accent", title)}${" ".repeat(Math.max(1, inner - visibleWidth(title) - visibleWidth(counter)))}${this.theme.fg("dim", counter)}`,
       "",
     ];
-    const footer = [
-      "",
-      ...(this.message ? [this.theme.fg("warning", this.message)] : []),
-      this.theme.fg("dim", "Shift+←/→ step · ←/→ pane · [/] related"),
-      this.theme.fg("dim", "c comment · d discuss · R seen · s finish"),
-      this.theme.fg("dim", `h comments · i story/files${this.options.contextPanelSource == null ? "" : " · 4 PR context"} · F full diff`),
-    ];
+    const footer = buildFooterLines(this.theme, this.message, inner, "story");
     const bodyHeight = height - header.length - footer.length - 2;
-    const stacked = inner < 100;
-    const leftWidth = stacked ? inner : Math.floor((inner - 1) / 2);
+    const sidebarWidth = this.storySidebar ? getStorySidebarWidth(inner) : 0;
+    const paneWidth = sidebarWidth > 0 ? inner - sidebarWidth - 1 : inner;
+    const paneCol = sidebarWidth > 0 ? 1 + sidebarWidth + 1 : 1;
+    const stacked = paneWidth < 100;
+    const leftWidth = stacked ? paneWidth : Math.floor((paneWidth - 1) / 2);
     const leftHeight = stacked ? Math.floor((bodyHeight - 1) / 2) : bodyHeight;
-    const rightWidth = stacked ? inner : inner - leftWidth - 1;
+    const rightWidth = stacked ? paneWidth : paneWidth - leftWidth - 1;
     const rightHeight = stacked ? bodyHeight - leftHeight - 1 : bodyHeight;
     const bodyTop = 1 + header.length;
-    const leftOrigin = { row: bodyTop, col: 1, member: "implementation" as const };
+    const leftOrigin = { row: bodyTop, col: paneCol, member: "tests" as const };
     const rightOrigin = stacked
-      ? { row: bodyTop + leftHeight + 1, col: 1, member: "tests" as const }
-      : { row: bodyTop, col: 1 + leftWidth + 1, member: "tests" as const };
-    const left = this.renderStoryMember("implementation", leftWidth, leftHeight, leftOrigin);
-    const right = this.renderStoryMember("tests", rightWidth, rightHeight, rightOrigin);
+      ? { row: bodyTop + leftHeight + 1, col: paneCol, member: "implementation" as const }
+      : { row: bodyTop, col: paneCol + leftWidth + 1, member: "implementation" as const };
+    const left = this.renderStoryMember("tests", leftWidth, leftHeight, leftOrigin);
+    const right = this.renderStoryMember("implementation", rightWidth, rightHeight, rightOrigin);
     const panes = [
       { top: leftOrigin.row, bottom: leftOrigin.row + leftHeight - 1, left: leftOrigin.col, right: leftOrigin.col + leftWidth - 1 },
       { top: rightOrigin.row, bottom: rightOrigin.row + rightHeight - 1, left: rightOrigin.col, right: rightOrigin.col + rightWidth - 1 },
     ].map((box) => ({ box, inner: innerRect(box) }));
-    const body = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
+    const paired = stacked ? [...left, "", ...right] : left.map((line, index) => `${line} ${right[index] ?? ""}`);
+    const sidebar = sidebarWidth > 0
+      ? renderBox("Steps", sidebarWidth, bodyHeight, this.theme, buildStorySidebarLines(this.theme, sidebarWidth - 2, bodyHeight - 2, story))
+      : undefined;
+    const body = sidebar == null ? paired : paired.map((line, index) => `${sidebar[index] ?? ""} ${line}`);
     let rendered = renderBox("diff-story", width, height, this.theme, [...header, ...body, ...footer], true);
-    if (this.storyInventory) {
-      const inventory = [
-        "Captured files:",
-        ...snapshot.files.map((file) => file.path),
-        "",
-        "Story steps:",
-        story.plan.summary,
-        ...story.plan.steps.flatMap((entry) => [entry.title, entry.explanation]),
-      ].flatMap((line) => wrapTextWithAnsi(sanitizeTerminalText(line), inner - 2));
-      this.storyInventoryScroll = Math.min(this.storyInventoryScroll, Math.max(0, inventory.length - height + 4));
-      rendered = renderBox("Story inventory · ↑↓ scroll · Esc back", width, height, this.theme, inventory.slice(this.storyInventoryScroll), true);
-    } else if (this.storyContextReturnFocus != null) rendered = renderCenteredOverlay(rendered, this.renderContextPanel(width - 4, height - 4), width, height);
-    else if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderHelpPanel(width - 4, height - 4), width, height);
+    if (this.storyInventory) rendered = renderCenteredOverlay(rendered, this.renderStoryInfo(width, height), width, height);
+    else if (this.storyContextReturnFocus != null) rendered = renderCenteredOverlay(rendered, this.renderContextPanel(width - 4, height - 4), width, height);
     else if (this.state.focus === "comments") rendered = renderCenteredOverlay(rendered, this.renderComments(width - 4, height - 4), width, height);
     if (this.needsStoryEditorOverlay()) {
       const target = this.editTarget!;
@@ -5646,14 +6232,46 @@ export class ReviewApp {
       const editor = renderBox(sanitizeTerminalText(title), editorWidth, editorHeight, this.theme, this.buildInlineEditorBlock(editorWidth - 2, editorHeight - 2), true);
       rendered = renderCenteredOverlay(rendered, editor, width, height);
     }
+    if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderShortcutsPopup(width, height), width, height);
     if (this.confirmCancel) rendered = renderCenteredOverlay(rendered, this.renderCancelConfirmation(), width, height);
     const covered = this.storyInventory || this.storyContextReturnFocus != null || this.helpMode || this.state.focus === "comments"
       || this.needsStoryEditorOverlay() || this.confirmCancel;
     return this.mouseSelection.finishFrame(rendered, frame, panes, covered);
   }
 
-  private renderHelpPanel(width: number, height: number): string[] {
-    return renderBox("Help", width, height, this.theme, buildHelpPanelLines(this.theme, width, this.getAvailableShortcuts(), getShortcutConfigPath()), true);
+  private renderPopup(title: string, width: number, height: number, build: (popupWidth: number) => string[], scroll: number): { rows: string[]; scroll: number; pageSize: number } {
+    const popupWidth = Math.max(1, Math.min(width - 4, 88));
+    const lines = build(popupWidth);
+    const popupHeight = Math.max(3, Math.min(height - 4, lines.length + 2));
+    const pageSize = Math.max(1, popupHeight - 2);
+    const top = Math.max(0, Math.min(scroll, lines.length - pageSize));
+    return { rows: renderBox(title, popupWidth, popupHeight, this.theme, lines.slice(top, top + pageSize), true), scroll: top, pageSize };
+  }
+
+  private renderShortcutsPopup(width: number, height: number): string[] {
+    const story = this.story != null && !this.storyBrowsingDiff;
+    const popup = this.renderPopup("Shortcuts · ↑↓ scroll · Esc close", width, height, (popupWidth) => buildHelpPanelLines(
+      this.theme, popupWidth, story ? [] : this.getAvailableShortcuts(), getShortcutConfigPath(), this.options.codeCommand, story ? "story" : "review",
+    ), this.helpScroll);
+    this.helpScroll = popup.scroll;
+    this.helpPageSize = popup.pageSize;
+    return popup.rows;
+  }
+
+  private renderStoryInfo(width: number, height: number): string[] {
+    const popup = this.renderPopup("Story info · ↑↓ scroll · Esc close", width, height, (popupWidth) => buildStoryInfoLines(this.theme, popupWidth, {
+      story: this.story!,
+      snapshot: this.options.story!.snapshot,
+      header: this.options.reviewHeader,
+      brief: this.options.contextPanelSource?.brief,
+      reviewed: this.reviewedFileIds.size,
+      comments: getDraftCommentCount(this.state),
+      hasContext: this.options.contextPanelSource != null,
+      hasThreads: this.options.repliesSource != null,
+    }), this.storyInventoryScroll);
+    this.storyInventoryScroll = popup.scroll;
+    this.storyInfoPageSize = popup.pageSize;
+    return popup.rows;
   }
 
   private renderCancelConfirmation(): string[] {
@@ -5880,10 +6498,6 @@ export class ReviewApp {
       return renderBox("Template shortcuts", width, height, this.theme, lines, true);
     }
 
-    if (this.helpMode) {
-      return this.renderHelpPanel(width, height);
-    }
-
     if (this.editTarget != null && this.activeFile() == null) {
       lines.push(this.theme.fg("muted", this.editTarget.kind === "all"
         ? "All note"
@@ -5993,25 +6607,22 @@ export class ReviewApp {
     const visiblePanes = REVIEW_PANE_ORDER.filter((pane) => visibility[pane]);
     const stackPanes = visiblePanes.length > 1 && shouldStackPanesForVisibility(contentWidth, visibility);
 
-    const layoutStatus = stackPanes ? "stacked layout • " : "";
     const allPanesHiddenStatus = visiblePanes.length === 0 ? "All panes hidden • 1 Navigator • 2 Diff • 3 Comments • 4 PR context • 5 Replies" : null;
-    const promptStatus = sanitizeStatusText(this.shortcutMode
+    const status = sanitizeStatusText(this.shortcutMode
       ? "Template shortcuts • choose from the comments panel • Esc cancel"
-      : this.helpMode
-        ? "Help open • ? toggle • Esc close"
-        : allPanesHiddenStatus ?? this.message ?? (this.searchMode
-          ? `Search ${formatFocusStatus(this.searchPane).replace("Focus: ", "")}: ${this.searchBuffer}`
-          : this.editingResponse != null
-            ? "Editing response • Enter/Esc keep in this window • Shift+Enter newline"
+      : allPanesHiddenStatus ?? this.message ?? (this.searchMode
+        ? `Search ${formatFocusStatus(this.searchPane).replace("Focus: ", "")}: ${this.searchBuffer}`
+        : this.editingResponse != null
+          ? "Editing response • Enter/Esc keep in this window • Shift+Enter newline"
           : this.editTarget != null
             ? `Editing ${formatIntentLabel(this.editTarget.intent).toLowerCase()} comment`
-            : `${formatFocusStatus(this.state.focus)} • ${layoutStatus}Tab/←/→ focus • / search • t templates • v diff view • ? help • 1/2/3/4/5 panes • o open in /code • e open in $EDITOR • s submit${this.frameStack.length > 0 ? " • b parent" : ""} • Esc exit • Ctrl+C exit`));
+            : ""));
     const verticalLayout = getReviewVerticalLayout(
       this.theme,
       contentHeight,
       visiblePanes.length,
       stackPanes,
-      buildFooterLines(this.theme, promptStatus, contentWidth),
+      buildFooterLines(this.theme, status, contentWidth),
       contentWidth,
     );
     const footer = verticalLayout.footerLines;
@@ -6071,17 +6682,19 @@ export class ReviewApp {
       const line = contentRow >= 0 && contentRow < contentHeight ? content[contentRow] ?? "" : "";
       return padLine(" ".repeat(contentLeft) + padLine(line, contentWidth), this.lastWidth);
     });
-    const rendered = this.confirmCancel ? renderCenteredOverlay(lines, this.renderCancelConfirmation(), this.lastWidth, totalHeight) : lines;
+    let rendered = lines;
+    if (this.helpMode) rendered = renderCenteredOverlay(rendered, this.renderShortcutsPopup(this.lastWidth, totalHeight), this.lastWidth, totalHeight);
+    if (this.confirmCancel) rendered = renderCenteredOverlay(rendered, this.renderCancelConfirmation(), this.lastWidth, totalHeight);
     const panes = Object.values(mouseBounds)
       .filter((box): box is MousePaneBounds => box != null)
       .map((box) => ({ box, inner: innerRect(box) }));
     const frameBox = { top: 0, bottom: totalHeight - 1, left: 0, right: this.lastWidth - 1 };
-    return this.mouseSelection.finishFrame(rendered, { box: frameBox, inner: frameBox }, panes, this.confirmCancel);
+    return this.mouseSelection.finishFrame(rendered, { box: frameBox, inner: frameBox }, panes, this.confirmCancel || this.helpMode);
   }
 }
 
 export async function runReviewApp(
-  ctx: ExtensionContext,
+  ctx: Pick<HostContext, "ui">,
   options: Omit<ReviewAppOptions, "notify">,
 ): Promise<ReviewResult> {
   return ctx.ui.custom<ReviewResult>(

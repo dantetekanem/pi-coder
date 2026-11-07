@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_STORY_AGENT, streamReviewAgent, validateReviewAgent } from "../review-agent.js";
+import { streamReviewAgent, validateReviewAgent } from "../pi/models.js";
+import { DEFAULT_STORY_AGENT } from "../review-agent.js";
 
 const mocks = vi.hoisted(() => ({
   streamSimple: vi.fn(),
@@ -8,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   })),
 }));
 vi.mock("@earendil-works/pi-ai", () => mocks);
-const model = { id: "gpt-5.6-luna", provider: "openai-codex", thinkingLevelMap: { max: "max" } };
+const model = { id: "claude-opus-5-5", provider: "anthropic", thinkingLevelMap: { low: "low" } };
 const request = () => ({ system: "Arrange code.", prompt: "Prepared units", signal: new AbortController().signal, onText: vi.fn() });
 function context() {
   return { modelRegistry: {
@@ -40,7 +41,7 @@ describe("story provider transport", () => {
 
     expect(await streamReviewAgent(ctx as never, DEFAULT_STORY_AGENT, input)).toBe("order");
     expect(send).toHaveBeenCalledWith(model, expect.objectContaining({ systemPrompt: input.system }), {
-      reasoning: "max", signal: expect.any(AbortSignal),
+      reasoning: "low", signal: expect.any(AbortSignal),
     });
     expect(ctx.modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalled();
   });
@@ -57,7 +58,7 @@ describe("story provider transport", () => {
     expect(send.mock.calls[0]![1]).toMatchObject(api === "provider"
       ? { messages: [expect.objectContaining({ role: "system", content: input.system }), expect.objectContaining({ role: "user", content: input.prompt })] }
       : { systemPrompt: input.system, tools: [], messages: [expect.objectContaining({ content: input.prompt })] });
-    expect(send.mock.calls[0]![2]).toEqual({ apiKey: "secret", headers: { "x-test": "1" }, signal: expect.any(AbortSignal), reasoning: "max" });
+    expect(send.mock.calls[0]![2]).toEqual({ apiKey: "secret", headers: { "x-test": "1" }, signal: expect.any(AbortSignal), reasoning: "low" });
     expect(input.onText.mock.calls).toEqual([["order"]]);
   });
 
