@@ -124,7 +124,7 @@
     "highlight.js": "11.12.0",
     "jiti": "2.7.0",
     "shiki": "3.23.0",
-    "typebox": "^1.1.38"
+    "typebox": "^1.4.4"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.79.10",
