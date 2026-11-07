@@ -318,7 +318,11 @@ class CodeWorkbench implements Workbench {
 
   private async openFile(path: string, line: number): Promise<Extract<OpenFileResult, { status: "opened" }>> {
     const openVersion = ++this.openVersion;
-    if (this.repository.canReadFile != null && !await this.repository.canReadFile(path)) throw new Error("Selected file is not readable within host limits.");
+    if (this.repository.canReadFile != null && !await this.repository.canReadFile(path)) {
+      // canReadFile only answers yes/no, so name the limit here to keep the
+      // refusal actionable instead of a bare "not readable".
+      throw new Error(`Selected file is not readable within host limits (${this.repository.maxReadBytes} bytes maximum).`);
+    }
     const snapshot = await this.repository.readText(path, this.repository.maxReadBytes);
     if (openVersion !== this.openVersion) return { status: "opened", path, line: Math.max(1, Math.floor(line)) };
     this.currentText = snapshot.text;

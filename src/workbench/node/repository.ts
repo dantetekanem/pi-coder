@@ -90,7 +90,7 @@ async function openSnapshot(root: string, path: string, maxBytes: number): Promi
   try {
     const details = await handle.stat();
     if (!details.isFile()) throw new Error("Selected path is not a regular file.");
-    if (details.size > maxBytes) throw new Error("Selected file exceeds the workbench read limit.");
+    if (details.size > maxBytes) throw new Error(`Selected file is ${details.size} bytes, which exceeds the ${maxBytes}-byte workbench read limit.`);
     const bytes = await readBounded(handle, maxBytes);
     return {
       snapshot: { text: decodeUtf8(bytes), revision: revisionFor(bytes) },
