@@ -197,23 +197,51 @@ describe("ReviewApp interaction", () => {
     } finally { app.dispose(); }
   });
 
-  it("reuses the action hint at the same width and rebuilds it after resize or invalidation", async () => {
-    const { app, loadFileContents, theme } = createHarness();
-    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
-    const foreground = vi.spyOn(theme, "fg");
-    const hintCalls = () => foreground.mock.calls.filter(([, text]) => text === "Enter/m").length;
+  it("jumps the diff cursor to its first and last changed line with Home and End, like gg and G", async () => {
+    const before = Array.from({ length: 30 }, (_, i) => `line${i + 1}()`);
+    const after = before.map((line, i) => i === 4 || i === 24 ? `changed${i + 1}()` : line);
+    const { app, loadFileContents } = createHarness({ originalContent: before.join("\n"), modifiedContent: after.join("\n") });
     try {
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      (app as any).state.focus = "diff";
       app.render(120);
-      expect(hintCalls()).toBe(1);
-      app.render(120);
-      expect(hintCalls()).toBe(1);
-      app.render(160);
-      expect(hintCalls()).toBe(2);
-      app.invalidate();
-      app.render(160);
-      expect(hintCalls()).toBe(3);
+      const selected = () => getSelectedLineTarget((app as any).state, makeFile().id, "git-diff");
+      app.handleInput("\x1b[F");
+      const last = selected();
+      expect(last).toMatchObject({ side: "added", line: 25 });
+      app.handleInput("\x1b[H");
+      const first = selected();
+      expect(first?.line).toBe(5);
+      app.handleInput("G");
+      expect(selected()).toEqual(last);
+      app.handleInput("g");
+      app.handleInput("g");
+      expect(selected()).toEqual(first);
+    } finally { app.dispose(); }
+  });
+
+  it("jumps the Navigator to its first and last file with Home and End", async () => {
+    const { app, loadFileContents } = createHarness(undefined, [makeFile("src/a.ts"), makeFile("src/b.ts"), makeFile("src/c.ts")]);
+    try {
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      const ids = (app as any).getNavigatorFiles().map((file: ReviewFile) => file.id);
+      expect(ids).toHaveLength(3);
+      app.handleInput("\x1b[F");
+      expect((app as any).state.activeFileId).toBe(ids.at(-1));
+      app.handleInput("\x1b[H");
+      expect((app as any).state.activeFileId).toBe(ids[0]);
+    } finally { app.dispose(); }
+  });
+
+  it("ends the frame with one shortcuts line and shows no action hint inside the pane", async () => {
+    const { app, loadFileContents } = createHarness();
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    try {
+      const rows = app.render(120);
+      expect(rows.filter((row) => row.includes("Shortcuts:"))).toHaveLength(1);
+      expect(rows.at(-2)).toContain("Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)");
+      expect(rows.join("\n")).not.toContain("k/j context");
     } finally {
-      foreground.mockRestore();
       app.dispose();
     }
   });
@@ -378,6 +406,18 @@ describe("ReviewApp interaction", () => {
     app.handleInput("o");
     expect(done).not.toHaveBeenCalled();
     expect(String((app as any).message)).toMatch(/current-side changed/i);
+    app.dispose();
+  });
+
+  it.each([
+    [undefined, "/code"],
+    ["pi-coder code", "pi-coder code"],
+  ])("names the code command %j in bridge refusals", async (codeCommand, name) => {
+    const { app, loadFileContents } = createHarness({ originalContent: "gone\n", modifiedContent: "" }, undefined, { codeCommand });
+    await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+    app.handleInput("\r");
+    app.handleInput("o");
+    expect(String((app as any).message)).toBe(`Deleted/old-side lines have no writable current-side ${name} target.`);
     app.dispose();
   });
 
@@ -1254,7 +1294,7 @@ describe("ReviewApp interaction", () => {
       const { app, loadFileContents } = createHarness(undefined, undefined, scenario.overrides, scenario.terminal);
       await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
       const rendered = app.render(scenario.width).join("\n");
-      expect(rendered.replace(/\s+/g, " ")).toContain("Esc / Ctrl+C exit");
+      expect(rendered.replace(/\s+/g, " ")).toContain("Shortcuts: c (Comment) - d (Discuss with Agent) - Ctrl+? (All Shortcuts)");
       app.dispose();
     }
   });
@@ -2761,7 +2801,6 @@ describe("PR context pane", () => {
     expect((app as any).state.focus).toBe("context");
     const rendered = app.render(200).join("\n");
     expect(rendered).toContain("▶ PR context");
-    expect(rendered).toContain("Focus: PR context");
 
     app.handleInput("\u001b[Z");
     expect((app as any).state.focus).toBe("comments");
@@ -2952,5 +2991,155 @@ describe("PR context pane", () => {
     expect((app as any).searchMode).toBe(false);
     expect((app as any).message).toBe("Search is not available in the PR context pane.");
     app.dispose();
+  });
+});
+
+describe("Shortcuts popup", () => {
+  const POPUP_TITLE = "Shortcuts · ↑↓ scroll · Esc close";
+  const OPEN_KEYS = ["?", "\x1b[47;5u", "\x1b[47;6u", "\x1b[63;5u", "\x1b[63;6u", "\x1b[27;5;63~", "\x1b[27;6;63~", "\x1b[27;5;47~", "\x1b[27;6;47~", "\x1f"];
+
+  async function openReview(rows = 30, columns = 120) {
+    const harness = createHarness(undefined, undefined, {}, { rows, columns });
+    await vi.waitFor(() => expect(harness.loadFileContents).toHaveBeenCalled());
+    return harness;
+  }
+
+  it.each(OPEN_KEYS)("opens over the panes with %j and closes with the same key", async (key) => {
+    const { app } = await openReview();
+    try {
+      app.handleInput(key);
+      const open = app.render(120);
+      expect(open).toHaveLength(30);
+      expect(open.join("\n")).toContain(POPUP_TITLE);
+      expect(open.join("\n")).toContain("Ctrl+? / ? / Ctrl+/ toggle • Esc close");
+      expect(open.join("\n")).toContain("Navigator");
+
+      app.handleInput(key);
+      expect(app.render(120).join("\n")).not.toContain(POPUP_TITLE);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each(["\x7f", "\x08"])("does not open on %j, which is Backspace or Ctrl+H", async (key) => {
+    const { app } = await openReview();
+    try {
+      app.handleInput(key);
+      expect((app as any).helpMode).toBe(false);
+      expect(app.render(120).join("\n")).not.toContain(POPUP_TITLE);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("closes with Esc or Ctrl+C before anything else, then Esc leaves the review", async () => {
+    const { app, done } = await openReview();
+    try {
+      for (const close of ["\x1b", "\x03"]) {
+        app.handleInput("?");
+        app.handleInput(close);
+        expect(done).not.toHaveBeenCalled();
+        expect((app as any).confirmCancel).toBe(false);
+        expect(app.render(120).join("\n")).not.toContain(POPUP_TITLE);
+      }
+      app.handleInput("\x1b");
+      expect(done).toHaveBeenCalledWith({ type: "cancel", disposition: "discard" });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("scrolls by row, page and to either end, and swallows every other key", async () => {
+    const { app, done } = await openReview(20);
+    try {
+      app.handleInput("?");
+      const first = app.render(120).join("\n");
+      const page = (app as any).helpPageSize;
+      expect(first).toContain("Ctrl+? / ? / Ctrl+/ toggle • Esc close");
+
+      app.handleInput("\x1b[B");
+      expect((app as any).helpScroll).toBe(1);
+      app.handleInput("j");
+      expect((app as any).helpScroll).toBe(2);
+      app.handleInput("k");
+      app.handleInput("\x1b[A");
+      expect((app as any).helpScroll).toBe(0);
+      app.handleInput("\x1b[6~");
+      const paged = app.render(120).join("\n");
+      expect((app as any).helpScroll).toBe(page);
+      expect(paged).not.toEqual(first);
+      expect(paged).not.toContain("Ctrl+? / ? / Ctrl+/ toggle • Esc close");
+      app.handleInput("\x1b[5~");
+      expect((app as any).helpScroll).toBe(0);
+
+      app.handleInput("\x1b[F");
+      expect(app.render(120).join("\n")).toContain("Config");
+      app.handleInput("\x1b[H");
+      expect(app.render(120).join("\n")).toContain("Ctrl+? / ? / Ctrl+/ toggle • Esc close");
+      app.handleInput("G");
+      expect(app.render(120).join("\n")).toContain("Config");
+      app.handleInput("g");
+      expect((app as any).helpScroll).toBe(0);
+
+      const focus = (app as any).state.focus;
+      const panes = { ...(app as any).paneVisibility };
+      for (const key of ["c", "1", "\t", "s", "/", "\r", "\x1b[C"]) app.handleInput(key);
+      expect((app as any).state.focus).toBe(focus);
+      expect((app as any).paneVisibility).toEqual(panes);
+      expect((app as any).editTarget).toBeNull();
+      expect((app as any).searchMode).toBe(false);
+      expect(done).not.toHaveBeenCalled();
+      expect((app as any).helpMode).toBe(true);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("lists the review keys with the Option reach, template shortcuts and config path", async () => {
+    const { app } = await openReview(120);
+    try {
+      app.handleInput("?");
+      const rows = app.render(120).join("\n");
+      for (const line of ["Core", "Navigation", "Diff actions", "Template shortcuts", "Config",
+        "Option+↑↓/PgUp/PgDn/Home/End reach unchanged lines; add Shift to select a range", "gg/G • Home/End top/bottom"]) {
+        expect(rows).toContain(line);
+      }
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps ? and the legacy Ctrl+/ byte for search and the comment editor", async () => {
+    const { app } = await openReview();
+    try {
+      app.handleInput("/");
+      app.handleInput("?");
+      expect((app as any).helpMode).toBe(false);
+      expect((app as any).searchBuffer).toBe("?");
+      app.handleInput("\x1b");
+
+      app.handleInput("\r");
+      app.handleInput("c");
+      app.handleInput("?");
+      app.handleInput("\x1f");
+      expect((app as any).helpMode).toBe(false);
+      expect((app as any).editTarget).not.toBeNull();
+      expect((app as any).editor.getExpandedText()).not.toContain("\x1f");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each([[40, 24], [60, 20], [120, 12]])("fits a %i×%i terminal", async (columns, rows) => {
+    const { app } = await openReview(rows, columns);
+    try {
+      app.handleInput("?");
+      const frame = app.render(columns);
+      expect(frame).toHaveLength(rows);
+      expect(frame.every((row) => visibleWidth(row) === Math.max(40, columns))).toBe(true);
+      expect(frame.join("\n")).toContain("Shortcuts");
+    } finally {
+      app.dispose();
+    }
   });
 });

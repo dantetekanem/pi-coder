@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { StorySessionData } from "./diff-story/navigation.js";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./host/runtime.js";
 import type { PersistedDiffViewMode } from "./preferences.js";
 import { ReviewSessionLockedError, withReviewSessionLock, writeReviewSessionFileAtomic as writeFileAtomic, type ReviewSessionLockInfo } from "./review-session-persistence.js";
 import { applyResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";

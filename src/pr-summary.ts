@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CommandRunner, HostContext, ModelGateway } from "./host/types.js";
 import type { ReviewContextPanelSource, ReviewConversationMetadata, ReviewThreadCoverage } from "./types.js";
 import { hasHandoffContext } from "./pr-handoff.js";
 import {
@@ -381,7 +381,7 @@ function parseProviderJson(provider: ProviderSettings, value: string, label: str
 }
 
 async function fetchProviderOperation(
-  pi: ExtensionAPI,
+  pi: CommandRunner,
   target: RemoteReviewTarget,
   provider: ProviderSettings,
   operation: string,
@@ -529,29 +529,13 @@ function cleanAgentOutput(value: string): string {
   return formatReadableSummary(value);
 }
 
-function modelArgs(ctx: ExtensionContext): string[] {
-  const model = (ctx as { model?: { provider?: string; id?: string } }).model;
-  if (model?.provider == null || model.id == null) return [];
-  return ["--model", `${model.provider}/${model.id}`];
-}
-
-async function summarizeWithAgent(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget, summaryInput: string): Promise<string | undefined> {
-  const prompt = buildAgentPrompt(summaryInput);
-  const result = await pi.exec("pi", [
-    "--no-tools",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-context-files",
-    "--no-session",
-    ...modelArgs(ctx),
-    "--thinking",
-    "minimal",
-    "-p",
-    prompt,
-  ], { cwd: target.gitRoot, timeout: 90000 });
-  if (result.code !== 0 || result.stdout.trim().length === 0) return undefined;
-  return cleanAgentOutput(result.stdout);
+async function summarizeWithAgent(models: Pick<ModelGateway, "complete">, target: RemoteReviewTarget, summaryInput: string): Promise<string | undefined> {
+  try {
+    const output = await models.complete("analysis", { prompt: buildAgentPrompt(summaryInput), cwd: target.gitRoot, timeoutMs: 90000 });
+    return output.trim().length === 0 ? undefined : cleanAgentOutput(output);
+  } catch {
+    return undefined;
+  }
 }
 
 function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: ProviderSettings): PullRequestDetails | undefined {
@@ -581,7 +565,7 @@ function suppliedPullRequestDetails(target: RemoteReviewTarget, provider: Provid
   };
 }
 
-export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined) {
+export function createRemotePullRequestSources(pi: CommandRunner, ctx: Pick<HostContext, "models">, target: RemoteReviewTarget | undefined) {
   if (target?.pullRequest == null) return {};
   const provider = providerForTarget(target);
   const pr = target.pullRequest;
@@ -608,7 +592,7 @@ export function createRemotePullRequestSources(pi: ExtensionAPI, ctx: ExtensionC
   return { contextPanelSource: createRemotePullRequestSummarySource(pi, ctx, target, reader), repliesSource: createRemoteReviewRepliesSource(pi, ctx, target, reader) };
 }
 
-export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: ExtensionContext, target: RemoteReviewTarget | undefined, reader?: ReturnType<typeof createConversationReader>): ReviewContextPanelSource | undefined {
+export function createRemotePullRequestSummarySource(pi: CommandRunner, ctx: Pick<HostContext, "models">, target: RemoteReviewTarget | undefined, reader?: ReturnType<typeof createConversationReader>): ReviewContextPanelSource | undefined {
   if (target?.pullRequest == null) return undefined;
   const provider = providerForTarget(target);
   let requestToken = 0;
@@ -649,7 +633,7 @@ export function createRemotePullRequestSummarySource(pi: ExtensionAPI, ctx: Exte
         if (supplied == null || metadata != null) onUpdate?.(facts, metadata);
         const explanation = supplied != null && target.handoff?.summary != null
           ? Promise.resolve(target.handoff.summary)
-          : summarizeWithAgent(pi, ctx, target, formatSummaryInput(target, details, provider));
+          : summarizeWithAgent(ctx.models, target, formatSummaryInput(target, details, provider));
         void explanation.then((text) => {
           const clean = text == null ? "" : cleanAgentOutput(text);
           if (isCurrent() && clean.length > 0) onUpdate?.(`Generated explanation (optional):\n${clean}\n\n${facts}`, metadata);

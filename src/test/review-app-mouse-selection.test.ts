@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createStorySnapshot, validateDiffStory } from "../diff-story/plan.js";
+import { configureRuntime, resetRuntime } from "../host/runtime.js";
 import type { ReviewSourceLocation } from "../source-links.js";
 import { setSelectedLineTarget } from "../state.js";
 import type { ReviewFile, ReviewFileContents } from "../types.js";
@@ -11,21 +12,19 @@ import { ReviewApp } from "../ui/review-app.js";
 import { stripTerminalSequences } from "../ui/mouse-selection.js";
 
 const clipboard = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => undefined) }));
-vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@earendil-works/pi-coding-agent")>()),
-  copyToClipboard: clipboard.copy,
-}));
 
 const originalPreferencesPath = process.env.PI_CODER_PREFERENCES_PATH;
 let preferencesDir: string;
 
 beforeEach(() => {
   clipboard.copy.mockClear();
+  configureRuntime({ copyText: clipboard.copy });
   preferencesDir = mkdtempSync(join(tmpdir(), "pi-coder-mouse-selection-"));
   process.env.PI_CODER_PREFERENCES_PATH = join(preferencesDir, "preferences.json");
 });
 
 afterEach(() => {
+  resetRuntime();
   if (originalPreferencesPath == null) delete process.env.PI_CODER_PREFERENCES_PATH;
   else process.env.PI_CODER_PREFERENCES_PATH = originalPreferencesPath;
   rmSync(preferencesDir, { recursive: true, force: true });
@@ -317,12 +316,14 @@ describe("ReviewApp mouse selection in diffs", () => {
       },
     });
     try {
+      expect(app.render(120).join("\n")).toContain("Steps");
       const tests = locate(app, "expectReuse");
       selectWithTerminalInput(app, tests, right(tests, "expectReuse()".length - 1));
       await vi.waitFor(() => expect(clipboard.copy).toHaveBeenLastCalledWith("expectReuse()"));
       expect(app.render(120).join("\n")).toContain("Copied 13 characters.");
 
-      selectWithTerminalInput(app, locate(app, "reuse()"), right(tests, 4));
+      const implementation = locate(app, "reuse()");
+      selectWithTerminalInput(app, right(implementation, "reuse()".length - 1), right(tests, 4));
       await vi.waitFor(() => expect(clipboard.copy).toHaveBeenLastCalledWith("reuse()"));
     } finally {
       app.dispose();

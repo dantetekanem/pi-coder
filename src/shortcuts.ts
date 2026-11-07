@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
+import { getAgentDir } from "./host/runtime.js";
 import type { CommentIntent } from "./types.js";
 
 export type ShortcutSide = "added" | "deleted" | "both";

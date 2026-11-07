@@ -52,6 +52,7 @@ describe("review preferences", () => {
       showPullRequestThreads: true,
       lastReviewVerdict: null,
       storyAgent: DEFAULT_STORY_AGENT,
+      storySidebar: true,
       paneVisibility: {
         navigator: false,
         diff: true,
@@ -91,6 +92,15 @@ describe("review preferences", () => {
     saveReviewPreference({ storyAgent: selection });
 
     expect(loadReviewPreferences().storyAgent).toEqual(selection);
+  });
+
+  it("shows the story sidebar until it is turned off, and keeps that choice", async () => {
+    expect(loadReviewPreferences().storySidebar).toBe(true);
+    saveReviewPreference({ storySidebar: false });
+    expect(loadReviewPreferences().storySidebar).toBe(false);
+
+    await writeFile(process.env.PI_CODER_PREFERENCES_PATH!, JSON.stringify({ storySidebar: "no" }), "utf8");
+    expect(loadReviewPreferences().storySidebar).toBe(true);
   });
 
   it("falls back to the story agent default for invalid persisted selection values", async () => {

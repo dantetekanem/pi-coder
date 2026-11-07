@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { generateDiffStory } from "../diff-story/generate.js";
-import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, type StoryFile } from "../diff-story/plan.js";
+import { completeDiffStory, createStorySnapshot, uncoveredStoryChanges, validateDiffStory, validateSavedDiffStory, type StoryFile } from "../diff-story/plan.js";
 import { restoreStoryNavigation, storyAnchors, storyPages } from "../diff-story/navigation.js";
-import { prepareStoryUnits } from "../diff-story/units.js";
+import { pairStoryTests, prepareStoryUnits, splitStoryTests, STORY_TEST_FILE_LINES, type StoryUnit } from "../diff-story/units.js";
 
 function file(path: string, before: string, after: string): StoryFile {
   return {
@@ -274,6 +274,98 @@ end
     expect(completeDiffStory(completed, captured)).toEqual(completed);
   });
 
+  describe("task-sized steps", () => {
+    const unitOf = (id: string, path: string, lines: number): StoryUnit => ({
+      id, path, symbol: id, test: true, code: "",
+      anchors: [{ fileId: path, side: "added", startLine: 1, endLine: lines }],
+    });
+    const cases = (count: number, prefix = "case") => Array.from({ length: count }, (_, index) =>
+      `it('${prefix} ${index}', () => {\n${Array.from({ length: 10 }, (_, line) => `  expect(charge(${line})).toBe(${line});`).join("\n")}\n});\n`).join("");
+    const billing = "export function charge(amount: number) {\n  return amount;\n}\n";
+    const arranged = (files: StoryFile[]) => {
+      const captured = createStorySnapshot(files);
+      return generateDiffStory(captured, async () => '{"order":[],"pairs":[]}', new AbortController().signal, () => {}).then((story) => ({ captured, story }));
+    };
+    const places = (anchors: ReadonlyArray<{ fileId: string; side: string; startLine: number; endLine: number }>) =>
+      anchors.map((anchor) => `${anchor.fileId}:${anchor.side}:${anchor.startLine}-${anchor.endLine}`);
+
+    it("splits whole tests greedily in source order, per file", () => {
+      expect(STORY_TEST_FILE_LINES).toBe(30);
+      expect(splitStoryTests([], 30)).toEqual([[]]);
+      const long = unitOf("a", "a.test.ts", 45);
+      expect(splitStoryTests([long], 30)).toEqual([[long]]);
+
+      const a1 = unitOf("a1", "a.test.ts", 15);
+      const a2 = unitOf("a2", "a.test.ts", 15);
+      const a3 = unitOf("a3", "a.test.ts", 1);
+      expect(splitStoryTests([a1, a2], 30)).toEqual([[a1, a2]]);
+      expect(splitStoryTests([a1, a2, a3], 30)).toEqual([[a1, a2], [a3]]);
+      const helper = { ...unitOf("h", "a.test.ts", 20), helper: true };
+      expect(splitStoryTests([a1, a2, helper, a3], 30)).toEqual([[a1, a2, helper], [a3]]);
+
+      const b1 = unitOf("b1", "b.test.ts", 20);
+      const a4 = unitOf("a4", "a.test.ts", 20);
+      const a5 = unitOf("a5", "a.test.ts", 20);
+      expect(splitStoryTests([a4, b1, a5], 30).map((chunk) => chunk.map((unit) => unit.id))).toEqual([["a4", "b1"], ["a5"]]);
+      expect(splitStoryTests([a4, b1, unitOf("b2", "b.test.ts", 9)], 30).map((chunk) => chunk.map((unit) => unit.id))).toEqual([["a4", "b1", "b2"]]);
+    });
+
+    it("splits a long test file into steps that repeat the implementation", async () => {
+      const { captured, story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(3)),
+      ]);
+
+      expect(story.steps.map((step) => step.id)).toEqual(["u1", "u1~2"]);
+      expect(story.steps.map((step) => step.title)).toEqual(["lib/billing.ts \u00b7 charge \u00b7 tests 1/2", "lib/billing.ts \u00b7 charge \u00b7 tests 2/2"]);
+      expect(story.steps[1]!.implementation).toEqual(story.steps[0]!.implementation);
+      expect(story.steps.map((step) => step.tests.length)).toEqual([2, 1]);
+      const [first, second] = story.steps.map((step) => places(step.tests));
+      expect(first!.filter((place) => second!.includes(place))).toEqual([]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+      expect(completeDiffStory(story, captured)).toEqual(story);
+      expect(() => validateSavedDiffStory(JSON.parse(JSON.stringify(story)), captured)).not.toThrow();
+
+      const navigation = restoreStoryNavigation(story);
+      const pages = [0, 1].map((step) => storyPages({ ...navigation, step }, "implementation").map((page) => page.key));
+      expect(pages[1]).toEqual(pages[0]);
+    });
+
+    it("keeps short tests in one step", async () => {
+      const { captured, story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(2)),
+      ]);
+
+      expect(story.steps.map((step) => [step.id, step.title, step.tests.length])).toEqual([["u1", "lib/billing.ts \u00b7 charge", 2]]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+    });
+
+    it("counts each test file on its own and keeps several short files with their change", async () => {
+      const { story } = await arranged([
+        file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+        file("test/billing.test.ts", "", cases(2)),
+        file("test/billing_refund.test.ts", "", cases(2, "refund")),
+      ]);
+
+      expect(story.steps).toHaveLength(1);
+      expect(story.steps[0]!.tests.map((anchor) => anchor.fileId)).toEqual(["test/billing.test.ts", "test/billing.test.ts", "test/billing_refund.test.ts", "test/billing_refund.test.ts"]);
+    });
+
+    it("splits a long unpaired test file with the same limit", async () => {
+      const { captured, story } = await arranged([file("test/misc.test.ts", "", cases(4))]);
+
+      expect(story.steps.map((step) => [step.id, step.title])).toEqual([
+        ["u1", "test/misc.test.ts \u00b7 case 0 and 1 more \u00b7 tests 1/2"],
+        ["u1~2", "test/misc.test.ts \u00b7 case 2 and 1 more \u00b7 tests 2/2"],
+      ]);
+      expect(story.steps.map((step) => step.tests)).toEqual([[], []]);
+      expect(story.steps.map((step) => step.implementation.length)).toEqual([2, 2]);
+      expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+      expect(completeDiffStory(story, captured)).toEqual(story);
+    });
+  });
+
   it("prepares 4,000 changed lines with complete coverage and a compact response", async () => {
     const captured = createStorySnapshot(Array.from({ length: 40 }, (_, index) => file(
       `src/part${index}.ts`, "", Array.from({ length: 20 }, (_, method) =>
@@ -290,5 +382,185 @@ end
     expect(uncoveredStoryChanges(story, captured)).toEqual([]);
     expect(generate).toHaveBeenCalledOnce();
     expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("test helpers", () => {
+  const rendering = [
+    "test \"shows the price in the merchant money format\" do",
+    "  assert_equal \"$12.00\", card_price_text",
+    "end",
+    "",
+    "test \"shows the price as today without a money format\" do",
+    "  assert_equal \"12.00 USD\", card_price_text",
+    "end",
+    "",
+    "private",
+    "",
+    "def card_price_text",
+    "  storefront.prepare_messages(products: [\"shirt\"]).first",
+    "end",
+    "",
+  ].join("\n");
+  const changed = (path: string, name: string) => file(path, `def ${name}\n  0\nend\n`, `def ${name}\n  1\nend\n`);
+  const captured = () => createStorySnapshot([
+    changed("lib/storefront.rb", "prepare_messages"),
+    changed("lib/money_format.rb", "format"),
+    changed("lib/catalog.rb", "products"),
+    file("test/storefront/rendering_test.rb", "", rendering),
+  ]);
+  const steps = (story: { steps: Array<{ title: string; tests: Array<{ unitId?: string; side: string }> }> }) =>
+    story.steps.map((step) => [step.title, [...new Set(step.tests.filter((anchor) => anchor.side === "added").map((anchor) => anchor.unitId))]]);
+
+  it("pairs real tests through the helper they call, ignoring test names and key labels, and puts the helper after them", async () => {
+    const units = prepareStoryUnits(captured());
+    expect(units.filter((unit) => unit.test).map((unit) => [unit.id, unit.symbol, unit.helper])).toEqual([
+      ["u4", "shows the price in the merchant money format", false],
+      ["u5", "shows the price as today without a money format", false],
+      ["u6", "card_price_text", true],
+    ]);
+    expect([...pairStoryTests(units)]).toEqual([["u4", "u1"], ["u5", "u1"]]);
+
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      const context = payload(prompt);
+      expect(context.units[3]).toMatchObject({ symbol: "shows the price in the merchant money format", references: ["u1"] });
+      expect(context.units[5]).toMatchObject({ symbol: "card_price_text", helper: true });
+      expect(context.units[3]).not.toHaveProperty("helper");
+      return '{"order":[],"pairs":[]}';
+    });
+    const story = await generateDiffStory(captured(), generate, new AbortController().signal, () => {});
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(steps(story)).toEqual([
+      ["lib/storefront.rb \u00b7 prepare_messages", ["u4", "u5", "u6"]],
+      ["lib/money_format.rb \u00b7 format", []],
+      ["lib/catalog.rb \u00b7 products", []],
+    ]);
+  });
+
+  it("ignores a model pair for a helper, which follows the first test that calls it", async () => {
+    const story = await generateDiffStory(captured(), async () => '{"order":[],"pairs":[["u2","u4"],["u3","u6"]]}', new AbortController().signal, () => {});
+
+    expect(steps(story)).toEqual([
+      ["lib/storefront.rb \u00b7 prepare_messages", ["u5"]],
+      ["lib/money_format.rb \u00b7 format", ["u4", "u6"]],
+      ["lib/catalog.rb \u00b7 products", []],
+    ]);
+  });
+
+  it("pairs a test with the changed file named like its file before a name match elsewhere, and counts def test_ as a test", () => {
+    const units = prepareStoryUnits(createStorySnapshot([
+      changed("app/tools/update_cart.rb", "build_product"),
+      changed("app/services/localization.rb", "call"),
+      file("test/tools/update_cart_test.rb", "", "def test_call_attaches_the_product\n  assert tool.call(lines: [])\nend\n"),
+    ]));
+
+    expect(units[2]).toMatchObject({ symbol: "test_call_attaches_the_product", test: true, helper: false });
+    expect([...pairStoryTests(units)]).toEqual([["u3", "u1"]]);
+  });
+});
+
+describe("story notes", () => {
+  const arrange = (captured: ReturnType<typeof snapshot>, output: unknown) =>
+    generateDiffStory(captured, async () => JSON.stringify(output), new AbortController().signal, () => {}, { notes: true });
+
+  it("sends each unit's changed lines and puts the agent's titles, notes and summary on the steps", async () => {
+    const captured = snapshot();
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      expect(prompt).toContain("Add two fields to the JSON");
+      const context = payload(prompt);
+      expect(context.units[0].changes).toBe("-   return 0;\n+   return 1;");
+      expect(context.units[2].changes).toBe("-   expect(parse()).toBe(0);\n+   expect(parse()).toBe(1);");
+      return JSON.stringify({
+        order: ["u2", "u1"],
+        pairs: [],
+        summary: "Both helpers return one.",
+        notes: {
+          u1: { title: "Return one from parse", text: "parse returns 1 now." },
+          u2: { title: "Return one from print", text: "print follows parse.\nIts test checks the new value." },
+        },
+      });
+    });
+
+    const story = await generateDiffStory(captured, generate, new AbortController().signal, () => {}, { notes: true });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.summary).toBe("Both helpers return one.");
+    expect(story.steps.map((step) => [step.title, step.explanation])).toEqual([
+      ["Return one from print", "print follows parse. Its test checks the new value."],
+      ["Return one from parse", "parse returns 1 now."],
+    ]);
+    expect(uncoveredStoryChanges(story, captured)).toEqual([]);
+  });
+
+  it("sends no changed lines and asks for no notes when notes are off", async () => {
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      expect(prompt).not.toContain("Add two fields to the JSON");
+      expect(payload(prompt).units.some((unit: object) => "changes" in unit)).toBe(false);
+      return '{"order":[],"pairs":[]}';
+    });
+
+    const story = await generateDiffStory(snapshot(), generate, new AbortController().signal, () => {});
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(story.summary).toBe("");
+    expect(story.steps.map((step) => step.explanation)).toEqual(["", ""]);
+  });
+
+  it("keeps the host title when a note is missing or malformed, and strips control characters", async () => {
+    const story = await arrange(snapshot(), {
+      order: [],
+      pairs: [],
+      summary: 42,
+      notes: { u1: "parse", u2: { title: "Print\u001b[31m one\u202e\n", text: 7 } },
+    });
+
+    expect(story.summary).toBe("");
+    expect(story.steps.map((step) => [step.title, step.explanation])).toEqual([
+      ["src/parser.ts \u00b7 parse", ""],
+      ["Print [31m one", ""],
+    ]);
+  });
+
+  it("finds a test file's note on any of its tests and repeats a note on split steps", async () => {
+    const billing = "export function charge(amount: number) {\n  return amount;\n}\n";
+    const cases = Array.from({ length: 3 }, (_, index) =>
+      `it('case ${index}', () => {\n${Array.from({ length: 10 }, (_, line) => `  expect(charge(${line})).toBe(${line});`).join("\n")}\n});\n`).join("");
+    const captured = createStorySnapshot([
+      file("lib/billing.ts", billing, billing.replace("return amount;", "return amount + 1;")),
+      file("test/billing.test.ts", "", cases),
+      file("test/misc.test.ts", "", "it('first', () => {\n  expect(1).toBe(1);\n});\nit('second', () => {\n  expect(2).toBe(2);\n});\n"),
+    ]);
+
+    const story = await arrange(captured, {
+      order: [],
+      pairs: [],
+      notes: {
+        u1: { title: "Add one to every charge", text: "charge adds one." },
+        u6: { title: "Check the basics", text: "Two sanity tests." },
+      },
+    });
+
+    expect(story.steps.map((step) => [step.id, step.title, step.explanation])).toEqual([
+      ["u1", "Add one to every charge \u00b7 tests 1/2", "charge adds one."],
+      ["u1~2", "Add one to every charge \u00b7 tests 2/2", "charge adds one."],
+      ["u5", "Check the basics", "Two sanity tests."],
+    ]);
+  });
+
+  it("cuts a long unit's changed lines short", async () => {
+    const body = Array.from({ length: 100 }, (_, index) => `  const v${index} = ${index};`).join("\n");
+    const captured = createStorySnapshot([file("src/big.ts", "", `export function big() {\n${body}\n}\n`)]);
+    const generate = vi.fn(async (_system: string, prompt: string) => {
+      const changes = payload(prompt).units[0].changes.split("\n");
+      expect(changes).toHaveLength(61);
+      expect(changes[0]).toBe("+ export function big() {");
+      expect(changes.at(-1)).toBe("\u2026 42 more changed lines");
+      return '{"order":[],"pairs":[]}';
+    });
+
+    await generateDiffStory(captured, generate, new AbortController().signal, () => {}, { notes: true });
+
+    expect(generate).toHaveBeenCalledOnce();
   });
 });
