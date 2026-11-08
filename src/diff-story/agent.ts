@@ -12,10 +12,10 @@ export function createStoryAgentGenerator(
     signal.throwIfAborted();
     onActivity({ kind: "status", text: "Arranging prepared code and test units" });
     try {
-      return await models.streamStory(selection, {
-        system, prompt, signal,
-        onText: (text) => onActivity({ kind: "text", id: "order", text }),
-      });
+      // The reply is a JSON object. Forwarding each delta would stream that raw
+      // payload into the loading view, so the request reports progress by state
+      // instead of by text and the parsed result is what reaches the caller.
+      return await models.streamStory(selection, { system, prompt, signal });
     } catch (error) {
       if (!signal.aborted) onActivity({ kind: "error", text: error instanceof Error ? error.message : String(error) });
       throw error;

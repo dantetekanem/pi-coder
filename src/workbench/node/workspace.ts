@@ -8,7 +8,9 @@ import { buildHermeticGitInvocation, type HermeticGitInvocation } from "./git-pr
 import { createChildTermination, DEFAULT_TERMINATION_GRACE_MS, isChildClosureError, utf8Prefix } from "./process-termination.js";
 import { createNodeFileAccess } from "./repository.js";
 
-export const DEFAULT_MAX_READ_BYTES = 256 * 1024;
+// Large enough for real source files in this repository: the biggest tracked
+// TypeScript file is ~315 KB, so the old 256 KB cap refused to open it.
+export const DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024;
 const GIT_LIST_TIMEOUT_MS = 5_000;
 const GIT_LIST_MAX_BUFFER = 16 * 1024 * 1024;
 const STDERR_CAP = 8 * 1024;

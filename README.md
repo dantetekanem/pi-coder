@@ -5,7 +5,9 @@
 - `/diff` and its `/review` alias review local changes, commits, branches, ranges, and configured remote pull requests.
 - `/code` browses and edits a workspace without leaving Pi.
 - `/diff-story` arranges a change as ordered code steps with linked implementation and test diffs.
-- The `pi-coder` command opens all three in any terminal, and hands the result to any agent: Claude Code, Codex, another agent tool, or a plain shell. See [Use it outside Pi](#use-it-outside-pi).
+- Experimental in 0.9.9: the `pi-coder` command opens all three in any terminal, and hands the result to any agent: Claude Code, Codex, another agent tool, or a plain shell. See [Use it outside Pi](#use-it-outside-pi).
+
+> **0.9.9 status.** Everything Pi loads — the three commands above, the footer summary, and the skills — is supported. The standalone command, the agent-tool surface, and the MCP server ship for testing only; they are not supported behavior yet and will be reworked before 1.0.
 
 Inside Pi, it also keeps a compact repository summary in Pi's footer so you can see the current file count, additions, and deletions between reviews. New, untracked files count individually and contribute their text additions. If Git cannot return complete counts, incomplete line totals are omitted rather than shown as exact.
 
@@ -267,6 +269,8 @@ Agents can use the same interfaces through:
 - `submit_pr_review` — submit a confirmed configured-provider review.
 
 ## Use it outside Pi
+
+> **Experimental in 0.9.9.** These surfaces ship for testing and may change before 1.0. The Pi extension does not depend on them.
 
 The `pi-coder` command runs the same review, diff story, and workbench in a terminal:
 

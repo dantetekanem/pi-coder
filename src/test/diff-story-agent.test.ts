@@ -26,7 +26,7 @@ async function* response(reason = "stop") {
 }
 
 describe("single-request story arrangement", () => {
-  it("sends precomputed units once, preserves exact effort, and streams only public output", async () => {
+  it("sends precomputed units once, preserves exact effort, and keeps raw output out of the activity feed", async () => {
     const provider = vi.fn((_model: unknown, _context: {
       systemPrompt?: string; tools?: unknown[];
       messages: Array<{ role: string; content: string; toolsAdded?: unknown[] }>;
@@ -43,7 +43,9 @@ describe("single-request story arrangement", () => {
     expect(user?.content).toContain('"id":"u1"');
     expect(user?.content).toContain('"references":[]');
     expect(provider.mock.calls[0]![2]).toMatchObject({ apiKey: "test-secret", reasoning: "low" });
-    expect(activities).toContainEqual({ kind: "text", id: "order", text: '{"order":[],"pairs":[]}' });
+    expect(activities).toContainEqual({ kind: "status", text: "Arranging prepared code and test units" });
+    expect(activities.filter((activity) => activity.kind === "text")).toEqual([]);
+    expect(JSON.stringify(activities)).not.toContain("{\"order\"");
     expect(JSON.stringify(activities)).not.toMatch(/private reasoning|test-secret/);
     expect(uncoveredStoryChanges(story, snapshot)).toEqual([]);
   });
