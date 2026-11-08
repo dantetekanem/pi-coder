@@ -1,18 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.9.9 - 2026-11-07
 
-### Added
+### Experimental
 
-- Configure how a pull request review fetches from a provider with an optional `fetch` block in its settings. `progress` passes `--progress` to `git fetch`, `timeoutSeconds` limits each attempt, and `retry` fetches again after a doubling delay when the git error contains a listed text, such as a busy server's request to retry later. Without the block, each fetch sequence makes one quiet attempt with a 60-second timeout, as before. An existing fallback can start a separate sequence.
-
-### Fixed
-
-- Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL and `origin` has no extra remote-specific settings. Keep direct clone fallback for distinct paths and transport overrides such as `remote.origin.proxy`.
-
-## 1.0.0 - 2026-11-04
-
-### Added
+The standalone command, MCP server, and agent-tool surfaces ship here for testing only. They are not part of the supported 0.9.9 behavior and may change before 1.0. Expect them to be reworked.
 
 - Run pi-coder without Pi. The `pi-coder` command opens the same review, diff story, and code workbench in any terminal: `pi-coder diff`, `pi-coder story`, and `pi-coder code` take the same targets as `/diff`, `/diff-story`, and `/code`. It shares settings, drafts, and submissions with the Pi extension, so a review parked in one resumes in the other.
 - Hand feedback to any agent. When a review ends, the command prints the text Pi gives its agent: review feedback, DISCUSS notes, or a code discussion. `--json` prints one result object with the prompt, the tool details, follow-up messages, and notices.
@@ -21,6 +13,10 @@
 - `pi-coder mcp` serves the four tools over MCP, plus `pi_coder_wait`, for Claude Code, Codex, and other MCP clients.
 - Configure model commands for the grammar pass, the story agent, and reply analysis outside Pi with `models` in `pi-coder-settings.json`. Without one, pi-coder runs `pi -p` when Pi is installed.
 - A `pi-coder` skill tells agents in other harnesses how to open reviews, read feedback, continue a discussion, and submit a review.
+
+### Added
+
+- Configure how a pull request review fetches from a provider with an optional `fetch` block in its settings. `progress` passes `--progress` to `git fetch`, `timeoutSeconds` limits each attempt, and `retry` fetches again after a doubling delay when the git error contains a listed text, such as a busy server's request to retry later. Without the block, each fetch sequence makes one quiet attempt with a 60-second timeout, as before. An existing fallback can start a separate sequence.
 - `Ctrl+?` opens a popup with every shortcut, in the review and in the diff story. `?` and `Ctrl+/` also open it, for terminals that send `Ctrl+?` as Backspace.
 - In a diff story, `Option+Up/Down` scrolls the other pane without moving focus, `Option+PgUp/PgDn` pages it, and `Option+Shift+Up/Down` or `Option+Home/End` jump it to its top or bottom. `Home`/`End` jump the focused pane, in the review too.
 - In a diff story, `i` opens the story info in a popup: the step, the pull request, totals, captured files, and every step.
@@ -37,6 +33,7 @@
 
 ### Fixed
 
+- Stop a pinned review from fetching a second time from `urls.clone` after `origin` fails when both are the same URL and `origin` has no extra remote-specific settings. Keep direct clone fallback for distinct paths and transport overrides such as `remote.origin.proxy`.
 - A diff story no longer pairs a helper method from a test file, such as a private method the tests call, with code as if it were a test. A helper follows the first test that calls it, and a split never leaves a helper on its own. A test pairs through the helpers it calls, quoted strings such as test names no longer count as code references, and a changed file named like the test file wins over name matches in other files.
 
 ## 0.9.8 - 2026-11-04
