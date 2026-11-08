@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.10 - 2026-11-08
+
+### Fixed
+
+- Declare Pi's host-provided packages as wildcard peer dependencies. Move Pi TUI and TypeBox out of runtime dependencies to resolve the extension warning about duplicate runtime modules, keeping them as development dependencies for local tooling.
+
 ## 0.9.9 - 2026-11-07
 
 ### Experimental

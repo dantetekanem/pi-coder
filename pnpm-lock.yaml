@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@earendil-works/pi-tui':
-        specifier: '>=0.79.10 <2'
-        version: 0.79.10
       '@pierre/diffs':
         specifier: 1.2.7
         version: 1.2.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -23,9 +20,6 @@ importers:
       shiki:
         specifier: 4.6.0
         version: 4.6.0
-      typebox:
-        specifier: ^1.4.4
-        version: 1.4.4
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: 0.79.10
@@ -33,9 +27,15 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.79.10
         version: 0.79.10(ws@8.21.0)(zod@4.6.7)
+      '@earendil-works/pi-tui':
+        specifier: '>=0.79.10 <2'
+        version: 0.79.10
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4
+      typebox:
+        specifier: ^1.4.4
+        version: 1.4.4
       typescript:
         specifier: 5.9.3
         version: 5.9.3

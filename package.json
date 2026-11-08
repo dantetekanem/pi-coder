@@ -1,6 +1,6 @@
 {
   "name": "pi-coder",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "packageManager": "pnpm@10.28.0",
   "type": "module",
   "description": "Interactive diff review, diff stories, and code workbench for Pi, any agent harness, or a plain terminal, with annotations, pull-request reviews, and agent handoffs.",
@@ -121,16 +121,16 @@
     "workbench:start": "node scripts/start-workbench.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-tui": ">=0.79.10 <2",
     "@pierre/diffs": "1.2.7",
     "highlight.js": "11.12.0",
     "jiti": "2.7.0",
-    "shiki": "4.6.0",
-    "typebox": "^1.4.4"
+    "shiki": "4.6.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.79.10",
-    "@earendil-works/pi-coding-agent": ">=0.79.10"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {
@@ -143,7 +143,9 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "0.79.10",
     "@earendil-works/pi-coding-agent": "0.79.10",
+    "@earendil-works/pi-tui": ">=0.79.10 <2",
     "@types/node": "24.12.4",
+    "typebox": "^1.4.4",
     "typescript": "5.9.3",
     "vite": "7.3.7",
     "vitest": "4.1.12"
