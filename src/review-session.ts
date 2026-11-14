@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "./host/runtime.js";
 import type { PersistedDiffViewMode } from "./preferences.js";
+import { hasRetainedReviewCompositions } from "./review-composition.js";
 import { ReviewSessionLockedError, withReviewSessionLock, writeReviewSessionFileAtomic as writeFileAtomic, type ReviewSessionLockInfo } from "./review-session-persistence.js";
 import { applyResolvedSeedComments, resolveSeedComments, type SeedReviewComment } from "./seed-comments.js";
 import type { DiffReviewComment, ReviewFile, ReviewFileComparison, ReviewScope, ReviewState } from "./types.js";
@@ -382,6 +383,9 @@ export type ReviewSessionDeleteResult =
   | { id: string; deleted: true; status: "deleted"; generation: number; indexUpdated: boolean }
   | ({ id: string; deleted: false } & ReviewSessionWriteFailure);
 
+export type ReviewSessionRetirementResult = ReviewSessionDeleteResult
+  | { id: string; deleted: false; status: "retained" };
+
 type ReviewSessionSaveContext = ReviewSessionContext | string;
 
 function normalizeSaveContext(context: ReviewSessionSaveContext): ReviewSessionContext {
@@ -482,13 +486,34 @@ export function deleteReviewSession(
     return withReviewSessionLock(getSessionsDir(), (): ReviewSessionDeleteResult => {
       const conflict = compareGeneration(readStoredSession(identity, id), expectedGeneration ?? null);
       if (conflict != null) return { id, deleted: false, ...conflict };
-      const generation = (expectedGeneration ?? 0) + 1;
-      writeTombstone(identity, id, generation);
-      let indexUpdated = false;
-      try {
-        indexUpdated = updateIndex((entries) => entries.filter((entry) => entry.id !== id)).indexUpdated;
-      } catch { /* The terminal snapshot still prevents resurrection. */ }
-      return { id, deleted: true, status: "deleted", generation, indexUpdated };
+      return commitReviewSessionDeletion(identity, id, (expectedGeneration ?? 0) + 1);
+    });
+  } catch (error) {
+    return { id, deleted: false, ...writeFailure(error) };
+  }
+}
+
+/** Caller holds the snapshot mutex and has checked the expected generation. */
+function commitReviewSessionDeletion(identity: string, id: string, generation: number): Extract<ReviewSessionDeleteResult, { deleted: true }> {
+  writeTombstone(identity, id, generation);
+  let indexUpdated = false;
+  try {
+    indexUpdated = updateIndex((entries) => entries.filter((entry) => entry.id !== id)).indexUpdated;
+  } catch { /* The terminal snapshot still prevents resurrection. */ }
+  return { id, deleted: true, status: "deleted", generation, indexUpdated };
+}
+
+/** Automatic completion must observe independent editor writes under their shared mutex. */
+export function retireReviewSession(identity: string, id: string, expectedGeneration: number | undefined): ReviewSessionRetirementResult {
+  try {
+    if (expectedGeneration != null && !isGeneration(expectedGeneration)) throw new Error("Invalid expected review generation");
+    return withReviewSessionLock(getSessionsDir(), (): ReviewSessionRetirementResult => {
+      const conflict = compareGeneration(readStoredSession(identity, id), expectedGeneration ?? null);
+      if (conflict != null) return { id, deleted: false, ...conflict };
+      if (hasRetainedReviewCompositions(join(getSessionsDir(), "compositions"), identity, id)) {
+        return { id, deleted: false, status: "retained" };
+      }
+      return commitReviewSessionDeletion(identity, id, (expectedGeneration ?? 0) + 1);
     });
   } catch (error) {
     return { id, deleted: false, ...writeFailure(error) };

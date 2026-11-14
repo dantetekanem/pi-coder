@@ -1,4 +1,4 @@
-import { deleteReviewSession, loadReviewSession, saveReviewSessionWithStatus, type ReviewSessionData } from "./review-session.js";
+import { retireReviewSession, loadReviewSession, saveReviewSessionWithStatus, type ReviewSessionData } from "./review-session.js";
 import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionAttempt } from "./review-submission-journal.js";
 
 export type SubmissionDraftConsumption = {
@@ -59,21 +59,29 @@ export function consumeConfirmedSubmissionDraft(attempt: SubmissionAttempt): Sub
 
     // Retain the prior checkpoint until its projected snapshot is committed, including on retries.
     // A terminal deletion needs the current fingerprint, not an empty snapshot that will never exist.
-    if (capturedSource) {
+    let checkpoint = attempt;
+    const checkpointSource = (fingerprint: string): SubmissionDraftConsumption | undefined => {
+      if (!capturedSource) return undefined;
       try {
-        createSubmissionJournal().update(attempt.id, attempt.generation, attempt.steps, terminal ? currentFingerprint : submissionDraftSourceFingerprint(attempt.input, retained));
+        checkpoint = createSubmissionJournal().update(checkpoint.id, checkpoint.generation, checkpoint.steps, fingerprint);
       } catch (error) {
         return { status: "failed", remainingItems: remainingBefore, message: `Draft consumption checkpoint failed; the draft was retained: ${error instanceof Error ? error.message : String(error)}` };
       }
-    }
+    };
+    const checkpointFailure = checkpointSource(terminal ? currentFingerprint : submissionDraftSourceFingerprint(attempt.input, retained));
+    if (checkpointFailure != null) return checkpointFailure;
     if (terminal) {
-      const result = deleteReviewSession(binding.identity, binding.sessionId, session.generation);
-      if (!result.deleted) return {
+      const result = retireReviewSession(binding.identity, binding.sessionId, session.generation);
+      if (result.deleted) return { status: "saved", remainingItems: 0, ...(result.indexUpdated ? {} : { message: "Draft deletion committed, but the local session index could not be updated." }) };
+      if (result.status !== "retained") return {
         status: result.status === "conflict" || result.status === "locked" ? "retained" : "failed",
         remainingItems: remainingBefore,
         message: `Draft delete failed (${result.status}); the saved draft was retained.${result.status === "error" ? ` ${result.message}` : ""}`,
       };
-      return { status: "saved", remainingItems: 0, ...(result.indexUpdated ? {} : { message: "Draft deletion committed, but the local session index could not be updated." }) };
+      if (!changed) return { status: "retained", remainingItems };
+      // Recovery keeps the parent active, so checkpoint the projected empty snapshot before saving it.
+      const retainedCheckpointFailure = checkpointSource(submissionDraftSourceFingerprint(attempt.input, retained));
+      if (retainedCheckpointFailure != null) return retainedCheckpointFailure;
     }
     const result = saveReviewSessionWithStatus(binding.identity, { ...session, state: { ...session.state, draft: retained } }, {
       id: binding.sessionId, expectedGeneration: session.generation, revision: session.revision,

@@ -16,7 +16,7 @@ import { createReviewSourceLinks, type ReviewSourceLinks } from "./source-links.
 import { buildReviewOrderSignals, countHandoffThreads } from "./review-order.js";
 import { listReviewCompositions, removeReviewComposition, saveReviewComposition } from "./review-composition.js";
 import { reviewGrammar, type GrammarReviewResult, type GrammarTextChange, type ReviewTextSet } from "./review-grammar.js";
-import { buildReviewFileSignatures, createReviewInstanceId, createReviewSessionId, deleteReviewSession, hasReviewSessionIdentity, listReviewSessions, loadReviewSession, rebaseReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
+import { buildReviewFileSignatures, createReviewInstanceId, createReviewSessionId, deleteReviewSession, hasReviewSessionIdentity, listReviewSessions, loadReviewSession, rebaseReviewSession, retireReviewSession, saveReviewSessionWithStatus, type ReviewSessionData, type ReviewSessionIndexEntry, type ReviewSessionMeta } from "./review-session.js";
 import { formatPullRequestContext, resolveRemoteReviewTarget, type RemoteDiscussContinuation, type RemoteReviewTarget } from "./remote.js";
 import { buildProviderComments, buildReviewBody, composeSubmissionRecovery, prepareSubmissionHandoff, submitPullRequestReview, type ReviewInlineComment, type ReviewVerdict, type SubmitReviewInput, type SubmitReviewOptions, type SubmitReviewResult } from "./review-submit.js";
 import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionDraftBinding } from "./review-submission-journal.js";
@@ -932,9 +932,10 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
           return false;
         }
       };
-      const deleteSession = (): string | undefined => {
-        const deletion = deleteReviewSession(storageIdentity, sessionId, expectedGeneration ?? undefined);
-        if (deletion.deleted) return undefined;
+      const deleteSession = (mode: "discard" | "retire" = "discard"): string | undefined => {
+        const removeSession = mode === "retire" ? retireReviewSession : deleteReviewSession;
+        const deletion = removeSession(storageIdentity, sessionId, expectedGeneration ?? undefined);
+        if (deletion.deleted || deletion.status === "retained") return undefined;
         const message = `Review was not discarded (${deletion.status}); the saved snapshot was retained.`;
         ctx.ui.notify(message, "warning");
         return message;
@@ -944,7 +945,7 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
         failureItemLabel = "submitted items",
       ): { remainingItems: number; message?: string } => {
         const currentSession = latestSession ?? loadReviewSession(storageIdentity, sessionId);
-        if (currentSession == null) return { remainingItems: 0, message: deleteSession() };
+        if (currentSession == null) return { remainingItems: 0, message: deleteSession("retire") };
         const retainedSession = consumeDraftItems(currentSession, consumption);
         const remainingItems = countDraftItems(retainedSession);
         if (!saveSession(retainedSession)) {
@@ -956,7 +957,7 @@ export function createPiCoderEngine(pi: HostApi, options: PiCoderEngineOptions =
         latestSessionDurable = true;
         if (remainingItems === 0) {
           const hasLocalHistory = retainedSession.story != null || (retainedSession.discussions?.length ?? 0) > 0;
-          return { remainingItems, message: hasLocalHistory ? undefined : deleteSession() };
+          return { remainingItems, message: hasLocalHistory ? undefined : deleteSession("retire") };
         }
         const message = `${remainingItems} unresolved draft ${remainingItems === 1 ? "item remains" : "items remain"} saved in review session ${sessionId}.`;
         ctx.ui.notify(message, "warning");

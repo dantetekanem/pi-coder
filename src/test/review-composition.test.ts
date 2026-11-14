@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialReviewState } from "../state.js";
-import { createReviewInstanceId, deleteReviewSession, listReviewSessions, loadReviewSession, saveReviewSession, saveReviewSessionWithStatus, type ReviewSessionData } from "../review-session.js";
+import * as persistence from "../review-session-persistence.js";
+import { createReviewInstanceId, deleteReviewSession, retireReviewSession, listReviewSessions, loadReviewSession, saveReviewSession, saveReviewSessionWithStatus, type ReviewSessionData } from "../review-session.js";
 import { listReviewCompositions, removeReviewComposition, saveReviewComposition, COMPOSITION_MAX_BYTES, COMPOSITION_MAX_RECORDS, COMPOSITION_STORE_MAX_BYTES, COMPOSITION_TTL_MS } from "../review-composition.js";
 import type { ReviewComposition } from "../types.js";
 import { ReviewApp } from "../ui/review-app.js";
@@ -27,6 +28,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   if (originalDirectory == null) delete process.env.PI_CODER_SESSIONS_DIR;
   else process.env.PI_CODER_SESSIONS_DIR = originalDirectory;
   rmSync(directory, { recursive: true, force: true });
@@ -79,6 +81,35 @@ describe("independent editor compositions", () => {
     expect(() => saveReviewComposition(identity, sessionId, { ...saved, text: "stale writer" })).toThrow(/active review/i);
     expect(listReviewCompositions(identity, sessionId)).toEqual([]);
     expect(listReviewSessions()).toEqual([]);
+  });
+
+  it("sees a composition writer that commits immediately before retirement acquires the mutex", () => {
+    const saved = composition();
+    const lock = persistence.withReviewSessionLock;
+    vi.spyOn(persistence, "withReviewSessionLock").mockImplementationOnce((path, operation) => {
+      saveReviewComposition(identity, sessionId, saved);
+      return lock(path, operation);
+    });
+    expect(retireReviewSession(identity, sessionId, 1)).toMatchObject({ deleted: false, status: "retained" });
+    expect(loadReviewSession(identity, sessionId)?.generation).toBe(1);
+    expect(listReviewCompositions(identity, sessionId)).toEqual([expect.objectContaining(saved)]);
+  });
+
+  it.each(["unknown.tmp", "unknown.json"])("retains a parent when recovery includes unknown data in %s", (name) => {
+    mkdirSync(join(directory, "compositions"));
+    writeFileSync(join(directory, "compositions", name), "unknown recovery bytes");
+    expect(retireReviewSession(identity, sessionId, 1)).toMatchObject({ deleted: false, status: "retained" });
+    expect(listReviewSessions().map((item) => item.id)).toContain(sessionId);
+    expect(readFileSync(join(directory, "compositions", name), "utf8")).toBe("unknown recovery bytes");
+  });
+
+  it("retires a parent with no recovery without hiding another parent's copies", () => {
+    const otherId = "other", saved = composition();
+    saveReviewSession(identity, session, { id: otherId, revision: "worktree" });
+    saveReviewComposition(identity, otherId, saved);
+    expect(retireReviewSession(identity, sessionId, 1)).toMatchObject({ deleted: true });
+    expect(listReviewSessions().map((item) => item.id)).toEqual([otherId]);
+    expect(listReviewCompositions(identity, otherId)).toEqual([expect.objectContaining(saved)]);
   });
 
   it("shares the store mutex and leaves all text unchanged on contention", () => {
