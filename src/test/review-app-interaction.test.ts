@@ -9,6 +9,7 @@ import { edgeToEdgeOverlayOptions } from "../ui/full-screen-overlay.js";
 import { hashTargetSlice } from "../workbench/target.js";
 import * as piRender from "../pi-render.js";
 import { getSelectedLineTarget } from "../state.js";
+import type { ReviewSessionData } from "../review-session.js";
 
 const STATUS_CELL_BOUND = 96;
 const STATUS_BYTE_BOUND = 256;
@@ -110,6 +111,120 @@ function createHarness(
 }
 
 describe("ReviewApp interaction", () => {
+  it.each([
+    ["file", "e", "alpha.ts"],
+    ["file", "\r", "alpha.ts"],
+    ["all-lines", "e", "alpha.ts"],
+    ["all-lines", "\r", "alpha.ts"],
+    ["line", "e", "alpha.ts"],
+    ["line", "\r", "alpha.ts"],
+    ["file", "e", ".ts"],
+  ] as const)("edits the selected global %s comment with %j under navigator search %j", async (target, key, query) => {
+    const alpha = makeFile("alpha.ts");
+    const beta = makeFile("beta.ts");
+    const contents = { originalContent: "", modifiedContent: "one\ntwo\nthree\nfour\n" };
+    const onSessionChange = vi.fn<(data: ReviewSessionData) => void>();
+    const { app, loadFileContents } = createHarness(contents, [alpha, beta], { onSessionChange });
+    try {
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      const comments: DiffReviewComment[] = [alpha, beta].map((file, index) => {
+        const range = { startLine: index * 2 + 1, endLine: index * 2 + 2 };
+        return {
+          id: file.path,
+          fileId: file.id,
+          scope: "git-diff",
+          intent: "comment",
+          body: `Original ${file.path}`,
+          ...(target === "line"
+            ? {
+                side: "added",
+                ...range,
+                captureHash: hashTargetSlice(contents.modifiedContent, range),
+                anchorStatus: "mapped",
+              }
+            : { side: "file", fileTarget: target, startLine: null, endLine: null }),
+        };
+      });
+      (app as any).state.draft.comments = comments;
+      (app as any).commentsGlobal = true;
+      const originalAlpha = JSON.stringify(comments[0]);
+      app.handleInput("/");
+      app.handleInput(query);
+      app.handleInput("\r");
+      expect((app as any).state.activeFileId).toBe(alpha.id);
+      expect((app as any).getNavigatorFiles().map((file: ReviewFile) => file.id))
+        .toEqual(query === "alpha.ts" ? [alpha.id] : [alpha.id, beta.id]);
+      (app as any).state.focus = "comments";
+      app.handleInput("j");
+      expect((app as any).state.selectedCommentIndex).toBe(1);
+
+      app.handleInput(key);
+
+      expect((app as any).editTarget).toMatchObject({
+        kind: target === "line" ? "line" : "file",
+        fileId: beta.id,
+        scope: "git-diff",
+        initialBody: "Original beta.ts",
+        ...(target === "line" ? { side: "added", startLine: 3, endLine: 4 } : { fileTarget: target }),
+      });
+      expect((app as any).state.activeFileId).toBe(beta.id);
+      expect((app as any).state.searchQuery).toBe(query === "alpha.ts" ? "" : query);
+      expect((app as any).getNavigatorFiles().map((file: ReviewFile) => file.id)).toContain(beta.id);
+      if (target === "line") {
+        expect(getSelectedLineTarget((app as any).state, beta.id, "git-diff"))
+          .toEqual({ side: "added", line: 4, endLine: 3 });
+      }
+      app.render(120);
+      expect((app as any).state.activeFileId).toBe(beta.id);
+      app.handleInput(" amended");
+      app.handleInput("\r");
+
+      const saved = onSessionChange.mock.lastCall?.[0].state.draft.comments ?? [];
+      expect(saved).toHaveLength(2);
+      expect(JSON.stringify(saved.find((comment) => comment.fileId === alpha.id))).toBe(originalAlpha);
+      expect(saved.find((comment) => comment.fileId === beta.id)).toMatchObject({
+        body: "Original beta.ts amended",
+        ...(target === "line" ? { side: "added", startLine: 3, endLine: 4 } : { side: "file", fileTarget: target }),
+      });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it.each(["missing-file", "different-scope"] as const)("refuses to edit a global comment from a %s", async (reason) => {
+    const alpha = makeFile("alpha.ts");
+    const { app, loadFileContents } = createHarness(undefined, [alpha]);
+    try {
+      await vi.waitFor(() => expect(loadFileContents).toHaveBeenCalled());
+      const comment: DiffReviewComment = {
+        id: "foreign",
+        fileId: reason === "missing-file" ? "missing" : alpha.id,
+        scope: reason === "different-scope" ? "last-commit" : "git-diff",
+        side: "file",
+        intent: "comment",
+        startLine: null,
+        endLine: null,
+        body: "Keep foreign feedback",
+      };
+      (app as any).state.draft.comments = [comment];
+      (app as any).commentsGlobal = true;
+      app.handleInput("/");
+      app.handleInput("alpha.ts");
+      app.handleInput("\r");
+      (app as any).state.focus = "comments";
+      app.handleInput("e");
+      expect((app as any).editTarget).toBeNull();
+      expect((app as any).state).toMatchObject({
+        activeFileId: alpha.id,
+        searchQuery: "alpha.ts",
+        draft: { comments: [comment] },
+      });
+      expect((app as any).message).toContain("different comparison or repository frame");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it.each([
     ["git-diff", "last-commit"],
     ["all-files", "last-commit"],

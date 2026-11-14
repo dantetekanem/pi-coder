@@ -3500,6 +3500,10 @@ export class ReviewApp {
       this.requestRender();
       return;
     }
+    // Global feedback can belong to a file hidden by the navigator search.
+    if (filterFilesBySearch([commentFile], this.state.searchQuery).length === 0) {
+      this.state = setSearchQuery(this.state, this.files, "");
+    }
     this.state = setActiveFileId(this.state, this.files, commentFile.id);
     void this.ensureActiveEntry();
     if (item.comment.side === "file") {
