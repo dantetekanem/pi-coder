@@ -24,8 +24,10 @@ const mocks = vi.hoisted(() => ({
   saveReviewSession: vi.fn(),
   saveReviewSessionWithStatus: vi.fn((..._args: any[]): any => ({ id: "automatic-session", saved: true, generation: 1, indexUpdated: true })),
   deleteReviewSession: vi.fn(),
+  retireReviewSession: vi.fn(),
+  hasRetainedReviewCompositions: vi.fn(),
   listReviewSessions: vi.fn((): any[] => []),
-  listReviewCompositions: vi.fn((): any[] => []),
+  listReviewCompositions: vi.fn((_identity: string, _sessionId: string): any[] => []),
   saveReviewComposition: vi.fn(),
   removeReviewComposition: vi.fn(),
   buildReviewFileSignatures: vi.fn((): Record<string, string> => ({})),
@@ -90,7 +92,8 @@ vi.mock("../remote.js", async (importOriginal) => ({
   resolveRemoteReviewTarget: mocks.resolveRemoteReviewTarget,
 }));
 
-vi.mock("../review-session.js", () => ({
+vi.mock("../review-session.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../review-session.js")>()),
   createReviewSessionId: mocks.createReviewSessionId,
   createReviewInstanceId: mocks.createReviewInstanceId,
   hasReviewSessionIdentity: mocks.hasReviewSessionIdentity,
@@ -98,6 +101,7 @@ vi.mock("../review-session.js", () => ({
   saveReviewSession: mocks.saveReviewSession,
   saveReviewSessionWithStatus: mocks.saveReviewSessionWithStatus,
   deleteReviewSession: mocks.deleteReviewSession,
+  retireReviewSession: mocks.retireReviewSession,
   listReviewSessions: mocks.listReviewSessions,
   buildReviewFileSignatures: mocks.buildReviewFileSignatures,
   rebaseReviewSession: mocks.rebaseReviewSession,
@@ -105,6 +109,7 @@ vi.mock("../review-session.js", () => ({
 
 vi.mock("../review-composition.js", () => ({
   listReviewCompositions: mocks.listReviewCompositions,
+  hasRetainedReviewCompositions: mocks.hasRetainedReviewCompositions,
   saveReviewComposition: mocks.saveReviewComposition,
   removeReviewComposition: mocks.removeReviewComposition,
 }));
@@ -311,6 +316,8 @@ describe("code diff extension", () => {
     mocks.saveReviewSessionWithStatus.mockReset().mockImplementation((_identity, _data, context: any) => ({ id: context.id, saved: true, status: "saved", generation: (context.expectedGeneration ?? 0) + 1, indexUpdated: true }));
     mocks.deleteReviewSession.mockReset().mockReturnValue({ deleted: true, status: "deleted", generation: 1, indexUpdated: true });
     mocks.listReviewSessions.mockReturnValue([]);
+    mocks.retireReviewSession.mockReset().mockReturnValue({ deleted: true, status: "deleted", generation: 1, indexUpdated: true });
+    mocks.hasRetainedReviewCompositions.mockReset().mockReturnValue(false);
     mocks.listReviewCompositions.mockReset().mockReturnValue([]);
     mocks.saveReviewComposition.mockReset();
     mocks.removeReviewComposition.mockReset();
@@ -451,6 +458,46 @@ describe("code diff extension", () => {
     expect(mocks.removeReviewComposition).not.toHaveBeenCalled();
   });
 
+  it("keeps saved recovery accessible after explicit resume skips it and completes local feedback", async () => {
+    const sessions = await vi.importActual<typeof import("../review-session.js")>("../review-session.js");
+    const compositions = await vi.importActual<typeof import("../review-composition.js")>("../review-composition.js");
+    const identity = "/repo|working|worktree|local";
+    const id = sessions.createReviewInstanceId();
+    const draft = reviewSessionData({ allComment: "Deliver committed feedback", allIntent: "comment", comments: [] });
+    sessions.saveReviewSession(identity, draft, { id, revision: "worktree" });
+    const recovery = {
+      id: sessions.createReviewInstanceId(),
+      repoRoot: "/repo",
+      target: { kind: "all" as const, intent: "comment" as const, initialBody: "" },
+      baseBody: "",
+      text: "Keep this unfinished text",
+      cursor: { line: 0, col: 4 },
+    };
+    compositions.saveReviewComposition(identity, id, recovery);
+    mocks.loadReviewSession.mockImplementation(sessions.loadReviewSession);
+    mocks.saveReviewSessionWithStatus.mockImplementation(sessions.saveReviewSessionWithStatus);
+    mocks.deleteReviewSession.mockImplementation(sessions.deleteReviewSession);
+    mocks.retireReviewSession.mockImplementation(sessions.retireReviewSession);
+    mocks.hasRetainedReviewCompositions.mockImplementation(compositions.hasRetainedReviewCompositions);
+    mocks.listReviewCompositions.mockImplementation(compositions.listReviewCompositions);
+    mocks.runReviewApp.mockImplementationOnce(async (_ctx, options) => {
+      expect(options.initialComposition).toBeUndefined();
+      return { type: "submit", ...options.initialSession.state.draft };
+    }).mockResolvedValueOnce({ type: "cancel", disposition: "park" });
+    mocks.composeReviewPrompt.mockReturnValue("Committed feedback delivered");
+    const harness = draftReviewHarness();
+    harness.ctx.ui.select.mockImplementationOnce(async (_title, choices) => choices[choices.length - 1]);
+
+    await harness.open(`--resume ${id}`);
+    expect(sessions.loadReviewSession(identity, id)?.state.draft).toMatchObject({ allComment: "", comments: [] });
+    expect(sessions.listReviewSessions().map((item) => item.id)).toContain(id);
+    expect(compositions.listReviewCompositions(identity, id)).toEqual([expect.objectContaining(recovery)]);
+
+    await harness.open(`--resume ${id}`);
+    expect(mocks.runReviewApp.mock.calls.at(-1)?.[1].initialComposition).toMatchObject(recovery);
+    expect(mocks.removeReviewComposition).not.toHaveBeenCalled();
+  });
+
   it("requires first-snapshot membership before writing composition and coalesces storage errors", async () => {
     const composition = { id: "writer", text: "first unfinished comment" };
     mocks.saveReviewComposition.mockImplementation(() => { throw new Error("capacity reached"); });
@@ -538,7 +585,7 @@ describe("code diff extension", () => {
     mocks.composeReviewPrompt.mockReturnValue("Delivered discussion");
     await draftReviewHarness().open();
     expect(mocks.saveReviewSessionWithStatus.mock.calls.map((call) => call[2].expectedGeneration)).toEqual([null, 1]);
-    expect(mocks.deleteReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "automatic-session", 2);
+    expect(mocks.retireReviewSession).toHaveBeenCalledWith("/repo|working|worktree|local", "automatic-session", 2);
   });
 
   it("reopens a UUID continuation using the recorded target identity and instance", async () => {
@@ -2703,7 +2750,7 @@ describe("code diff extension", () => {
     });
     expect(result.details).toMatchObject({ started: true, prompt: "generated stale prompt" });
     expect(ctx.ui.notify).toHaveBeenCalledWith("1 stale comment will go out as a file comment that names its original lines.", "info");
-    expect(mocks.deleteReviewSession).toHaveBeenCalled();
+    expect(mocks.retireReviewSession).toHaveBeenCalled();
   });
 
   it("does not approve a local review when every draft is on a file that left the review", async () => {
@@ -3210,7 +3257,7 @@ describe("code diff extension", () => {
     await commands.get("diff")!.handler("--cwd ~/Poetry/rpgmenace --include-generated --whole-repo --resume saved-session", ctx);
     await vi.waitFor(() => expect(mocks.getReviewWindowData).toHaveBeenCalledWith(pi, expandedCwd, { includeGenerated: true, wholeRepo: true }));
     expect(mocks.loadReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session");
-    await vi.waitFor(() => expect(mocks.deleteReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session", 2));
+    await vi.waitFor(() => expect(mocks.retireReviewSession).toHaveBeenCalledWith(`${expandedCwd}|working|worktree|local`, "saved-session", 2));
 
     mocks.deleteReviewSession.mockClear();
     const discardCommands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();

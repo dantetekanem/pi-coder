@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as sessions from "../review-session.js";
 import * as persistence from "../review-session-persistence.js";
+import { listReviewCompositions, saveReviewComposition } from "../review-composition.js";
 import { consumeConfirmedSubmissionDraft, hasConsumableConfirmedSubmissionDraft } from "../review-submission-consumption.js";
 import { createSubmissionJournal, submissionDraftSourceFingerprint, submissionFingerprint, type SubmissionAttempt } from "../review-submission-journal.js";
 import type { DiffReviewComment } from "../types.js";
@@ -20,6 +21,18 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
 const comment = (id: string): DiffReviewComment => ({ id, fileId: "src/app.ts", scope: "git-diff", side: "added", startLine: 4, endLine: 4, intent: "comment", body: "Same text", anchorStatus: "mapped", captureHash: { algorithm: "sha256", value: "a".repeat(64) } });
 function current() { return sessions.loadReviewSession(identity, sessionId)!; }
+function saveRecovery() {
+  const recovery = {
+    id: sessions.createReviewInstanceId(),
+    repoRoot: "/repo",
+    target: { kind: "all" as const, intent: "comment" as const, initialBody: "" },
+    baseBody: "",
+    text: "Unfinished review text",
+    cursor: { line: 0, col: 4 },
+  };
+  saveReviewComposition(identity, sessionId, recovery);
+  return recovery;
+}
 function save(data: sessions.ReviewSessionData) {
   const old = current();
   const result = sessions.saveReviewSessionWithStatus(identity, data, { id: sessionId, expectedGeneration: old?.generation, revision: "head", fileSignatures: { "src/app.ts": "original signature" }, meta: { kind: "remote", label: "Review", cwd: "/repo" } });
@@ -46,6 +59,24 @@ describe("confirmed submission draft consumption", () => {
     expect(current()).toBeNull();
     expect(JSON.parse(readFileSync(sessions.getReviewSessionPathForDiagnostics(sessionId), "utf8"))).toMatchObject({ deleted: true, generation: 2 });
     expect(consumeConfirmedSubmissionDraft(createSubmissionJournal().load(attempt.id)!)).toMatchObject({ status: "unavailable" });
+  });
+
+  it("consumes confirmed feedback once while keeping independent editor recovery resumable", () => {
+    const attempt = fixture();
+    const recovery = saveRecovery();
+
+    expect(consumeConfirmedSubmissionDraft(attempt)).toMatchObject({ status: "saved", remainingItems: 0 });
+    expect(current()?.state.draft).toMatchObject({ allComment: "", comments: [] });
+    expect(sessions.listReviewSessions().map((item) => item.id)).toContain(sessionId);
+    expect(listReviewCompositions(identity, sessionId)).toEqual([expect.objectContaining(recovery)]);
+    const saved = current();
+    const journal = createSubmissionJournal();
+    const retry = journal.findForDraft(identity, sessionId, "changed digest", submissionDraftSourceFingerprint(attempt.input, saved.state.draft))!;
+
+    expect(retry?.id).toBe(attempt.id);
+    expect(consumeConfirmedSubmissionDraft(retry)).toMatchObject({ status: "retained", remainingItems: 0 });
+    expect(current()).toEqual(saved);
+    expect(listReviewCompositions(identity, sessionId)).toEqual([expect.objectContaining(recovery)]);
   });
 
   it("consumes accepted feedback without deleting historical discussion records or replaying them on retry", () => {
@@ -190,17 +221,26 @@ describe("confirmed submission draft consumption", () => {
     expect(current()).toEqual(before);
   });
 
-  it.each([false, true])("retries durable accepted evidence after local write failure (partial=%s), covering checkpoint-before-save", (partial) => {
+  it.each([
+    { partial: false, recovery: false },
+    { partial: true, recovery: false },
+    { partial: false, recovery: true },
+  ])("retries durable accepted evidence after local write failure: %j", ({ partial, recovery }) => {
     const attempt = fixture(partial), before = current();
+    const savedRecovery = recovery ? saveRecovery() : undefined;
+    const keepParent = partial || recovery;
     const spy = failAtomic((path) => path === sessions.getReviewSessionPathForDiagnostics(sessionId));
-    expect(consumeConfirmedSubmissionDraft(attempt)).toMatchObject({ status: "failed", message: expect.stringMatching(partial ? /save/i : /delete/i) });
+    expect(consumeConfirmedSubmissionDraft(attempt)).toMatchObject({ status: "failed", message: expect.stringMatching(keepParent ? /save/i : /delete/i) });
     expect(current()).toEqual(before);
     const journal = createSubmissionJournal(), reloaded = journal.load(attempt.id)!;
-    expect(reloaded.generation).toBe(2);
+    expect(reloaded.generation).toBe(recovery ? 3 : 2);
     expect(journal.findForDraft(identity, sessionId, attempt.sourceDigest!)?.id).toBe(attempt.id);
     spy.mockRestore();
     expect(consumeConfirmedSubmissionDraft(reloaded)).toMatchObject({ status: "saved", remainingItems: 0 });
-    expect(partial ? current().state.draft.comments : current()).toEqual(partial ? [] : null);
+    expect(keepParent ? current().state.draft.comments : current()).toEqual(keepParent ? [] : null);
+    if (savedRecovery != null) {
+      expect(listReviewCompositions(identity, sessionId)).toEqual([expect.objectContaining(savedRecovery)]);
+    }
   });
 
   it.each([false, true])("keeps the current partial-source lookup through repeated cleanup failures (discussion remains=%s)", (keepDiscussion) => {

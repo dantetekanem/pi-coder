@@ -100,6 +100,11 @@ export function saveReviewComposition(identity: string, sessionId: string, compo
   });
 }
 
+/** Caller holds the snapshot mutex. Unknown records also prevent automatic parent retirement. */
+export function hasRetainedReviewCompositions(directory: string, identity: string, sessionId: string): boolean {
+  return scan(directory).some(({ value }) => value == null || (value.identity === identity && value.sessionId === sessionId));
+}
+
 export function listReviewCompositions(identity: string, sessionId: string): ReviewComposition[] {
   return withReviewCompositionStore(identity, sessionId, (directory, active) => {
     if (!active) return [];
