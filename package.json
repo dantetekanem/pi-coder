@@ -121,7 +121,7 @@
     "workbench:start": "node scripts/start-workbench.mjs"
   },
   "dependencies": {
-    "@pierre/diffs": "1.2.7",
+    "@pierre/diffs": "1.6.4",
     "highlight.js": "11.12.0",
     "jiti": "2.7.0",
     "shiki": "4.6.0"
