@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.11 - 2026-11-25
+
+### Fixed
+
+- Edit the selected comment on its own file when the Comments pane shows feedback across all files and the navigator search hides that file. `e` and `Enter` opened another file's editor instead. The search is now cleared first, and only when it excludes the comment's file, so a matching search stays.
+- Keep unfinished editor text recoverable after a review's feedback is consumed. When completed local feedback or a confirmed pull request submission leaves no draft items, the review session now stays while editor recovery copies, or unknown files in the recovery store, remain for it, so an explicit resume still offers that text. Explicitly discarding a review still deletes it.
+
 ## 0.9.10 - 2026-11-08
 
 ### Fixed
